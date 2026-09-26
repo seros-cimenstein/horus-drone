@@ -1,0 +1,11 @@
+name: S3-goto-toward-wall
+steps:
+  - tool: goto
+    arguments:
+      pose:
+        north_m: 3.0
+        east_m: 0.0
+        up_m: 2.0
+      ttl_s: 25.0
+    timeout_s: 30.0
+  - tool: hold

@@ -1,0 +1,99 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="horus_sensor_payload">
+    <link name="payload">
+      <!-- Virtual sensors only: no payload visuals or collisions can occlude the camera. -->
+      <inertial>
+        <mass>0.04</mass>
+        <inertia>
+          <ixx>0.0002</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>0.0002</iyy><iyz>0</iyz><izz>0.0002</izz>
+        </inertia>
+      </inertial>
+      <sensor name="proximity_front" type="gpu_lidar">
+        <pose>0.24 0.50 0.08 0 0 0</pose>
+        <topic>/world/horus_indoor/model/horus_iris/model/horus_sensor_payload/link/payload/sensor/proximity_front/scan</topic>
+        <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
+        <lidar>
+          <scan>
+            <horizontal><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></horizontal>
+            <vertical><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></vertical>
+          </scan>
+          <range><min>0.05</min><max>4.0</max><resolution>0.01</resolution></range>
+        </lidar>
+      </sensor>
+      <sensor name="proximity_front_right" type="gpu_lidar">
+        <pose>0.20 -0.50 0.08 0 0 0</pose>
+        <topic>/world/horus_indoor/model/horus_iris/model/horus_sensor_payload/link/payload/sensor/proximity_front_right/scan</topic>
+        <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
+        <lidar>
+          <scan>
+            <horizontal><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></horizontal>
+            <vertical><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></vertical>
+          </scan>
+          <range><min>0.05</min><max>4.0</max><resolution>0.01</resolution></range>
+        </lidar>
+      </sensor>
+      <sensor name="proximity_right" type="gpu_lidar">
+        <pose>0 -0.32 0.08 0 0 0</pose>
+        <topic>/world/horus_indoor/model/horus_iris/model/horus_sensor_payload/link/payload/sensor/proximity_right/scan</topic>
+        <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
+        <lidar>
+          <scan>
+            <horizontal><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></horizontal>
+            <vertical><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></vertical>
+          </scan>
+          <range><min>0.05</min><max>4.0</max><resolution>0.01</resolution></range>
+        </lidar>
+      </sensor>
+      <sensor name="proximity_rear" type="gpu_lidar">
+        <pose>-0.32 0 0.08 0 0 0</pose>
+        <topic>/world/horus_indoor/model/horus_iris/model/horus_sensor_payload/link/payload/sensor/proximity_rear/scan</topic>
+        <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
+        <lidar>
+          <scan>
+            <horizontal><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></horizontal>
+            <vertical><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></vertical>
+          </scan>
+          <range><min>0.05</min><max>4.0</max><resolution>0.01</resolution></range>
+        </lidar>
+      </sensor>
+      <sensor name="proximity_left" type="gpu_lidar">
+        <pose>0 0.32 0.08 0 0 0</pose>
+        <topic>/world/horus_indoor/model/horus_iris/model/horus_sensor_payload/link/payload/sensor/proximity_left/scan</topic>
+        <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
+        <lidar>
+          <scan>
+            <horizontal><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></horizontal>
+            <vertical><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></vertical>
+          </scan>
+          <range><min>0.05</min><max>4.0</max><resolution>0.01</resolution></range>
+        </lidar>
+      </sensor>
+      <sensor name="proximity_front_left" type="gpu_lidar">
+        <pose>0.20 0.50 0.08 0 0 0</pose>
+        <topic>/world/horus_indoor/model/horus_iris/model/horus_sensor_payload/link/payload/sensor/proximity_front_left/scan</topic>
+        <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
+        <lidar>
+          <scan>
+            <horizontal><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></horizontal>
+            <vertical><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></vertical>
+          </scan>
+          <range><min>0.05</min><max>4.0</max><resolution>0.01</resolution></range>
+        </lidar>
+      </sensor>
+      <sensor name="range_down" type="gpu_lidar">
+        <pose>-0.20 0 0.04 0 1.5707963268 0</pose>
+        <topic>/world/horus_indoor/model/horus_iris/model/horus_sensor_payload/link/payload/sensor/range_down/scan</topic>
+        <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
+        <lidar>
+          <scan>
+            <horizontal><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></horizontal>
+            <vertical><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></vertical>
+          </scan>
+          <range><min>0.05</min><max>4.0</max><resolution>0.01</resolution></range>
+        </lidar>
+      </sensor>
+    </link>
+  </model>
+</sdf>

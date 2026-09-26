@@ -1,0 +1,40 @@
+name: short-guided-square
+steps:
+  - tool: take_off
+    arguments:
+      altitude_m: 2.0
+      ttl_s: 30.0
+    timeout_s: 35.0
+  - tool: goto
+    arguments:
+      pose:
+        north_m: 1.0
+        east_m: 0.0
+        up_m: 2.0
+      ttl_s: 30.0
+    timeout_s: 35.0
+  - tool: goto
+    arguments:
+      pose:
+        north_m: 1.0
+        east_m: 1.0
+        up_m: 2.0
+      ttl_s: 30.0
+    timeout_s: 35.0
+  - tool: goto
+    arguments:
+      pose:
+        north_m: 0.0
+        east_m: 1.0
+        up_m: 2.0
+      ttl_s: 30.0
+    timeout_s: 35.0
+  - tool: goto
+    arguments:
+      pose:
+        north_m: 0.0
+        east_m: 0.0
+        up_m: 2.0
+      ttl_s: 30.0
+    timeout_s: 35.0
+  - tool: land

@@ -1,0 +1,8 @@
+name: S6-find-person-in-red-shirt
+# End-to-end commander mission (design S6): the Claude commander drives the drone only through HORUS MCP tools.
+steps:
+  - text: >-
+      Take off to 2 m. Find the person wearing a red shirt using the marked camera frame and candidate table,
+      choosing a tracker ID (not pixel coordinates). If more than one candidate could match, say so and pick
+      only when the visual evidence is clear. Approach that person to 1.5 m, then report their tracker ID, the
+      visual evidence, and their approximate position relative to home. Finally return home and land.

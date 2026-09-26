@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="horus_iris">
+    <include>
+      <uri>model://iris_with_gimbal</uri>
+      <name>iris_with_gimbal</name>
+    </include>
+    <include>
+      <uri>model://horus_sensor_payload</uri>
+      <name>horus_sensor_payload</name>
+    </include>
+    <joint name="sensor_payload_fixed_joint" type="fixed">
+      <parent>iris_with_gimbal::iris_with_standoffs::base_link</parent>
+      <child>horus_sensor_payload::payload</child>
+    </joint>
+  </model>
+</sdf>

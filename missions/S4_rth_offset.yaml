@@ -1,0 +1,49 @@
+name: S4-rth-offset
+# Fly a 2 m square on optical flow, leave home by 2.5 m east at 2 m; the trial script then commands
+# rth and measures the landing error against Gazebo ground truth.
+steps:
+- tool: take_off
+  arguments:
+    altitude_m: 2.0
+    ttl_s: 60.0
+  timeout_s: 70.0
+- tool: goto
+  arguments:
+    pose:
+      north_m: 2.0
+      east_m: 0.0
+      up_m: 2.0
+    ttl_s: 60.0
+  timeout_s: 70.0
+- tool: goto
+  arguments:
+    pose:
+      north_m: 2.0
+      east_m: 2.0
+      up_m: 2.0
+    ttl_s: 60.0
+  timeout_s: 70.0
+- tool: goto
+  arguments:
+    pose:
+      north_m: 0.0
+      east_m: 2.0
+      up_m: 2.0
+    ttl_s: 60.0
+  timeout_s: 70.0
+- tool: goto
+  arguments:
+    pose:
+      north_m: 0.0
+      east_m: 0.0
+      up_m: 2.0
+    ttl_s: 60.0
+  timeout_s: 70.0
+- tool: goto
+  arguments:
+    pose:
+      north_m: 0.0
+      east_m: 2.5
+      up_m: 2.0
+    ttl_s: 60.0
+  timeout_s: 70.0

@@ -1,0 +1,5 @@
+**
+!sim/
+!sim/gui/
+!sim/gui/**
+sim/gui/**/__pycache__/

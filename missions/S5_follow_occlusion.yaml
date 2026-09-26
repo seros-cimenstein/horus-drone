@@ -1,0 +1,31 @@
+name: S5-follow-person-through-occlusion
+driver: ../scripts/move_target.py
+driver_min_duration_s: 30.0
+steps:
+  - tool: take_off
+    arguments:
+      altitude_m: 2.0
+      heading_deg: 0.0  # face the room every run; the heading persists from the previous landing
+      ttl_s: 90.0
+    timeout_s: 95.0
+  - select_candidate:
+      attribute: shirt_colour
+      equals: blue
+      choose: largest
+      store_as: blue_target
+  # Start the target's route now so its corridor-screen occlusion falls inside the follow window.
+  - start_driver: {}
+  - tool: follow
+    arguments:
+      id: "$blue_target.id"
+      ttl_s: 45.0
+    timeout_s: 50.0
+    expect_status: expired
+    continue_on_failure: true
+    store_as: follow_result
+  - assert_reacquired:
+      target: "$blue_target"
+      follow: "$follow_result"
+      min_time_s: 1.0
+      max_time_s: 4.0
+      output_dir: ../runs

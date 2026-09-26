@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "horus-drone"
+version = "0.1.0"
+description = "Safety-first, latency-tolerant autonomous drone supervision core"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+commander = [
+  "mcp>=1.30.0,<2",
+  "PyYAML>=6.0,<7",
+  "httpx>=0.27,<1",
+  "uvicorn>=0.29,<1",
+]
+server = [
+  "mcp>=1.30.0,<2",
+  "PyYAML>=6.0,<7",
+  "httpx>=0.27,<1",
+  "pymavlink>=2.4.41,<3",
+  "uvicorn>=0.29,<1",
+]
+perception = [
+  "numpy>=1.24,<2",
+  "onnxruntime>=1.17,<2",
+]
+
+model-tools = ["onnx>=1.16,<2"]
+opencv-headless = ["opencv-python-headless>=4.8,<4.12"]
+grounding = [
+  "torch>=2.1",
+  "torchvision>=0.16",
+  "transformers>=4.40,<5",
+  "Pillow>=10",
+]
+commander-anthropic = ["anthropic>=0.34,<1"]
+commander-openai = ["openai>=1.30,<3"]
+test = [
+  "pytest>=8,<9",
+  "mcp>=1.30.0,<2",
+  "PyYAML>=6.0,<7",
+  "httpx>=0.27,<1",
+  "uvicorn>=0.29,<1",
+  "numpy>=1.24,<2",
+]
+
+[project.scripts]
+horus = "horus.repl.app:main"
+horus-mcp = "horus.mcp_server.server:main"
+horus-mcp-call = "horus.mcp_server.client:main"
+horus-commander-serve = "horus.commander.server:main"
+horus-gz-bridge = "horus.gz_bridge:main"
+horus-tof-bridge = "horus.tof_bridge.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["horus*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="horus_room_assets">
+    <static>true</static>
+    <link name="assets"/>
+  </model>
+</sdf>

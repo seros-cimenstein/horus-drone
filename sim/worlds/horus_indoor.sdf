@@ -1,0 +1,262 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <world name="horus_indoor">
+    <physics name="1ms" type="ignore"><max_step_size>0.001</max_step_size><real_time_factor>1.0</real_time_factor></physics>
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors"><render_engine>ogre2</render_engine></plugin>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-navsat-system" name="gz::sim::systems::NavSat"/>
+
+    <spherical_coordinates>
+      <latitude_deg>-35.363262</latitude_deg><longitude_deg>149.165237</longitude_deg>
+      <elevation>584</elevation><heading_deg>0</heading_deg><surface_model>EARTH_WGS84</surface_model>
+    </spherical_coordinates>
+    <scene><ambient>0.55 0.55 0.55</ambient><background>0.72 0.76 0.80</background><shadows>true</shadows></scene>
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows><pose>0 0 10 0 0 0</pose>
+      <diffuse>0.85 0.85 0.85 1</diffuse><specular>0.3 0.3 0.3 1</specular>
+      <direction>-0.4 0.2 -0.9</direction>
+    </light>
+    <light type="point" name="ceiling_light_west">
+      <pose>-3.2 0.5 2.4 0 0 0</pose>
+      <diffuse>0.95 0.95 0.95 1</diffuse>
+      <specular>0.15 0.15 0.15 1</specular>
+      <attenuation><range>12</range><constant>0.35</constant><linear>0.025</linear><quadratic>0.002</quadratic></attenuation>
+    </light>
+    <light type="point" name="ceiling_light_center">
+      <pose>0 3.2 2.4 0 0 0</pose>
+      <diffuse>0.95 0.95 0.95 1</diffuse>
+      <specular>0.15 0.15 0.15 1</specular>
+      <attenuation><range>12</range><constant>0.35</constant><linear>0.025</linear><quadratic>0.002</quadratic></attenuation>
+    </light>
+    <light type="point" name="ceiling_light_east">
+      <pose>3.2 -0.5 2.4 0 0 0</pose>
+      <diffuse>0.95 0.95 0.95 1</diffuse>
+      <specular>0.15 0.15 0.15 1</specular>
+      <attenuation><range>12</range><constant>0.35</constant><linear>0.025</linear><quadratic>0.002</quadratic></attenuation>
+    </light>
+
+    <model name="horus_room_structure">
+      <static>true</static>
+      <link name="structure">
+        <collision name="room_floor"><pose>0 0 -0.05 0 0 0</pose><geometry><box><size>10 8 0.10</size></box></geometry></collision>
+        <collision name="corridor_floor"><pose>0 6 -0.05 0 0 0</pose><geometry><box><size>2.8 4 0.10</size></box></geometry></collision>
+        <visual name="room_floor_visual"><pose>0 0 0 0 0 0</pose><geometry><plane><normal>0 0 1</normal><size>10 8</size></plane></geometry><material><ambient>0.65 0.67 0.69 1</ambient><diffuse>0.65 0.67 0.69 1</diffuse></material></visual>
+        <visual name="corridor_floor_visual"><pose>0 6 0 0 0 0</pose><geometry><plane><normal>0 0 1</normal><size>2.8 4</size></plane></geometry><material><ambient>0.65 0.67 0.69 1</ambient><diffuse>0.65 0.67 0.69 1</diffuse></material></visual>
+      <visual name="flow_tile_0_0"><pose>-4.5 -3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_0_1"><pose>-3.5 -3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_0_2"><pose>-2.5 -3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_0_3"><pose>-1.5 -3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_0_4"><pose>-0.5 -3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_0_5"><pose>0.5 -3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_0_6"><pose>1.5 -3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_0_7"><pose>2.5 -3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_0_8"><pose>3.5 -3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_0_9"><pose>4.5 -3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_1_0"><pose>-4.5 -2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_1_1"><pose>-3.5 -2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_1_2"><pose>-2.5 -2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_1_3"><pose>-1.5 -2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_1_4"><pose>-0.5 -2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_1_5"><pose>0.5 -2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_1_6"><pose>1.5 -2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_1_7"><pose>2.5 -2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_1_8"><pose>3.5 -2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_1_9"><pose>4.5 -2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_2_0"><pose>-4.5 -1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_2_1"><pose>-3.5 -1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_2_2"><pose>-2.5 -1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_2_3"><pose>-1.5 -1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_2_4"><pose>-0.5 -1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_2_5"><pose>0.5 -1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_2_6"><pose>1.5 -1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_2_7"><pose>2.5 -1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_2_8"><pose>3.5 -1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_2_9"><pose>4.5 -1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_3_0"><pose>-4.5 -0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_3_1"><pose>-3.5 -0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_3_2"><pose>-2.5 -0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_3_3"><pose>-1.5 -0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_3_4"><pose>-0.5 -0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_3_5"><pose>0.5 -0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_3_6"><pose>1.5 -0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_3_7"><pose>2.5 -0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_3_8"><pose>3.5 -0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_3_9"><pose>4.5 -0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_4_0"><pose>-4.5 0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_4_1"><pose>-3.5 0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_4_2"><pose>-2.5 0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_4_3"><pose>-1.5 0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_4_4"><pose>-0.5 0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_4_5"><pose>0.5 0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_4_6"><pose>1.5 0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_4_7"><pose>2.5 0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_4_8"><pose>3.5 0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_4_9"><pose>4.5 0.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_5_0"><pose>-4.5 1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_5_1"><pose>-3.5 1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_5_2"><pose>-2.5 1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_5_3"><pose>-1.5 1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_5_4"><pose>-0.5 1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_5_5"><pose>0.5 1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_5_6"><pose>1.5 1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_5_7"><pose>2.5 1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_5_8"><pose>3.5 1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_5_9"><pose>4.5 1.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_6_0"><pose>-4.5 2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_6_1"><pose>-3.5 2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_6_2"><pose>-2.5 2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_6_3"><pose>-1.5 2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_6_4"><pose>-0.5 2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_6_5"><pose>0.5 2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_6_6"><pose>1.5 2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_6_7"><pose>2.5 2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_6_8"><pose>3.5 2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_6_9"><pose>4.5 2.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_7_0"><pose>-4.5 3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_7_1"><pose>-3.5 3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_7_2"><pose>-2.5 3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_7_3"><pose>-1.5 3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_7_4"><pose>-0.5 3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_7_5"><pose>0.5 3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_7_6"><pose>1.5 3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_7_7"><pose>2.5 3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="flow_tile_7_8"><pose>3.5 3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="flow_tile_7_9"><pose>4.5 3.5 0.004 0 0 0</pose><geometry><box><size>0.98 0.98 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="corridor_tile_0_0"><pose>-0.9 4.5 0.004 0 0 0</pose><geometry><box><size>0.88 0.88 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="corridor_tile_0_1"><pose>0.0 4.5 0.004 0 0 0</pose><geometry><box><size>0.88 0.88 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="corridor_tile_0_2"><pose>0.9 4.5 0.004 0 0 0</pose><geometry><box><size>0.88 0.88 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="corridor_tile_1_0"><pose>-0.9 5.5 0.004 0 0 0</pose><geometry><box><size>0.88 0.88 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="corridor_tile_1_1"><pose>0.0 5.5 0.004 0 0 0</pose><geometry><box><size>0.88 0.88 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="corridor_tile_1_2"><pose>0.9 5.5 0.004 0 0 0</pose><geometry><box><size>0.88 0.88 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="corridor_tile_2_0"><pose>-0.9 6.5 0.004 0 0 0</pose><geometry><box><size>0.88 0.88 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="corridor_tile_2_1"><pose>0.0 6.5 0.004 0 0 0</pose><geometry><box><size>0.88 0.88 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="corridor_tile_2_2"><pose>0.9 6.5 0.004 0 0 0</pose><geometry><box><size>0.88 0.88 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="corridor_tile_3_0"><pose>-0.9 7.5 0.004 0 0 0</pose><geometry><box><size>0.88 0.88 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <visual name="corridor_tile_3_1"><pose>0.0 7.5 0.004 0 0 0</pose><geometry><box><size>0.88 0.88 0.006</size></box></geometry><material><ambient>0.72 0.78 0.80 1</ambient><diffuse>0.72 0.78 0.80 1</diffuse></material></visual>
+      <visual name="corridor_tile_3_2"><pose>0.9 7.5 0.004 0 0 0</pose><geometry><box><size>0.88 0.88 0.006</size></box></geometry><material><ambient>0.19 0.26 0.31 1</ambient><diffuse>0.19 0.26 0.31 1</diffuse></material></visual>
+      <collision name="west_collision"><pose>-5.0 0.0 1.25 0 0 0</pose><geometry><box><size>0.2 8.0 2.5</size></box></geometry></collision>
+      <visual name="west_visual"><pose>-5.0 0.0 1.25 0 0 0</pose><geometry><box><size>0.2 8.0 2.5</size></box></geometry><material><ambient>0.69 0.72 0.75 1</ambient><diffuse>0.69 0.72 0.75 1</diffuse></material></visual>
+      <collision name="east_collision"><pose>5.0 0.0 1.25 0 0 0</pose><geometry><box><size>0.2 8.0 2.5</size></box></geometry></collision>
+      <visual name="east_visual"><pose>5.0 0.0 1.25 0 0 0</pose><geometry><box><size>0.2 8.0 2.5</size></box></geometry><material><ambient>0.69 0.72 0.75 1</ambient><diffuse>0.69 0.72 0.75 1</diffuse></material></visual>
+      <collision name="south_collision"><pose>0.0 -4.0 1.25 0 0 0</pose><geometry><box><size>10.0 0.2 2.5</size></box></geometry></collision>
+      <visual name="south_visual"><pose>0.0 -4.0 1.25 0 0 0</pose><geometry><box><size>10.0 0.2 2.5</size></box></geometry><material><ambient>0.69 0.72 0.75 1</ambient><diffuse>0.69 0.72 0.75 1</diffuse></material></visual>
+      <collision name="north_west_collision"><pose>-3.2 4.0 1.25 0 0 0</pose><geometry><box><size>3.6 0.2 2.5</size></box></geometry></collision>
+      <visual name="north_west_visual"><pose>-3.2 4.0 1.25 0 0 0</pose><geometry><box><size>3.6 0.2 2.5</size></box></geometry><material><ambient>0.69 0.72 0.75 1</ambient><diffuse>0.69 0.72 0.75 1</diffuse></material></visual>
+      <collision name="north_east_collision"><pose>3.2 4.0 1.25 0 0 0</pose><geometry><box><size>3.6 0.2 2.5</size></box></geometry></collision>
+      <visual name="north_east_visual"><pose>3.2 4.0 1.25 0 0 0</pose><geometry><box><size>3.6 0.2 2.5</size></box></geometry><material><ambient>0.69 0.72 0.75 1</ambient><diffuse>0.69 0.72 0.75 1</diffuse></material></visual>
+      <collision name="corridor_west_collision"><pose>-1.4 6.0 1.25 0 0 0</pose><geometry><box><size>0.2 4.0 2.5</size></box></geometry></collision>
+      <visual name="corridor_west_visual"><pose>-1.4 6.0 1.25 0 0 0</pose><geometry><box><size>0.2 4.0 2.5</size></box></geometry><material><ambient>0.69 0.72 0.75 1</ambient><diffuse>0.69 0.72 0.75 1</diffuse></material></visual>
+      <collision name="corridor_east_collision"><pose>1.4 6.0 1.25 0 0 0</pose><geometry><box><size>0.2 4.0 2.5</size></box></geometry></collision>
+      <visual name="corridor_east_visual"><pose>1.4 6.0 1.25 0 0 0</pose><geometry><box><size>0.2 4.0 2.5</size></box></geometry><material><ambient>0.69 0.72 0.75 1</ambient><diffuse>0.69 0.72 0.75 1</diffuse></material></visual>
+      <collision name="corridor_end_collision"><pose>0.0 8.0 1.25 0 0 0</pose><geometry><box><size>2.8 0.2 2.5</size></box></geometry></collision>
+      <visual name="corridor_end_visual"><pose>0.0 8.0 1.25 0 0 0</pose><geometry><box><size>2.8 0.2 2.5</size></box></geometry><material><ambient>0.69 0.72 0.75 1</ambient><diffuse>0.69 0.72 0.75 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="home_apriltag_pad">
+      <static>true</static><pose>0 0 0 0 0 0</pose>
+      <link name="pad">
+        <collision name="pad_collision"><pose>0 0 0.01 0 0 0</pose><geometry><box><size>0.95 0.95 0.02</size></box></geometry></collision>
+        <visual name="pad_white"><pose>0 0 0.021 0 0 0</pose><geometry><box><size>0.95 0.95 0.002</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
+        <!-- tag36h11 id 0 built from geometry (0.72 m incl. quiet zone); cells from materials/textures/tag36h11_id0.png. -->
+        <visual name="tag_cell_0"><pose>-0.252 0.252 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_1"><pose>-0.180 0.252 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_2"><pose>-0.108 0.252 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_3"><pose>-0.036 0.252 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_4"><pose>0.036 0.252 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_5"><pose>0.108 0.252 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_6"><pose>0.180 0.252 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_7"><pose>0.252 0.252 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_8"><pose>-0.252 0.180 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_9"><pose>-0.036 0.180 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_10"><pose>0.108 0.180 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_11"><pose>0.252 0.180 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_12"><pose>-0.252 0.108 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_13"><pose>-0.180 0.108 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_14"><pose>0.108 0.108 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_15"><pose>0.252 0.108 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_16"><pose>-0.252 0.036 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_17"><pose>-0.180 0.036 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_18"><pose>0.036 0.036 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_19"><pose>0.108 0.036 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_20"><pose>0.180 0.036 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_21"><pose>0.252 0.036 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_22"><pose>-0.252 -0.036 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_23"><pose>-0.108 -0.036 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_24"><pose>0.036 -0.036 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_25"><pose>0.108 -0.036 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_26"><pose>0.180 -0.036 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_27"><pose>0.252 -0.036 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_28"><pose>-0.252 -0.108 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_29"><pose>-0.180 -0.108 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_30"><pose>-0.036 -0.108 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_31"><pose>0.180 -0.108 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_32"><pose>0.252 -0.108 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_33"><pose>-0.252 -0.180 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_34"><pose>-0.180 -0.180 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_35"><pose>-0.108 -0.180 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_36"><pose>-0.036 -0.180 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_37"><pose>0.108 -0.180 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_38"><pose>0.180 -0.180 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_39"><pose>0.252 -0.180 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_40"><pose>-0.252 -0.252 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_41"><pose>-0.180 -0.252 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_42"><pose>-0.108 -0.252 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_43"><pose>-0.036 -0.252 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_44"><pose>0.036 -0.252 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_45"><pose>0.108 -0.252 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_46"><pose>0.180 -0.252 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+        <visual name="tag_cell_47"><pose>0.252 -0.252 0.0225 0 0 0</pose><geometry><box><size>0.072 0.072 0.001</size></box></geometry><material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse><specular>0 0 0 1</specular></material></visual>
+      </link>
+    </model>
+
+    <model name="table_occluder">
+      <static>true</static><pose>2.1 2.1 0.42 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.3 0.9 0.84</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>1.3 0.9 0.84</size></box></geometry>
+          <material><ambient>0.42 0.24 0.12 1</ambient><diffuse>0.42 0.24 0.12 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="sofa_occluder">
+      <static>true</static><pose>-2.8 -2.2 0.48 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.8 0.75 0.96</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>1.8 0.75 0.96</size></box></geometry>
+          <material><ambient>0.32 0.18 0.16 1</ambient><diffuse>0.32 0.18 0.16 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="cabinet_occluder">
+      <static>true</static><pose>3.9 -2.7 0.85 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.65 1.4 1.7</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.65 1.4 1.7</size></box></geometry>
+          <material><ambient>0.46 0.48 0.50 1</ambient><diffuse>0.46 0.48 0.50 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="corridor_screen">
+      <!-- Across the corridor so a person crossing behind it is fully hidden from a follower to the south. -->
+      <static>true</static><pose>0 5.3 1.0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.6 0.14 2.0</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>1.6 0.14 2.0</size></box></geometry>
+          <material><ambient>0.63 0.66 0.69 1</ambient><diffuse>0.63 0.66 0.69 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <include><uri>model://person_red</uri><name>person_red</name><pose>0.65 2.3 0 0 0 -1.5707963</pose></include>
+    <include><uri>model://person_blue</uri><name>person_blue</name><pose>-1.8 3.0 0 0 0 -1.5707963</pose></include>
+    <include><uri>model://person_green</uri><name>person_green</name><pose>-3.5 0.2 0 0 0 0</pose></include>
+    <include><uri>model://person_laying</uri><name>person_laying</name><pose>2.4 -2.2 0 0 0 0.4</pose></include>
+
+    <!-- The wrapper nests upstream iris_with_gimbal unchanged and fixes the local sensor payload inside model scope. -->
+    <include><uri>model://horus_iris</uri><name>horus_iris</name><pose>0 0 0.195 0 0 1.5707963268</pose></include>
+  </world>
+</sdf>

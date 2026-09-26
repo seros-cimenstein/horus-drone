@@ -1,0 +1,12 @@
+/models/
+.venv-host/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+/runs/
+.venv/
+.ruff_cache/
+/sim/run/
+/sim/logs/*
+!/sim/logs/koko_bringup.md
