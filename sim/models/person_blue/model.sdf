@@ -41,27 +41,14 @@
                     </mesh>
                 </geometry>
             </collision>
+            <!-- Own DAE copy so the mesh loads this model's blue tshirt02_texture.png. -->
             <visual name="visual">
                 <pose>0 0 0.02 0.04 0 0</pose>
                 <geometry>
                     <mesh>
-                        <uri>model://person_standing/meshes/standing.dae</uri>
+                        <uri>model://person_blue/meshes/standing.dae</uri>
                     </mesh>
                 </geometry>
-            </visual>
-            <!-- This visual-only wrap avoids relying on Gazebo overrides for the DAE's submesh materials. -->
-            <visual name="shirt_color_overlay">
-                <pose>0 -0.01 1.28 0 0 0</pose>
-                <geometry>
-                    <cylinder>
-                        <radius>0.20</radius>
-                        <length>0.5</length>
-                    </cylinder>
-                </geometry>
-                <material>
-                    <ambient>0.04 0.11 0.95 1</ambient>
-                    <diffuse>0.04 0.11 0.95 1</diffuse>
-                </material>
             </visual>
         </link>
     </model>
