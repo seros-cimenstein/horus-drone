@@ -81,9 +81,14 @@ to override its tag (`HORUS_SIM_IMAGE` remains the headless image setting).
 The image installs the `HorusCommander` gz-gui8 plugin under
 `/opt/horus-gui/lib`, exports `GZ_GUI_PLUGIN_PATH`, and installs the layout at
 `$HORUS_GUI_CONFIG` (`/opt/horus-gui/horus_demo.config`). The layout contains
-the scene, WorldControl, CameraTracking, two ImageDisplay panels (the raw
-indoor camera and `/horus/som_image`), and the commander task/event/status
-panel.
+the scene, WorldStats (sim time and real-time factor), CameraTracking, three
+ImageDisplay panels (the raw indoor camera, the live perception view on
+`/horus/perception/live`, and Claude's last set-of-mark view on
+`/horus/som_image`), and the commander task/event/status panel. WorldControl is
+omitted on purpose: its Space shortcut pauses the world whenever the 3D view has
+focus, and a paused world freezes lockstep SITL, the MAVLink heartbeat and the
+camera. Resume an accidentally paused world with
+`gz service -s /world/horus_indoor/control --reqtype gz.msgs.WorldControl --reptype gz.msgs.Boolean --timeout 3000 --req 'pause: false'`.
 
 `./sim/run.sh start --gui horus_indoor.sdf` selects the overlay and launches
 `gz sim -g --gui-config /horus/sim/gui/horus_demo.config` beside the server in
@@ -122,10 +127,16 @@ a separate `HORUS_COMMANDER_TOKEN`. The server invokes the host's authenticated
 Claude Code CLI; it does not require an LLM API key. In the host-networked
 simulation container, run `horus-gz-bridge` with the same
 `HORUS_COMMANDER_TOKEN` and the MCP URL/token. The bridge forwards `/horus/task`
-to the host, mirrors commander/MCP SSE events to `/horus/events`, and publishes
-`get_state` results to `/horus/state` at 2 Hz. The MCP server publishes the
-set-of-mark image returned by `get_frame` / `list_candidates` on
-`/horus/som_image`.
+to the host, renders commander SSE events on `/horus/events` as readable lines
+(task, Claude text, `→` tool calls, `←`/`✗` results, final answer; per-token
+deltas are omitted), and publishes `get_state` results to `/horus/state` at
+2 Hz. The MCP server publishes the set-of-mark image returned by `get_frame` /
+`list_candidates` on `/horus/som_image`, and every processed perception frame on
+`/horus/perception/live`: tracked boxes with tracker ID, detector class and
+confidence, shirt-colour attribute, shaded ignore regions, and a footer with
+median detector and tracker/ReID milliseconds, processed fps, and detection
+counts. The same throughput figures appear under `perception.processing` in
+`get_state` and as a `perception … fps` INFO line in the MCP log every 10 s.
 
 For example, with the container MCP server already running, start the host
 commander:

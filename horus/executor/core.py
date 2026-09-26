@@ -183,6 +183,22 @@ def _inset_polygon(polygon: tuple[_Point, ...], margin_m: float) -> tuple[_Point
     return result
 
 
+def flight_envelope(settings: ExecutorSettings) -> dict[str, Any]:
+    """Operator-facing limits: inset geofence (polygon NED or radius), altitude, speed, leg length."""
+    envelope: dict[str, Any] = {
+        "altitude_m": [settings.min_altitude_m, settings.max_altitude_m],
+        "max_speed_m_s": settings.max_speed_m_s,
+        "max_vertical_speed_m_s": settings.max_vertical_speed_m_s,
+        "max_distance_m": settings.max_distance_m,
+    }
+    if settings.geofence_polygon_ned is None:
+        envelope["geofence_radius_m"] = settings.geofence_radius_m
+    else:
+        inset = _inset_polygon(settings.geofence_polygon_ned, settings.geofence_margin_m)
+        envelope["geofence_polygon_ned"] = [[round(north, 3), round(east, 3)] for north, east in inset]
+    return envelope
+
+
 def _nearest_polygon_point(point: _Point, polygon: tuple[_Point, ...]) -> _Point:
     if _point_in_polygon(point, polygon):
         return point

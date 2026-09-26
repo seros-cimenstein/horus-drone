@@ -95,6 +95,7 @@ def test_fastmcp_registers_tools_and_serves_state_while_camera_blocks():
             "set_target_profile",
             "set_mode",
             "get_task_status",
+            "wait_for_task",
             "cancel",
         }
 
@@ -453,3 +454,44 @@ def test_mcp_box_point_obeys_compensation_config_and_per_call_override():
         _call_tool(disabled, "point", {**point_args, "compensate": True})
     )
     assert overridden["candidate"]["id"] == 3
+
+
+def test_get_map_reports_the_enforced_inset_geofence_and_altitude_envelope():
+    from horus.config import ExecutorSettings
+
+    settings = ExecutorSettings(
+        max_altitude_m=2.2,
+        geofence_polygon_ned=((-4.0, -5.0), (-4.0, 5.0), (4.0, 5.0), (4.0, -5.0)),
+        geofence_margin_m=1.2,
+    )
+    mcp = create_mcp(HorusConfig(executor=settings), _Executor(), _Flight(), None)
+
+    envelope = json.loads(_call_tool(mcp, "get_map"))["flight_envelope"]
+
+    assert {tuple(vertex) for vertex in envelope["geofence_polygon_ned"]} == {
+        (-2.8, -3.8), (-2.8, 3.8), (2.8, 3.8), (2.8, -3.8)
+    }
+    assert envelope["altitude_m"] == [settings.min_altitude_m, 2.2]
+
+
+def test_wait_for_task_returns_at_terminal_status_or_reports_timeout():
+    class Executor(_Executor):
+        def __init__(self, statuses):
+            super().__init__()
+            self.statuses = list(statuses)
+
+        def get_task_status(self, task_id):
+            status = self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+            return {"task_id": task_id, "status": status}
+
+    finishing = create_mcp(HorusConfig(), Executor(["running", "running", "succeeded"]), _Flight(), None)
+    started = time.monotonic()
+    done = json.loads(_call_tool(finishing, "wait_for_task", {"task_id": "t1", "timeout_s": 30}))
+    assert done["status"] == "succeeded" and done["timed_out"] is False
+    assert time.monotonic() - started < 5.0
+
+    # A timeout below the 1 s floor is raised to it; a still-running task reports timed_out.
+    running = create_mcp(HorusConfig(), Executor(["running"]), _Flight(), None)
+    waiting = json.loads(_call_tool(running, "wait_for_task", {"task_id": "t2", "timeout_s": 0.01}))
+    assert waiting["status"] == "running" and waiting["timed_out"] is True
+    assert waiting["waited_s"] >= 1.0
