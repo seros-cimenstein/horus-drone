@@ -102,13 +102,53 @@ def compact_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def compact_sse_data(event: SSEEvent) -> str:
-    """Return the event data as compact JSON, preserving non-JSON data safely."""
+_PANEL_TEXT_LIMIT = 400
+_HIDDEN_EVENT_KINDS = frozenset({"assistant_delta", "mcp_init", "claude_code_finished"})
+
+
+def _clip(text: Any, limit: int = _PANEL_TEXT_LIMIT) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
+def format_commander_event(event: SSEEvent) -> str | None:
+    """Render one commander SSE event as a readable panel line, or ``None`` to skip it.
+
+    Per-token ``assistant_delta`` records are dropped; the complete ``assistant_text``
+    blocks carry the same text.
+    """
     try:
         value = json.loads(event.data)
     except json.JSONDecodeError:
-        value = event.data
-    return compact_json(value)
+        return _clip(event.data)
+    if not isinstance(value, Mapping):
+        return _clip(compact_json(value))
+    kind = value.get("kind")
+    if kind in _HIDDEN_EVENT_KINDS:
+        return None
+    if kind == "task_accepted":
+        return f"▶ Task: {_clip(value.get('text', ''))}"
+    if kind == "claude_code_started":
+        return "Claude Code started"
+    if kind == "assistant_text":
+        return f"Claude: {_clip(value.get('text', ''))}"
+    if kind == "tool_use":
+        tool = str(value.get("tool", "")).removeprefix("mcp__horus__")
+        return f"→ {tool} {_clip(compact_json(value.get('args', {})), 200)}"
+    if kind == "tool_result":
+        marker = "✗" if value.get("is_error") else "←"
+        return f"{marker} {_clip(value.get('summary', ''), 300)}"
+    if kind == "final_result":
+        return f"✔ Final: {_clip(value.get('text', ''), 800)}"
+    if kind == "task_completed":
+        return "■ Task finished"
+    if kind == "task_error":
+        return f"✗ Task failed: {_clip(value.get('error', ''))}"
+    if kind == "claude_code_timeout":
+        return f"✗ Claude Code timed out after {value.get('timeout_s')} s"
+    if kind == "unparsed_output":
+        return f"claude: {_clip(value.get('text', ''))}"
+    return _clip(compact_json(value))
 
 
 def _field(value: Any, name: str, default: Any = None) -> Any:
@@ -118,13 +158,13 @@ def _field(value: Any, name: str, default: Any = None) -> Any:
 
 
 def state_from_tool_result(result: Any) -> Any:
-    """Decode the JSON result returned by MCP's ``get_state`` tool."""
+    """Decode the JSON result returned by MCP's ``get_state`` tool.
+
+    FastMCP wraps a ``str`` tool return as ``{"result": "<json>"}`` structured content, so
+    the JSON text block is preferred and a wrapped string is decoded.
+    """
     if _field(result, "isError", False):
         raise RuntimeError("MCP get_state returned an error")
-
-    structured = _field(result, "structuredContent")
-    if structured is not None:
-        return structured
 
     for block in _field(result, "content", ()) or ():
         if _field(block, "type") != "text":
@@ -132,6 +172,12 @@ def state_from_tool_result(result: Any) -> Any:
         text = _field(block, "text")
         if isinstance(text, str):
             return json.loads(text)
+    structured = _field(result, "structuredContent")
+    if isinstance(structured, Mapping) and set(structured) == {"result"}:
+        wrapped = structured["result"]
+        return json.loads(wrapped) if isinstance(wrapped, str) else wrapped
+    if structured is not None:
+        return structured
     raise ValueError("MCP get_state result contained no JSON text")
 
 
@@ -186,7 +232,9 @@ async def stream_commander_events(
                 async for line in response.aiter_lines():
                     event = decoder.feed_line(line)
                     if event is not None:
-                        publish_string(publisher, message_type, compact_sse_data(event))
+                        panel_line = format_commander_event(event)
+                        if panel_line is not None:
+                            publish_string(publisher, message_type, panel_line)
                     last_event_id = decoder.last_event_id
                 last_event_id = decoder.last_event_id
         except asyncio.CancelledError:

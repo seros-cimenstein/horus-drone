@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 import base64
 import binascii
 import math
+import statistics
 import threading
 import time
-from typing import Any
+from typing import Any, NamedTuple
 
 from .attributes import classify_shirt_colour
 from .camera import OpenCVCameraReader
@@ -16,6 +18,18 @@ from .grounding import FrameBuffer, Grounder, GrounderConfig, GroundingPointer
 from .recognition import TinyEmbeddingClassifier
 from .tracker import PersistentTracker, cosine_similarity
 from .types import Candidate, Detection, Frame, FrameObservation, PointResult
+
+
+class _FrameStats(NamedTuple):
+    finished_at: float
+    detector_ms: float
+    tracker_ms: float
+    detections: int
+    ignored: int
+    candidates: int
+
+
+_STATS_WINDOW = 30
 
 
 class PerceptionSystem:
@@ -68,6 +82,8 @@ class PerceptionSystem:
         self._release_pending = False
         self._release_complete = threading.Event()
         self._release_complete.set()
+        self._stats_lock = threading.Lock()
+        self._frame_stats: deque[_FrameStats] = deque(maxlen=_STATS_WINDOW)
 
     def process_frame(
         self,
@@ -93,7 +109,9 @@ class PerceptionSystem:
                 image=image,
                 pose=pose,
             )
+            started = time.perf_counter()
             detections = self.detector.detect(image) if self.mode == "active" else ()
+            detected_count = len(detections)
             if self.ignore_regions and detections:
                 height, width = image.shape[:2]
                 detections = tuple(
@@ -106,11 +124,24 @@ class PerceptionSystem:
                         self.ignore_regions,
                     )
                 )
+            detected = time.perf_counter()
             processed.candidates = self.tracker.update(
                 tuple(_with_shirt_colour(detection, image) for detection in detections),
                 processed,
             )
+            finished = time.perf_counter()
             self.buffer.append(processed)
+            with self._stats_lock:
+                self._frame_stats.append(
+                    _FrameStats(
+                        finished_at=finished,
+                        detector_ms=(detected - started) * 1000.0,
+                        tracker_ms=(finished - detected) * 1000.0,
+                        detections=detected_count,
+                        ignored=detected_count - len(detections),
+                        candidates=len(processed.candidates),
+                    )
+                )
             return FrameObservation(
                 frame_id=processed.frame_id,
                 timestamp=processed.timestamp,
@@ -391,6 +422,24 @@ class PerceptionSystem:
                 "last_frame_age_s": age,
                 "reason": self._camera_reason,
             }
+
+    def processing_stats(self) -> dict[str, Any]:
+        """Median detector and tracker/ReID cost and processed-frame rate over recent frames."""
+        with self._stats_lock:
+            samples = tuple(self._frame_stats)
+        if not samples:
+            return {"frames": 0}
+        span = samples[-1].finished_at - samples[0].finished_at
+        latest = samples[-1]
+        return {
+            "frames": len(samples),
+            "fps": round((len(samples) - 1) / span, 2) if span > 0 else None,
+            "detector_ms": round(statistics.median(s.detector_ms for s in samples), 1),
+            "tracker_ms": round(statistics.median(s.tracker_ms for s in samples), 1),
+            "detections": latest.detections,
+            "ignored": latest.ignored,
+            "candidates": latest.candidates,
+        }
 
     def _set_camera_status(
         self,
