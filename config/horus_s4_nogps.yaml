@@ -16,7 +16,9 @@ executor:
   max_vertical_speed_m_s: 0.5
   max_distance_m: 8.0
   min_altitude_m: 0.5
-  max_altitude_m: 5.0
+  # Indoor walls are 2.5 m high (RTL_ALT_M 2 in config/ardupilot/horus_sitl.parm); keep the
+  # airframe below them rather than the 5 m outdoor envelope.
+  max_altitude_m: 2.2
   geofence_radius_m: 8.0
   # Vertices are [north_m, east_m] = [Gazebo y, Gazebo x] for the room and corridor.
   geofence_polygon_ned:
@@ -28,7 +30,7 @@ executor:
     - [8.0, -1.4]
     - [4.0, -1.4]
     - [4.0, -5.0]
-  geofence_margin_m: 0.25
+  geofence_margin_m: 1.2
   arrival_tolerance_m: 0.25
   follow_distance_m: 2.0
   target_width_m: null

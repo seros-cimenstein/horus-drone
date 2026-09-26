@@ -164,7 +164,7 @@ A bad AI decision cannot produce a dangerous maneuver: the executor and ArduPilo
 | Skills | `take_off`, `goto(pose)`, `follow(id)`, `orbit(id)`, `scan(area)`, `approach(id, dist)` |
 | Grounding | `point(frame_id, description)` (fallback) |
 | Recognition | `set_target_profile(profile)`, `train_specialist(desc, refs)`, `load_model(package)`, `set_mode(name)` |
-| Tasks | `get_task_status(task_id)`, `cancel(task_id)` |
+| Tasks | `get_task_status(task_id)`, `wait_for_task(task_id, timeout_s)`, `cancel(task_id)` |
 | Missions (stretch) | `upload_mission`, `start_mission`, `get_mission_log`, `clear_mission` |
 | Emergency | `hold`, `rth`, `land` |
 

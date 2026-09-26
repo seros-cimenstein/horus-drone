@@ -1,6 +1,9 @@
 # MAVLink-backed horizontal proximity sectors; the bridge sends DISTANCE_SENSOR.
 PRX1_TYPE 2
 AVOID_ENABLE 3
+# Stop 1 m from proximity obstacles (default 2 m) so the executor's 1.2 m wall-centre geofence inset
+# (0.1 m half wall + 1 m + 0.1 m slack) stays reachable instead of fighting avoidance at the edge.
+AVOID_MARGIN 1.0
 
 # Downward flow/altitude range input from DISTANCE_SENSOR orientation PITCH_270.
 RNGFND1_TYPE 10
