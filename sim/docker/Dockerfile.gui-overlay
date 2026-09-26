@@ -1,0 +1,14 @@
+FROM horus-sim:local-s1s2
+
+USER root
+COPY sim/gui/install_build_deps.sh /tmp/install_horus_gui_build_deps.sh
+RUN bash /tmp/install_horus_gui_build_deps.sh \
+    && rm /tmp/install_horus_gui_build_deps.sh
+COPY sim/gui /tmp/horus-gui-source
+RUN bash /tmp/horus-gui-source/build_plugin.sh /tmp/horus-gui-source \
+    && rm -rf /tmp/horus-gui-source
+
+ENV GZ_GUI_PLUGIN_PATH=/opt/horus-gui/lib \
+    HORUS_GUI_CONFIG=/opt/horus-gui/horus_demo.config
+
+USER sim

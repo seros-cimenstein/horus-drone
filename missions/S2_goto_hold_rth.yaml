@@ -1,0 +1,12 @@
+name: S2-goto-hold-rth
+steps:
+  - tool: goto
+    arguments:
+      pose:
+        north_m: 0.5
+        east_m: 0.5
+        up_m: 2.0
+      ttl_s: 30.0
+    timeout_s: 35.0
+  - tool: hold
+  - tool: rth
