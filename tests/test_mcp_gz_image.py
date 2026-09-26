@@ -10,9 +10,6 @@ from horus.mcp_server.gz_image import GazeboImagePublisher
 class _DecodedImage:
     shape = (2, 3, 3)
 
-    def tobytes(self) -> bytes:
-        return bytes(range(1, 19))
-
 
 class _Numpy:
     uint8 = object()
@@ -22,13 +19,23 @@ class _Numpy:
         return data
 
 
+class _RGBImage:
+    def tobytes(self) -> bytes:
+        return b"rgb-pixels"
+
+
 class _OpenCV:
     IMREAD_COLOR = 1
+    COLOR_BGR2RGB = 4
 
     def imdecode(self, encoded: bytes, mode: int) -> _DecodedImage:
         assert encoded == b"rendered-jpeg"
         assert mode == self.IMREAD_COLOR
         return _DecodedImage()
+
+    def cvtColor(self, image: object, code: int) -> _RGBImage:
+        assert isinstance(image, _DecodedImage) and code == self.COLOR_BGR2RGB
+        return _RGBImage()
 
 
 class _ImageMessage:
@@ -69,13 +76,13 @@ class _Node:
         self.closed = True
 
 
-def test_publisher_converts_jpeg_to_gazebo_bgr_image_invariants():
+def test_publisher_converts_jpeg_to_rgb_image_that_gz_gui_can_display():
     publisher = _Publisher()
     node = _Node(publisher)
     adapter = GazeboImagePublisher(
         node_factory=lambda: node,
         image_type=_ImageMessage,
-        bgr_int8=8,
+        rgb_int8=8,
         cv2_module=_OpenCV(),
         numpy_module=_Numpy(),
     )
@@ -89,8 +96,8 @@ def test_publisher_converts_jpeg_to_gazebo_bgr_image_invariants():
     assert (message.width, message.height) == (3, 2)
     assert message.step == message.width * 3
     assert message.pixel_format_type == 8
-    assert len(message.data) == message.step * message.height
-    assert message.data == bytes(range(1, 19))
+    # gz-gui ImageDisplay only renders RGB_INT8 among 8-bit colour formats.
+    assert message.data == b"rgb-pixels"
 
     adapter.close()
     assert publisher.closed

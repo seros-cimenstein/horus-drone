@@ -396,6 +396,13 @@ class IgnoreRegionTests(unittest.TestCase):
             [candidate.bbox for candidate in observation.candidates],
             [(100, 0, 150, 20), (20, 30, 50, 70)],
         )
+        stats = system.processing_stats()
+        self.assertEqual(
+            (stats["frames"], stats["detections"], stats["ignored"], stats["candidates"]),
+            (1, 4, 2, 2),
+        )
+        self.assertIsNone(stats["fps"])
+
 
 class TrackerValidationTests(unittest.TestCase):
     def test_validate_id_rejects_current_embedding_mismatch(self) -> None:

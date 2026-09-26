@@ -11,7 +11,7 @@ from horus.gz_bridge import (
     GazeboBridge,
     SSEDecoder,
     SSEEvent,
-    compact_sse_data,
+    format_commander_event,
     poll_mcp_state,
     publish_state_once,
     state_from_tool_result,
@@ -88,8 +88,15 @@ class _SSEHttpClient:
     def __init__(self):
         self.requests = []
         self.responses = [
-            ["id: 40", 'data: { "id": 40, "kind": "task_accepted" }', ""],
-            ["id: 41", 'data: { "id": 41, "kind": "final_result" }', ""],
+            [
+                "id: 40",
+                'data: { "id": 40, "kind": "task_accepted", "text": "Find the red shirt" }',
+                "",
+                "id: 41",
+                'data: { "id": 41, "kind": "assistant_delta", "text": "Loo" }',
+                "",
+            ],
+            ["id: 42", 'data: { "id": 42, "kind": "final_result", "text": "Holding." }', ""],
         ]
 
     def stream(self, method, url, *, headers, timeout=None):
@@ -169,7 +176,7 @@ def test_sse_decoder_waits_for_boundary_and_keeps_reconnect_id():
 
     assert event == SSEEvent("17", '{ "kind":\n"task_accepted" }')
     assert decoder.last_event_id == "17"
-    assert compact_sse_data(SSEEvent("18", '{ "id": 18, "kind": "done" }')) == (
+    assert format_commander_event(SSEEvent("18", '{ "id": 18, "kind": "done" }')) == (
         '{"id":18,"kind":"done"}'
     )
     # Invalid IDs containing NUL must not replace a valid reconnect cursor.
@@ -215,6 +222,18 @@ def test_mcp_state_text_is_parsed_and_published_as_compact_json():
         assert session.calls == [("get_state", {})]
         assert published == state
         assert publisher.messages == ['{"vehicle":{"armed":false,"mode":"GUIDED"},"perception":null}']
+
+
+def test_fastmcp_wrapped_state_is_published_as_the_state_object():
+    state = {"state": "IDLE", "perception": {"camera": "streaming"}}
+    wrapped = SimpleNamespace(isError=False, structuredContent={"result": json.dumps(state)}, content=[])
+    assert state_from_tool_result(wrapped) == state
+    both = SimpleNamespace(
+        isError=False,
+        structuredContent={"result": json.dumps(state)},
+        content=[SimpleNamespace(type="text", text=json.dumps(state))],
+    )
+    assert state_from_tool_result(both) == state
 
 
 def test_mcp_poller_connects_with_bearer_token_and_uses_half_second_period():
@@ -278,7 +297,7 @@ def test_mcp_poller_connects_with_bearer_token_and_uses_half_second_period():
     asyncio.run(scenario())
 
 
-def test_event_stream_resumes_with_last_event_id_and_forwards_compact_json():
+def test_event_stream_resumes_after_hidden_events_and_forwards_readable_lines():
     async def scenario():
         client = _SSEHttpClient()
         publisher = _Publisher()
@@ -312,15 +331,34 @@ def test_event_stream_resumes_with_last_event_id_and_forwards_compact_json():
             (
                 "GET",
                 "http://commander:8765/events",
-                {"Authorization": "Bearer secret", "Last-Event-ID": "40"},
+                {"Authorization": "Bearer secret", "Last-Event-ID": "41"},
             ),
         ]
+        # The token delta is not shown but still advances the reconnect cursor.
         assert publisher.messages == [
-            '{"id":40,"kind":"task_accepted"}',
-            '{"id":41,"kind":"final_result"}',
+            "▶ Task: Find the red shirt",
+            "✔ Final: Holding.",
         ]
 
     asyncio.run(scenario())
+
+
+def test_commander_events_render_tool_calls_and_errors_readably():
+    def line(data):
+        return format_commander_event(SSEEvent("1", data))
+
+    assert line('{"kind":"tool_use","tool":"mcp__horus__follow","args":{"id":7}}') == (
+        '→ follow {"id":7}'
+    )
+    assert line('{"kind":"tool_result","summary":"ok","is_error":false}') == "← ok"
+    assert line('{"kind":"tool_result","summary":"stale frame","is_error":true}') == (
+        "✗ stale frame"
+    )
+    assert line('{"kind":"task_error","error":"boom"}') == "✗ Task failed: boom"
+    assert line('{"kind":"assistant_text","text":"Checking\\n  state"}') == "Claude: Checking state"
+    long_line = line('{"kind":"assistant_text","text":"' + "x" * 1000 + '"}')
+    assert len(long_line) == len("Claude: ") + 400 and long_line.endswith("…")
+    assert line("not json") == "not json"
 
 
 def test_mcp_tool_errors_and_missing_json_are_not_published_as_state():

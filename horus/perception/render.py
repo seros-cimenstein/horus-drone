@@ -2,9 +2,113 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Mapping
+from typing import Any, Sequence
 
 from .types import Candidate, Frame, SetOfMarkPayload
+
+_PERSON_COLOR = (80, 220, 40)
+_OBJECT_COLOR = (0, 165, 255)
+
+
+def render_live_view(
+    frame: Frame,
+    stats: Mapping[str, Any],
+    *,
+    ignore_regions: Sequence[Sequence[float]] = (),
+    detector_name: str = "YOLO",
+) -> Any:
+    """Draw every tracked candidate and detector/tracker timings on a BGR copy of the frame.
+
+    Human-facing debug view: boxes carry tracker ID, detector class and confidence, and the
+    shirt-colour attribute; shaded ignore regions show where detections are discarded.
+    """
+    import cv2
+
+    image = frame.image
+    if image is None or len(image.shape) != 3:
+        raise ValueError("frame.image must be a BGR image array")
+    rendered = image.copy()
+    height, width = rendered.shape[:2]
+
+    if ignore_regions:
+        shaded = rendered.copy()
+        for x1, y1, x2, y2 in ignore_regions:
+            cv2.rectangle(
+                shaded,
+                (int(x1 * width), int(y1 * height)),
+                (int(x2 * width), int(y2 * height)),
+                (70, 70, 70),
+                cv2.FILLED,
+            )
+        cv2.addWeighted(shaded, 0.45, rendered, 0.55, 0.0, dst=rendered)
+
+    for candidate in frame.candidates:
+        x1, y1, x2, y2 = (int(round(value)) for value in candidate.bbox)
+        is_person = candidate.class_name.casefold() == "person"
+        color = _PERSON_COLOR if is_person else _OBJECT_COLOR
+        cv2.rectangle(rendered, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+        lines = [f"#{candidate.id} {candidate.class_name} {candidate.confidence:.2f}"]
+        shirt = candidate.attributes.get("shirt_colour")
+        if shirt is not None:
+            shirt_confidence = candidate.attributes.get("shirt_colour_confidence")
+            lines.append(
+                f"shirt {shirt} {shirt_confidence:.2f}"
+                if isinstance(shirt_confidence, (int, float))
+                else f"shirt {shirt}"
+            )
+        _label_block(cv2, rendered, lines, (x1, y1), color)
+
+    fps = stats.get("fps")
+    detector_ms = stats.get("detector_ms")
+    tracker_ms = stats.get("tracker_ms")
+    hud = [
+        f"{detector_name} {_ms(detector_ms)} | track+ReID {_ms(tracker_ms)} | "
+        f"{fps:.1f} fps" if isinstance(fps, (int, float)) else f"{detector_name} warming up",
+        f"frame {frame.frame_id} | detections {stats.get('detections', 0)} "
+        f"(ignored {stats.get('ignored', 0)}) | tracks {len(frame.candidates)}",
+    ]
+    cv2.rectangle(rendered, (0, height - 42), (width - 1, height - 1), (0, 0, 0), cv2.FILLED)
+    for row, text in enumerate(hud):
+        cv2.putText(
+            rendered,
+            text,
+            (6, height - 26 + row * 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+    return rendered
+
+
+def _ms(value: Any) -> str:
+    return f"{value:.0f} ms" if isinstance(value, (int, float)) else "-"
+
+
+def _label_block(cv2: Any, image: Any, lines: Sequence[str], origin: tuple[int, int], color: Any) -> None:
+    height, width = image.shape[:2]
+    font, scale = cv2.FONT_HERSHEY_SIMPLEX, 0.5
+    sizes = [cv2.getTextSize(line, font, scale, 1)[0] for line in lines]
+    line_height = max(size[1] for size in sizes) + 6
+    block_width = max(size[0] for size in sizes) + 6
+    x = max(0, min(width - block_width, origin[0]))
+    top = origin[1] - line_height * len(lines)
+    if top < 0:
+        top = min(height - line_height * len(lines), origin[1] + 2)
+    cv2.rectangle(image, (x, top), (x + block_width, top + line_height * len(lines)), color, cv2.FILLED)
+    for row, line in enumerate(lines):
+        cv2.putText(
+            image,
+            line,
+            (x + 3, top + line_height * (row + 1) - 4),
+            font,
+            scale,
+            (0, 0, 0),
+            1,
+            cv2.LINE_AA,
+        )
 
 
 def render_set_of_marks(
