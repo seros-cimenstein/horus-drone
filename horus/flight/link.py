@@ -22,6 +22,15 @@ GIMBAL_PITCH_MIN_DEG = -90.0
 GIMBAL_PITCH_MAX_DEG = 45.0
 GIMBAL_YAW_LIMIT_DEG = 160.0
 
+# SET_MESSAGE_INTERVAL is in autopilot time, so in SITL it scales with the real-time factor: the
+# old 5 Hz request for pose/attitude delivered a sample only every ~1.1 s of wall time at the
+# campaign's RTF ~0.18 (measured pose ages up to 2.15 s), tripping the executor's 1.5 s wall
+# staleness guard. 20 Hz autopilot time keeps the wall gap at ~0.28 s at RTF 0.18 and ~0.5 s at
+# RTF 0.1, with the guard as the backstop; at real time it is 20 Hz, about 2.4 kB/s for the four
+# messages. Every closed-loop control decision (pose, heading, vehicle clock) uses this group.
+CONTROL_STREAM_INTERVAL_US = 50_000
+TELEMETRY_STREAM_INTERVAL_US = 200_000
+
 
 @dataclass(frozen=True, slots=True)
 class Pose:
@@ -52,6 +61,23 @@ class DistanceSensor:
     min_distance_m: float
     max_distance_m: float
     updated_at: str
+    updated_monotonic: float
+
+
+@dataclass(frozen=True, slots=True)
+class MountStatus:
+    target_system: int
+    target_component: int
+    mount_mode: int
+    pitch_deg: float
+    roll_deg: float
+    yaw_deg: float
+    updated_at: str
+    # Monotonic receive time of this MOUNT_STATUS, for freshness checks on the same clock as frames.
+    updated_monotonic: float | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,12 +96,24 @@ class Telemetry:
     heading_deg: float | None = None
     pose_updated_monotonic: float | None = None
     time_boot_ms: int | None = None
+    mount_status: MountStatus | None = None
+    heading_updated_monotonic: float | None = None
+    # Vehicle roll/pitch from ATTITUDE (degrees), with their own receive time.
+    vehicle_roll_deg: float | None = None
+    vehicle_pitch_deg: float | None = None
+    attitude_updated_monotonic: float | None = None
+    # Monotonic receive time of the latest SYSTEM_TIME (``time_boot_ms`` is autopilot/SITL time).
+    time_boot_updated_monotonic: float | None = None
 
     def as_dict(self, now: float | None = None) -> dict[str, Any]:
         monotonic = time.monotonic() if now is None else now
         return {
             "observed_at": self.observed_at,
             "time_boot_ms": self.time_boot_ms,
+            "time_boot_age_s": (
+                None if self.time_boot_updated_monotonic is None
+                else max(0.0, monotonic - self.time_boot_updated_monotonic)
+            ),
             "observation_age_s": max(0.0, monotonic - self.received_monotonic),
             "pose_age_s": (
                 None if self.pose_updated_monotonic is None
@@ -95,6 +133,13 @@ class Telemetry:
                 None if self.heartbeat_monotonic is None
                 else max(0.0, monotonic - self.heartbeat_monotonic)
             ),
+            "mount_status": None if self.mount_status is None else self.mount_status.as_dict(),
+            "vehicle_roll_deg": self.vehicle_roll_deg,
+            "vehicle_pitch_deg": self.vehicle_pitch_deg,
+            "attitude_age_s": (
+                None if self.attitude_updated_monotonic is None
+                else max(0.0, monotonic - self.attitude_updated_monotonic)
+            ),
         }
 
 
@@ -112,6 +157,11 @@ class MavlinkFlightLink:
         self._pose: Pose | None = None
         self._global_origin: tuple[float, float] | None = None
         self._heading_deg: float | None = None
+        self._heading_updated_monotonic: float | None = None
+        self._vehicle_roll_deg: float | None = None
+        self._vehicle_pitch_deg: float | None = None
+        self._attitude_updated_monotonic: float | None = None
+        self._time_boot_updated_monotonic: float | None = None
         self._local_position_seen = False
         self._velocity = Velocity()
         self._pose_updated_monotonic: float | None = None
@@ -122,6 +172,7 @@ class MavlinkFlightLink:
         self._battery_voltage_v: float | None = None
         self._proximity: dict[int, DistanceSensor] = {}
         self._statustext: list[str] = []
+        self._mount_status: MountStatus | None = None
         self._last_received_monotonic = time.monotonic()
         self._last_observed_at = datetime.now(timezone.utc).isoformat()
 
@@ -189,7 +240,7 @@ class MavlinkFlightLink:
         )
 
     def _request_telemetry(self) -> None:
-        """Request useful messages at 5 Hz where the autopilot supports intervals."""
+        """Request control-critical messages at 20 Hz and the rest at 5 Hz, in autopilot time."""
         mav = self.connection.mav
         command = getattr(mav, "command_long_send", None)
         if command is None:
@@ -197,14 +248,31 @@ class MavlinkFlightLink:
         try:
             from pymavlink import mavutil
 
-            for message_id in (2, 30, 32, 33, 74, 132, 147, 1, 253):
+            control_message_ids = (
+                mavutil.mavlink.MAVLINK_MSG_ID_SYSTEM_TIME,
+                mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE,
+                mavutil.mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED,
+                mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT,
+            )
+            telemetry_message_ids = (
+                74,  # VFR_HUD
+                132,  # DISTANCE_SENSOR
+                147,  # BATTERY_STATUS
+                1,  # SYS_STATUS
+                253,  # STATUSTEXT
+                mavutil.mavlink.MAVLINK_MSG_ID_MOUNT_STATUS,
+            )
+            for message_id, interval_us in (
+                *((message_id, CONTROL_STREAM_INTERVAL_US) for message_id in control_message_ids),
+                *((message_id, TELEMETRY_STREAM_INTERVAL_US) for message_id in telemetry_message_ids),
+            ):
                 command(
                     self.connection.target_system,
                     self.connection.target_component,
                     mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
                     0,
                     message_id,
-                    200_000,
+                    interval_us,
                     0,
                     0,
                     0,
@@ -239,6 +307,7 @@ class MavlinkFlightLink:
                     time_boot_ms = -1
                 if 0 <= time_boot_ms <= 0xFFFFFFFF:
                     self._time_boot_ms = time_boot_ms
+                    self._time_boot_updated_monotonic = now
             elif kind == "HEARTBEAT":
                 self._accept_heartbeat(message, now)
             elif kind == "LOCAL_POSITION_NED":
@@ -255,6 +324,7 @@ class MavlinkFlightLink:
                 heading = int(message.hdg)
                 if 0 <= heading < 36000:
                     self._heading_deg = heading / 100.0
+                    self._heading_updated_monotonic = now
                 # GPS fallback is kept in the same relative-meter frame as local NED.
                 if not self._local_position_seen:
                     latitude = float(message.lat) / 1e7
@@ -274,6 +344,13 @@ class MavlinkFlightLink:
                     self._pose_updated_monotonic = now
             elif kind == "ATTITUDE":
                 self._heading_deg = (math.degrees(float(message.yaw)) + 360.0) % 360.0
+                self._heading_updated_monotonic = now
+                roll = math.degrees(float(message.roll))
+                pitch = math.degrees(float(message.pitch))
+                if math.isfinite(roll) and math.isfinite(pitch):
+                    self._vehicle_roll_deg = roll
+                    self._vehicle_pitch_deg = pitch
+                    self._attitude_updated_monotonic = now
             elif kind == "SYS_STATUS":
                 remaining = int(message.battery_remaining)
                 self._battery_remaining_pct = remaining if 0 <= remaining <= 100 else None
@@ -291,8 +368,19 @@ class MavlinkFlightLink:
                 orientation = int(message.orientation)
                 if 0 <= orientation <= 7 and minimum <= current <= maximum:
                     self._proximity[orientation] = DistanceSensor(
-                        orientation, current, minimum, maximum, self._last_observed_at
+                        orientation, current, minimum, maximum, self._last_observed_at, now
                     )
+            elif kind == "MOUNT_STATUS":
+                self._mount_status = MountStatus(
+                    int(message.target_system),
+                    int(message.target_component),
+                    int(message.mount_mode),
+                    float(message.pointing_a) / 100.0,
+                    float(message.pointing_b) / 100.0,
+                    float(message.pointing_c) / 100.0,
+                    self._last_observed_at,
+                    now,
+                )
             elif kind == "STATUSTEXT":
                 text = message.text
                 if isinstance(text, bytes):
@@ -331,6 +419,12 @@ class MavlinkFlightLink:
                 self._heading_deg,
                 self._pose_updated_monotonic,
                 self._time_boot_ms,
+                self._mount_status,
+                self._heading_updated_monotonic,
+                self._vehicle_roll_deg,
+                self._vehicle_pitch_deg,
+                self._attitude_updated_monotonic,
+                self._time_boot_updated_monotonic,
             )
 
     def heartbeat_ok(self, max_age_s: float = 3.0) -> bool:

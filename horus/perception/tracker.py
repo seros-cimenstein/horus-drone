@@ -31,11 +31,22 @@ class TrackerConfig:
     revalidation_iou_threshold: float = 0.35
     reid_similarity_threshold: float = 0.62
     revalidation_similarity_threshold: float = 0.72
+    # A live, continuously associated track whose appearance score dips just below the threshold
+    # (within revalidation_grace_margin) for an unlucky frame keeps its identity for
+    # revalidation_grace_s after the last accepted validation. The margin keeps a total
+    # appearance change (an identity swap) failing immediately, and a persistent dip still
+    # loses the target once the window expires; re-acquisition never grants this grace.
+    revalidation_grace_s: float = 1.0
+    revalidation_grace_margin: float = 0.05
     max_reid_center_distance: float = 3.0
 
     def __post_init__(self) -> None:
         if self.max_lost_seconds <= 0 or self.revalidate_after_seconds < 0:
             raise ValueError("track retention must be positive and revalidation delay non-negative")
+        if not math.isfinite(self.revalidation_grace_s) or self.revalidation_grace_s < 0:
+            raise ValueError("revalidation_grace_s must be a finite non-negative number")
+        if not 0.0 <= self.revalidation_grace_margin <= 1.0:
+            raise ValueError("revalidation_grace_margin must be in [0, 1]")
         for name in (
             "iou_threshold",
             "revalidation_iou_threshold",
@@ -63,9 +74,18 @@ class _Track:
     timestamp: float
     frame_id: int
     pose: Any
+    source: str = "detector"
+    csrt_tracker: Any = None
+    # Open-vocabulary seeds must be re-confirmed by the grounder; CSRT alone drifts.
+    seed_misses: int = 0
     velocity_x: float = 0.0
     velocity_y: float = 0.0
     hits: int = 1
+    # Any person label or person-only attribute observed in this track's history, never cleared:
+    # a later frame that mislabels the person must not strip the track's person evidence.
+    person_evidence: bool = False
+    # Last time validate_candidate accepted this track at or above the similarity threshold.
+    last_validated_monotonic: float = 0.0
 
 
 class ColorHistogramEmbedder:
@@ -186,6 +206,8 @@ class PersistentTracker:
     """Track detector proposals, retaining identities through brief occlusions."""
 
     MAX_RETIRED_TRACKS = 64
+    # One INFO summary per (mode, reference) per second; per-comparison records stay at DEBUG.
+    REID_SUMMARY_INTERVAL_S = 1.0
 
     def __init__(
         self,
@@ -205,16 +227,86 @@ class PersistentTracker:
         self._current_image: Any = None
         self._embedding_cache: dict[tuple[int, int], Embedding | None] = {}
         self._cache_frame_id: int | None = None
+        self._similarity_windows: dict[tuple[str, int], dict[str, Any]] = {}
+        self._similarity_totals: dict[tuple[str, int], int] = {}
+
+    def seed(
+        self,
+        bbox: BBox,
+        frame: Frame,
+        *,
+        label: str,
+        confidence: float,
+        source: str,
+    ) -> Candidate:
+        """Create a CSRT-backed free-text track in a processed frame."""
+        if source not in {"open_vocab", "point"}:
+            raise ValueError("seed source must be 'open_vocab' or 'point'")
+        class_name = str(label).strip()
+        if not class_name:
+            raise ValueError("seed label must not be empty")
+        image = frame.image
+        box = _validate_bbox(bbox, image)
+        tracker = _initialize_csrt(image, box)
+        self._updates += 1
+        track_id = self._next_id
+        self._next_id += 1
+        embedding = self.encode(image, box)
+        track = _Track(
+            id=track_id,
+            bbox=box,
+            class_name=class_name,
+            class_id=None,
+            confidence=float(confidence),
+            attributes={},
+            reference_embedding=embedding,
+            current_embedding=embedding,
+            arrival_monotonic=time.monotonic(),
+            timestamp=float(frame.timestamp),
+            frame_id=int(frame.frame_id),
+            pose=frame.pose,
+            source=source,
+            csrt_tracker=tracker,
+        )
+        self._tracks[track_id] = track
+        if self._cache_frame_id != frame.frame_id:
+            self._embedding_cache.clear()
+            self._cache_frame_id = frame.frame_id
+        self._current_image = image
+        self._embedding_cache[(frame.frame_id, track_id)] = embedding
+        candidate = _candidate_from_track(track)
+        self._current = (*self._current, candidate)
+        return candidate
+
+    def confirm_seed(self, track_id: int, bbox: BBox, frame: Frame, *, confidence: float) -> None:
+        """Snap an open-vocabulary seed back onto a fresh grounder box and reset its miss count."""
+        track = self._tracks.get(track_id)
+        if track is None or track.source != "open_vocab":
+            return
+        box = _validate_bbox(bbox, frame.image)
+        track.csrt_tracker = _initialize_csrt(frame.image, box)
+        track.bbox = box
+        track.confidence = float(confidence)
+        track.seed_misses = 0
+
+    def age_unconfirmed_seeds(self, confirmed: set[int], *, max_misses: int = 3) -> list[int]:
+        """Count a grounder cycle against open-vocabulary seeds it did not re-detect; drop stale ones."""
+        dropped = []
+        for track_id, track in list(self._tracks.items()):
+            if track.source != "open_vocab" or track_id in confirmed:
+                continue
+            track.seed_misses += 1
+            if track.seed_misses >= max_misses:
+                del self._tracks[track_id]
+                dropped.append(track_id)
+        if dropped:
+            self._current = tuple(item for item in self._current if item.id not in dropped)
+        return dropped
 
     @property
-    def current_candidates(self) -> tuple[Candidate, ...]:
-        """Candidates visible in the most recently processed frame."""
-        return self._current
-
-    def encode(self, image: Any, bbox: BBox) -> Embedding | None:
-        """Encode an image region with this tracker's configured appearance model."""
-        vector = self.embedder.embed(image, bbox)
-        return _normalize_embedding(vector) if vector is not None else None
+    def track_count(self) -> int:
+        """Return the number of live detector and seeded tracks."""
+        return len(self._tracks)
 
     def update(
         self,
@@ -226,7 +318,7 @@ class PersistentTracker:
         timestamp: float | None = None,
         pose: Any = None,
     ) -> tuple[Candidate, ...]:
-        """Associate detections with persistent IDs and return visible candidates."""
+        """Associate detections and advance seeded CSRT tracks in the current frame."""
         self._updates += 1
         arrival_monotonic = time.monotonic()
         if frame is not None:
@@ -257,31 +349,60 @@ class PersistentTracker:
                 while len(self._retired) > self.MAX_RETIRED_TRACKS:
                     self._retired.popitem(last=False)
 
+        advanced_seed_ids: set[int] = set()
+        for track_id, track in self._tracks.items():
+            if track.source == "detector" or frame_id <= track.frame_id:
+                continue
+            updated_box = _advance_csrt(track.csrt_tracker, image)
+            if updated_box is None:
+                continue
+            old_center = _center(track.bbox)
+            new_center = _center(updated_box)
+            elapsed = max(1e-3, now - track.timestamp)
+            track.velocity_x = (new_center[0] - old_center[0]) / elapsed
+            track.velocity_y = (new_center[1] - old_center[1]) / elapsed
+            track.bbox = updated_box
+            track.current_embedding = None
+            track.arrival_monotonic = arrival_monotonic
+            track.timestamp = now
+            track.frame_id = frame_id
+            track.pose = pose
+            track.hits += 1
+            advanced_seed_ids.add(track_id)
+
         associations: list[tuple[float, int, int]] = []
         for track_id, track in self._tracks.items():
             age = max(0.0, now - track.timestamp)
             predicted = _predict(track, age)
             for detection_index, detection in enumerate(normalized):
-                known_track_class = track.class_name not in ("", "object", "unknown")
-                known_detection_class = detection.class_name not in ("", "object", "unknown")
-                if known_track_class and known_detection_class and track.class_name != detection.class_name:
-                    continue
-                if (
-                    track.class_id is not None
-                    and detection.class_id is not None
-                    and track.class_id != detection.class_id
-                ):
-                    continue
                 overlap = box_iou(predicted, detection.bbox)
-                distance = _normalized_center_distance(predicted, detection.bbox)
-                if overlap < self.config.iou_threshold:
+                if track.source == "detector":
+                    known_track_class = track.class_name not in ("", "object", "unknown")
+                    known_detection_class = detection.class_name not in ("", "object", "unknown")
+                    if known_track_class and known_detection_class and track.class_name != detection.class_name:
+                        continue
+                    if (
+                        track.class_id is not None
+                        and detection.class_id is not None
+                        and track.class_id != detection.class_id
+                    ):
+                        continue
+                    association_overlap = overlap
+                else:
+                    association_overlap = max(overlap, _box_coverage(predicted, detection.bbox))
+                if track.source == "detector":
+                    if association_overlap < self.config.iou_threshold:
+                        continue
+                elif association_overlap <= 0.0:
                     continue
                 if (
-                    age > self.config.revalidate_after_seconds
-                    and overlap < self.config.revalidation_iou_threshold
+                    track.source == "detector"
+                    and age > self.config.revalidate_after_seconds
+                    and association_overlap < self.config.revalidation_iou_threshold
                 ):
                     continue
-                spatial = min(1.0, overlap + (1.0 - min(distance, 1.0)) * 0.15)
+                distance = _normalized_center_distance(predicted, detection.bbox)
+                spatial = min(1.0, association_overlap + (1.0 - min(distance, 1.0)) * 0.15)
                 associations.append((spatial, track_id, detection_index))
 
         associations.sort(reverse=True)
@@ -301,8 +422,9 @@ class PersistentTracker:
             track.velocity_x = 0.5 * track.velocity_x + 0.5 * velocity_x
             track.velocity_y = 0.5 * track.velocity_y + 0.5 * velocity_y
             track.bbox = detection.bbox
-            track.class_name = detection.class_name
-            track.class_id = detection.class_id
+            if track.source == "detector":
+                track.class_name = detection.class_name
+                track.class_id = detection.class_id
             track.confidence = detection.confidence
             attributes = dict(detection.attributes)
             if attributes.get("shirt_colour") is None and track.attributes.get("shirt_colour") is not None:
@@ -318,6 +440,13 @@ class PersistentTracker:
             track.frame_id = frame_id
             track.pose = pose
             track.hits += 1
+            if _is_person_detection(detection):
+                track.person_evidence = True
+            if track.source != "detector":
+                try:
+                    track.csrt_tracker = _initialize_csrt(image, detection.bbox)
+                except (RuntimeError, ValueError):
+                    pass
             assigned_tracks.add(track_id)
             assigned_detections.add(detection_index)
             detection_track_ids[detection_index] = track_id
@@ -341,15 +470,32 @@ class PersistentTracker:
                 timestamp=now,
                 frame_id=frame_id,
                 pose=pose,
+                person_evidence=_is_person_detection(detection),
             )
             self._embedding_cache[(frame_id, track_id)] = embedding
             detection_track_ids[detection_index] = track_id
 
-        self._current = tuple(
+        candidates = [
             _candidate_from_track(self._tracks[detection_track_ids[index]])
             for index in range(len(normalized))
+        ]
+        visible_ids = set(detection_track_ids.values())
+        candidates.extend(
+            _candidate_from_track(self._tracks[track_id])
+            for track_id in sorted(advanced_seed_ids - visible_ids)
         )
+        self._current = tuple(candidates)
         return self._current
+
+    @property
+    def current_candidates(self) -> tuple[Candidate, ...]:
+        """Candidates visible in the most recently processed frame."""
+        return self._current
+
+    def encode(self, image: Any, bbox: BBox) -> Embedding | None:
+        """Encode an image region with this tracker's configured appearance model."""
+        vector = self.embedder.embed(image, bbox)
+        return _normalize_embedding(vector) if vector is not None else None
 
     def candidate(self, track_id: int) -> Candidate | None:
         """Return the currently visible candidate for an ID, or ``None`` if occluded."""
@@ -372,11 +518,19 @@ class PersistentTracker:
         )
 
     def _embed_candidate(self, candidate: Candidate) -> Embedding | None:
+        return self.frame_embedding(candidate, self._current_image)
+
+    def frame_embedding(self, candidate: Candidate, image: Any) -> Embedding | None:
+        """Embed a candidate's box in its frame image, cached while that frame is current.
+
+        Associated tracks are not re-embedded every frame; callers that need current appearance
+        share this lazy cache. A candidate from an older frame is encoded without caching.
+        """
+        if candidate.frame_id != self._cache_frame_id:
+            return self.encode(image, candidate.bbox)
         cache_key = (candidate.frame_id, candidate.id)
         if cache_key not in self._embedding_cache:
-            self._embedding_cache[cache_key] = self.encode(
-                self._current_image, candidate.bbox
-            )
+            self._embedding_cache[cache_key] = self.encode(image, candidate.bbox)
         return self._embedding_cache[cache_key]
 
     def _log_similarity(
@@ -388,6 +542,13 @@ class PersistentTracker:
         candidate: Candidate,
         threshold: float,
     ) -> None:
+        """Record one appearance comparison at DEBUG and aggregate it into a per-second summary.
+
+        A hold re-identifies the same target against every visible candidate on every control
+        tick, so per-comparison INFO lines reached tens of thousands per hold. The per-second
+        INFO summary keeps every field the diagnosis needs (how many comparisons, the best score
+        and candidate, whether the reference's own track was among them) at a bounded volume.
+        """
         crop_width_px, crop_height_px = _crop_pixel_dimensions(
             self._current_image, candidate.bbox
         )
@@ -405,9 +566,70 @@ class PersistentTracker:
             "crop_height_px": crop_height_px,
             "frame_id": candidate.frame_id,
         }
-        _LOGGER.info(
+        _LOGGER.debug(
             json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
             extra=record,
+        )
+        self._summarize_similarity(record)
+
+    def _summarize_similarity(self, record: dict[str, Any]) -> None:
+        now = time.monotonic()
+        key = (str(record["mode"]), int(record["reference_id"]))
+        window = self._similarity_windows.get(key)
+        if window is None:
+            window = {
+                "started": now,
+                "comparisons": 0,
+                "total": self._similarity_totals.get(key, 0),
+                "best_similarity": None,
+                "best_candidate_id": None,
+                "best_crop_px": None,
+                "last_similarity": None,
+                "own_track_seen": False,
+            }
+            self._similarity_windows[key] = window
+        window["comparisons"] += 1
+        window["total"] += 1
+        self._similarity_totals[key] = window["total"]
+        similarity = record.get("similarity")
+        if isinstance(similarity, float):
+            window["last_similarity"] = similarity
+            if window["best_similarity"] is None or similarity > window["best_similarity"]:
+                window["best_similarity"] = similarity
+                window["best_candidate_id"] = record.get("candidate_id")
+                window["best_crop_px"] = (record.get("crop_width_px"), record.get("crop_height_px"))
+        if record.get("candidate_id") == record.get("reference_id"):
+            window["own_track_seen"] = True
+        elapsed = now - window["started"]
+        if elapsed < self.REID_SUMMARY_INTERVAL_S:
+            return
+        summary = {
+            "event": "perception_reid_summary",
+            "mode": record["mode"],
+            "reference_id": record["reference_id"],
+            "threshold": record["threshold"],
+            "window_s": round(elapsed, 3),
+            "comparisons": window["comparisons"],
+            "total_comparisons": window["total"],
+            "best_similarity": window["best_similarity"],
+            "best_candidate_id": window["best_candidate_id"],
+            "best_crop_px": list(window["best_crop_px"]) if window["best_crop_px"] else None,
+            "last_similarity": window["last_similarity"],
+            "own_track_seen": window["own_track_seen"],
+        }
+        _LOGGER.info(
+            json.dumps(summary, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+            extra=summary,
+        )
+        window.update(
+            {
+                "started": now,
+                "comparisons": 0,
+                "best_similarity": None,
+                "best_candidate_id": None,
+                "best_crop_px": None,
+                "own_track_seen": False,
+            }
         )
 
     def validate_candidate(
@@ -418,34 +640,92 @@ class PersistentTracker:
         min_confidence: float = 0.0,
     ) -> Candidate | None:
         """Return a fresh candidate only when its current appearance matches its track reference."""
+        candidate, _ = self._validate_candidate(
+            track_id, max_age_seconds=max_age_seconds, min_confidence=min_confidence
+        )
+        return candidate
+
+    def validate_candidate_failure(
+        self,
+        track_id: int,
+        *,
+        max_age_seconds: float = 0.75,
+        min_confidence: float = 0.0,
+    ) -> str | None:
+        """Why ``validate_candidate`` rejects this ID, or ``None`` when it validates.
+
+        Reasons: ``not_visible`` (no candidate in the current frame), ``stale`` (unresolved or
+        not-fresh track), ``no_reference_appearance`` (no stored embedding to compare), and
+        ``appearance_mismatch`` (live embedding below the revalidation threshold). Callers use
+        this to report the actual cause after a rejected validation.
+        """
+        _, reason = self._validate_candidate(
+            track_id,
+            max_age_seconds=max_age_seconds,
+            min_confidence=min_confidence,
+            log_similarity=False,
+        )
+        return reason
+
+    def _validate_candidate(
+        self,
+        track_id: int,
+        *,
+        max_age_seconds: float,
+        min_confidence: float,
+        log_similarity: bool = True,
+    ) -> tuple[Candidate | None, str | None]:
         track_id = int(track_id)
         candidate = self.candidate(track_id)
+        if candidate is None:
+            return None, "not_visible"
         track = self._tracks.get(track_id)
-        if (
-            candidate is None
-            or not self._candidate_is_fresh(
-                candidate,
-                track,
-                max_age_seconds=max_age_seconds,
-                min_confidence=min_confidence,
-            )
-            or track is None
-            or track.reference_embedding is None
+        if track is None or not self._candidate_is_fresh(
+            candidate,
+            track,
+            max_age_seconds=max_age_seconds,
+            min_confidence=min_confidence,
         ):
-            return None
+            return None, "stale"
+        if track.reference_embedding is None:
+            return None, "no_reference_appearance"
         live_embedding = self._embed_candidate(candidate)
         similarity = cosine_similarity(track.reference_embedding, live_embedding)
         threshold = self.config.revalidation_similarity_threshold
-        self._log_similarity(
-            mode="selected_validation",
-            similarity=similarity,
-            reference_id=track.id,
-            candidate=candidate,
-            threshold=threshold,
-        )
+        if log_similarity:
+            self._log_similarity(
+                mode="selected_validation",
+                similarity=similarity,
+                reference_id=track.id,
+                candidate=candidate,
+                threshold=threshold,
+            )
+        now = time.monotonic()
         if similarity is None or similarity < threshold:
-            return None
-        return replace(candidate, embedding=live_embedding)
+            # A correctly tracked target's score wobbles across the threshold (the campaign saw
+            # 0.7917 -> 0.7196 frame to frame), so a marginal dip on one frame must not declare
+            # the target lost while the same track is still fresh and spatially associated.
+            # Only a score within the configured margin of the threshold is forgiven, and only
+            # within the grace window after an accepted validation: a total appearance change
+            # (an identity swap) fails immediately, a persistent dip expires the window, and
+            # re-acquisition (reidentify_candidate) never grants this grace.
+            if (
+                similarity is not None
+                and similarity >= threshold - self.config.revalidation_grace_margin
+                and track.last_validated_monotonic > 0.0
+                and self.config.revalidation_grace_s > 0.0
+                and now - track.last_validated_monotonic <= self.config.revalidation_grace_s
+            ):
+                _LOGGER.debug(
+                    "appearance score %.3f within %.2f of the %.2f threshold for track %d and "
+                    "%.2fs after the last accepted validation; keeping the identity",
+                    similarity, self.config.revalidation_grace_margin, threshold, track.id,
+                    now - track.last_validated_monotonic,
+                )
+                return replace(candidate, embedding=live_embedding), None
+            return None, "appearance_mismatch"
+        track.last_validated_monotonic = now
+        return replace(candidate, embedding=live_embedding), None
 
     def validate_id(self, track_id: int, **kwargs: Any) -> bool:
         """Require a recent detection and matching appearance before acting on an ID."""
@@ -529,6 +809,126 @@ def box_iou(left: BBox, right: BBox) -> float:
     union = left_area + right_area - intersection
     return intersection / union if union > 0.0 else 0.0
 
+def _box_coverage(left: BBox, right: BBox) -> float:
+    intersection = max(0.0, min(left[2], right[2]) - max(left[0], right[0])) * max(
+        0.0, min(left[3], right[3]) - max(left[1], right[1])
+    )
+    smaller_area = min(
+        max(0.0, left[2] - left[0]) * max(0.0, left[3] - left[1]),
+        max(0.0, right[2] - right[0]) * max(0.0, right[3] - right[1]),
+    )
+    return intersection / smaller_area if smaller_area > 0.0 else 0.0
+
+
+def _validate_bbox(bbox: BBox, image: Any) -> BBox:
+    try:
+        box = tuple(float(value) for value in bbox)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("seed bbox must contain four finite coordinates") from exc
+    if len(box) != 4 or not all(math.isfinite(value) for value in box):
+        raise ValueError("seed bbox must contain four finite coordinates")
+    x1, y1, x2, y2 = box
+    shape = getattr(image, "shape", None)
+    if shape is None or len(shape) < 2:
+        raise ValueError("seed frame must contain an image array")
+    height, width = int(shape[0]), int(shape[1])
+    if x1 < 0 or y1 < 0 or x1 >= x2 or y1 >= y2 or x2 > width or y2 > height:
+        raise ValueError("seed bbox must lie within frame bounds")
+    return box  # type: ignore[return-value]
+
+
+def _create_csrt_tracker() -> Any:
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError("OpenCV is required for seeded CSRT tracking") from exc
+    factory = getattr(cv2, "TrackerCSRT_create", None)
+    if factory is None:
+        factory = getattr(getattr(cv2, "legacy", None), "TrackerCSRT_create", None)
+    if factory is None:
+        raise RuntimeError("this OpenCV build does not provide TrackerCSRT_create")
+    return factory()
+
+
+def _initialize_csrt(image: Any, bbox: BBox) -> Any:
+    tracker = _create_csrt_tracker()
+    x1, y1, x2, y2 = bbox
+    result = tracker.init(
+        image,
+        (
+            int(round(x1)),
+            int(round(y1)),
+            max(1, int(round(x2 - x1))),
+            max(1, int(round(y2 - y1))),
+        ),
+    )
+    if result is False:
+        raise RuntimeError("OpenCV CSRT could not initialize the seeded box")
+    return tracker
+
+
+def _advance_csrt(tracker: Any, image: Any) -> BBox | None:
+    if tracker is None or image is None:
+        return None
+    try:
+        ok, rectangle = tracker.update(image)
+    except Exception:
+        return None
+    if not ok:
+        return None
+    x, y, width, height = (float(value) for value in rectangle)
+    image_height, image_width = int(image.shape[0]), int(image.shape[1])
+    x1, y1 = max(0.0, x), max(0.0, y)
+    x2, y2 = min(float(image_width), x + width), min(float(image_height), y + height)
+    return (x1, y1, x2, y2) if x1 < x2 and y1 < y2 else None
+
+
+class BoxCompensator:
+    """Carry a box from one buffered frame to newer frames with a single CSRT tracker.
+
+    Advancing is incremental, so a caller can catch up with frames that arrived while it was
+    compensating and finish under the perception lock with only a frame or two left.
+    """
+
+    def __init__(self, bbox: BBox, frame: Frame) -> None:
+        self.box: BBox | None = _validate_bbox(bbox, frame.image)
+        self.frame_id = int(frame.frame_id)
+        self._image: Any = frame.image
+        self._tracker: Any = None
+
+    def advance(self, frames: Sequence[Frame]) -> BBox | None:
+        """Track through ``frames`` newer than the current one; ``None`` once tracking fails."""
+        for frame in frames:
+            if self.box is None:
+                return None
+            if frame.frame_id <= self.frame_id:
+                continue
+            if self._tracker is None:
+                try:
+                    self._tracker = _initialize_csrt(self._image, self.box)
+                except (RuntimeError, ValueError):
+                    self.box = None
+                    return None
+                self._image = None
+            self.box = _advance_csrt(self._tracker, frame.image)
+            self.frame_id = int(frame.frame_id)
+        return self.box
+
+
+def compensate_bbox(bbox: BBox, frames: Sequence[Frame]) -> BBox | None:
+    """Track a free-text/point box through retained images with one CSRT tracker."""
+    if not frames:
+        return None
+    try:
+        compensator = BoxCompensator(bbox, frames[0])
+    except (RuntimeError, ValueError):
+        return None
+    return compensator.advance(frames[1:])
+
+
+
+
+
 
 def cosine_similarity(left: Sequence[float] | None, right: Sequence[float] | None) -> float | None:
     """Cosine similarity for equal-length appearance vectors."""
@@ -600,6 +1000,20 @@ def _coerce_detection(item: Detection) -> Detection:
     raise TypeError(f"expected Detection, got {type(item).__name__}")
 
 
+def _is_person_detection(detection: Detection) -> bool:
+    """True when a detection carries person evidence.
+
+    COCO person is ``class_id`` 0; ``shirt_colour`` is classified only for person detections
+    (``horus.perception.pipeline._with_shirt_colour``), so it is person evidence even when this
+    frame's class label disagrees (a person mislabeled as a kite).
+    """
+    return (
+        detection.class_name.casefold() == "person"
+        or detection.class_id == 0
+        or detection.attributes.get("shirt_colour") is not None
+    )
+
+
 def _candidate_from_track(track: _Track, *, embedding: Embedding | None = None) -> Candidate:
     return Candidate(
         id=track.id,
@@ -611,5 +1025,7 @@ def _candidate_from_track(track: _Track, *, embedding: Embedding | None = None) 
         pose=track.pose,
         class_id=track.class_id,
         attributes=dict(track.attributes),
+        source=track.source,
         embedding=track.current_embedding if embedding is None else embedding,
+        person_evidence=track.person_evidence,
     )

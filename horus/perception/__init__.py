@@ -7,7 +7,6 @@ from .grounding import (
     Grounder,
     GrounderConfig,
     GroundingPointer,
-    TransformersGrounder,
 )
 from .recognition import TinyEmbeddingClassifier
 from .pipeline import PerceptionEngine, PerceptionSystem
@@ -62,7 +61,6 @@ __all__ = [
     "SetOfMarkPayload",
     "StaleFrameError",
     "TrackerConfig",
-    "TransformersGrounder",
     "TinyEmbeddingClassifier",
     "YOLODetector",
     "box_iou",

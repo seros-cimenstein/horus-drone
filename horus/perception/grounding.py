@@ -1,13 +1,14 @@
-"""Latency frame buffering and lazy text-grounding fallback with revalidation."""
+"""Latency frame buffering, external text grounding, and box revalidation."""
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 import math
 from threading import RLock
 from typing import Any, Protocol, Sequence
 
-from .tracker import PersistentTracker, box_iou, cosine_similarity
+from .tracker import BoxCompensator, PersistentTracker, box_iou, cosine_similarity
 from .types import (
     BBox,
     Candidate,
@@ -20,24 +21,26 @@ from .types import (
 
 
 class Grounder(Protocol):
-    """Adapter for a text-conditioned box model."""
+    """Client contract for the external open-vocabulary detection service."""
 
-    def ground(self, image: Any, description: str) -> Sequence[GroundingBox]: ...
+    def detect(
+        self,
+        image: Any,
+        prompts: Sequence[str],
+        *,
+        box_threshold: float = 0.30,
+        text_threshold: float = 0.25,
+    ) -> Sequence[GroundingBox]: ...
 
 
 @dataclass(frozen=True, slots=True)
 class GrounderConfig:
-    """Hugging Face Grounding DINO or OWLv2 model selection and score gates."""
+    """Score gates shared with the external grounder service."""
 
-    backend: str = "grounding-dino"
-    model_name: str | None = None
-    box_threshold: float = 0.25
+    box_threshold: float = 0.30
     text_threshold: float = 0.25
-    device: str | None = None
 
     def __post_init__(self) -> None:
-        if self.backend not in {"grounding-dino", "owlv2"}:
-            raise ValueError("backend must be 'grounding-dino' or 'owlv2'")
         if not 0.0 <= self.box_threshold <= 1.0 or not 0.0 <= self.text_threshold <= 1.0:
             raise ValueError("grounding thresholds must be in [0, 1]")
 
@@ -100,89 +103,6 @@ class FrameBuffer:
             return len(self._frames)
 
 
-class TransformersGrounder:
-    """Load a Hugging Face Grounding DINO or OWLv2 model on first grounding request."""
-
-    def __init__(self, config: GrounderConfig | None = None) -> None:
-        self.config = config or GrounderConfig()
-        self._processor: Any = None
-        self._model: Any = None
-        self._torch: Any = None
-        self._device: str | None = None
-
-    def _load(self) -> None:
-        if self._model is not None:
-            return
-        try:
-            import torch
-            from transformers import AutoProcessor
-        except ImportError as exc:
-            raise RuntimeError("Install horus-drone[grounding] for the optional text-grounding fallback") from exc
-        model_name = self.config.model_name
-        if self.config.backend == "grounding-dino":
-            model_name = model_name or "IDEA-Research/grounding-dino-tiny"
-            try:
-                from transformers import AutoModelForZeroShotObjectDetection
-            except ImportError as exc:
-                raise RuntimeError("The installed transformers version lacks Grounding DINO") from exc
-            model = AutoModelForZeroShotObjectDetection.from_pretrained(model_name)
-        else:
-            model_name = model_name or "google/owlv2-base-patch16-ensemble"
-            try:
-                from transformers import Owlv2ForObjectDetection
-            except ImportError as exc:
-                raise RuntimeError("The installed transformers version lacks OWLv2") from exc
-            model = Owlv2ForObjectDetection.from_pretrained(model_name)
-        device = self.config.device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self._processor = AutoProcessor.from_pretrained(model_name)
-        self._model = model.to(device).eval()
-        self._torch = torch
-        self._device = device
-
-    def ground(self, image: Any, description: str) -> list[GroundingBox]:
-        """Return description-conditioned boxes in image pixel coordinates."""
-        if not description.strip():
-            raise ValueError("description must not be empty")
-        self._load()
-        pil_image, height, width = _as_pil_rgb(image)
-        if self.config.backend == "grounding-dino":
-            inputs = self._processor(images=pil_image, text=description, return_tensors="pt")
-        else:
-            inputs = self._processor(
-                images=pil_image, text=[[description]], return_tensors="pt"
-            )
-        inputs = {key: value.to(self._device) for key, value in inputs.items()}
-        target_sizes = self._torch.tensor([[height, width]], device=self._device)
-        with self._torch.inference_mode():
-            outputs = self._model(**inputs)
-            if self.config.backend == "grounding-dino":
-                results = self._processor.post_process_grounded_object_detection(
-                    outputs,
-                    inputs.get("input_ids"),
-                    box_threshold=self.config.box_threshold,
-                    text_threshold=self.config.text_threshold,
-                    target_sizes=target_sizes,
-                )
-            else:
-                results = self._processor.post_process_object_detection(
-                    outputs,
-                    threshold=self.config.box_threshold,
-                    target_sizes=target_sizes,
-                )
-        result = results[0]
-        boxes = result.get("boxes", []).detach().cpu().tolist()
-        scores = result.get("scores", []).detach().cpu().tolist()
-        labels = result.get("text", result.get("labels", []))
-        if hasattr(labels, "detach"):
-            labels = labels.detach().cpu().tolist()
-        return [
-            GroundingBox(
-                bbox=tuple(float(value) for value in box),
-                confidence=float(score),
-                label=str(labels[index]) if index < len(labels) else description,
-            )
-            for index, (box, score) in enumerate(zip(boxes, scores))
-        ]
 
 
 class GroundingPointer:
@@ -197,7 +117,8 @@ class GroundingPointer:
         grounder_config: GrounderConfig | None = None,
         min_grounding_confidence: float = 0.2,
         reid_threshold: float = 0.72,
-        overlap_threshold: float = 0.2,
+        overlap_threshold: float = 0.5,
+        state_lock: Any = None,
     ) -> None:
         if not 0.0 <= min_grounding_confidence <= 1.0:
             raise ValueError("min_grounding_confidence must be in [0, 1]")
@@ -210,6 +131,7 @@ class GroundingPointer:
         self.min_grounding_confidence = min_grounding_confidence
         self.reid_threshold = reid_threshold
         self.overlap_threshold = overlap_threshold
+        self._state_lock = state_lock
 
     def point(
         self,
@@ -219,11 +141,7 @@ class GroundingPointer:
         box: Sequence[float] | None = None,
         compensate: bool = True,
     ) -> PointResult:
-        """Resolve a buffered description or box, optionally replaying identity to now.
-
-        ``compensate=False`` only accepts the candidate overlapping the old-frame
-        reference when that same track ID is still visible in the latest frame.
-        """
+        """Resolve a description or box, revalidate an existing ID, or seed a new one."""
         frames = self.buffer.frames_after(frame_id)
         if not isinstance(compensate, bool):
             raise ValueError("compensate must be a boolean")
@@ -234,8 +152,6 @@ class GroundingPointer:
         if isinstance(description, str):
             description_text = description
         elif description is not None:
-            if box is not None:
-                raise ValueError("provide either description or box, not both")
             reference_box = description
         old_frame = frames[0]
         if reference_box is None:
@@ -243,11 +159,24 @@ class GroundingPointer:
                 raise ValueError("description must not be empty")
             grounder = self._grounder
             if grounder is None:
-                grounder = TransformersGrounder(self.grounder_config)
-                self._grounder = grounder
+                raise RuntimeError("grounder service is unavailable")
+            detect = getattr(grounder, "detect", None)
+            if callable(detect):
+                raw_boxes = detect(
+                    old_frame.image,
+                    [description_text],
+                    box_threshold=self.grounder_config.box_threshold,
+                    text_threshold=self.grounder_config.text_threshold,
+                )
+            else:
+                # Simple injected adapters used by callers/tests may expose a single-prompt API.
+                ground = getattr(grounder, "ground", None)
+                if not callable(ground):
+                    raise RuntimeError("grounder client does not provide detect()")
+                raw_boxes = ground(old_frame.image, description_text)
             grounded_boxes = [
-                _coerce_grounding_box(item)
-                for item in grounder.ground(old_frame.image, description_text)
+                coerce_grounding_box(item)
+                for item in raw_boxes
             ]
             grounded_boxes = [
                 item for item in grounded_boxes
@@ -258,6 +187,11 @@ class GroundingPointer:
                     f"grounder found no confident box for {description_text!r}"
                 )
             grounded = max(grounded_boxes, key=lambda item: item.confidence)
+            grounded = GroundingBox(
+                bbox=_validate_reference_box(grounded.bbox, old_frame.image),
+                confidence=grounded.confidence,
+                label=grounded.label or description_text,
+            )
         else:
             grounded = GroundingBox(
                 bbox=_validate_reference_box(reference_box, old_frame.image),
@@ -267,12 +201,9 @@ class GroundingPointer:
 
         latest_frame = frames[-1]
         latest_candidates = latest_frame.candidates
-        if not latest_candidates:
-            raise NoGroundingMatch("no tracked candidates are visible on the latest buffered frame")
-
         old_match = _best_overlapping(grounded.bbox, old_frame.candidates, self.overlap_threshold)
         if old_match is not None:
-            old_score = _box_overlap_score(grounded.bbox, old_match.bbox)
+            old_score = box_overlap_score(grounded.bbox, old_match.bbox)
             result = self._current_track_result(
                 old_match.id,
                 latest_candidates,
@@ -281,15 +212,15 @@ class GroundingPointer:
             )
             if result is not None:
                 return result
-        if not compensate:
+        if not compensate and len(frames) > 1:
             raise NoGroundingMatch(
                 f"old-frame reference {grounded.bbox!r} has no matching current track "
                 f"on frame {latest_frame.frame_id} with compensation disabled"
             )
 
         reference = self.tracker.encode(old_frame.image, grounded.bbox)
-        if reference is not None:
-            reidentified = self._fast_forward_reid(reference, frames, latest_candidates)
+        if compensate and reference is not None:
+            reidentified = self._fast_forward_reid(reference, latest_frame)
             if reidentified is not None:
                 candidate, score = reidentified
                 result = self._current_track_result(
@@ -306,28 +237,79 @@ class GroundingPointer:
             )
             if result is not None:
                 return result
-        target = repr(description_text) if description_text is not None else repr(grounded.bbox)
-        raise NoGroundingMatch(
-            f"grounded target {target} could not be revalidated on frame {latest_frame.frame_id}"
-        )
+
+        lock = self._state_lock if self._state_lock is not None else nullcontext()
+
+        def commit(placed_box: BBox | None, current_frame: Frame | None) -> PointResult:
+            if current_frame is None:
+                raise NoGroundingMatch("no current frame is available")
+            if not compensate and current_frame.frame_id != old_frame.frame_id:
+                raise NoGroundingMatch(
+                    f"old-frame reference {grounded.bbox!r} has no matching current track "
+                    f"on frame {current_frame.frame_id} with compensation disabled"
+                )
+            if placed_box is None:
+                target = repr(description_text) if description_text is not None else repr(grounded.bbox)
+                raise NoGroundingMatch(
+                    f"grounded target {target} could not be compensated to frame {current_frame.frame_id}"
+                )
+            current_match = _best_overlapping(placed_box, current_frame.candidates, self.overlap_threshold)
+            if current_match is not None:
+                result = self._current_track_result(
+                    current_match.id,
+                    current_frame.candidates,
+                    grounded,
+                    match_confidence=box_overlap_score(placed_box, current_match.bbox),
+                )
+                if result is not None:
+                    return result
+                raise NoGroundingMatch(
+                    f"grounded target overlaps track {current_match.id}, but it is not revalidated"
+                )
+            label = grounded.label or description_text or "point target"
+            if grounded.label == "box":
+                label = description_text or "point target"
+            candidate = self.tracker.seed(
+                placed_box,
+                current_frame,
+                label=label,
+                confidence=grounded.confidence,
+                source="point",
+            )
+            current_frame.candidates = self.tracker.current_candidates
+            return PointResult(
+                current_frame.frame_id,
+                candidate,
+                grounded,
+                box_overlap_score(placed_box, grounded.bbox),
+            )
+
+        if not compensate:
+            with lock:
+                return commit(grounded.bbox, self.buffer.latest())
+        try:
+            compensator = BoxCompensator(grounded.bbox, old_frame)
+        except (RuntimeError, ValueError):
+            with lock:
+                return commit(None, self.buffer.latest())
+        return commit_on_latest(self.buffer, compensator, lock, commit)
 
     def _fast_forward_reid(
         self,
         reference: Sequence[float],
-        frames: Sequence[Frame],
-        latest_candidates: Sequence[Candidate],
+        latest_frame: Frame,
     ) -> tuple[Candidate, float] | None:
-        matching_ids: set[int] = set()
-        for frame in frames:
-            for candidate in frame.candidates:
-                similarity = cosine_similarity(reference, candidate.embedding)
-                if similarity is not None and similarity >= self.reid_threshold:
-                    matching_ids.add(candidate.id)
+        """Pick the latest-frame candidate whose current appearance best matches the reference.
+
+        Tracks are embedded only when created, so current appearance comes from the tracker's
+        shared lazy per-frame cache: at most one encode per latest candidate, none for history.
+        """
+        lock = self._state_lock if self._state_lock is not None else nullcontext()
         best: tuple[Candidate, float] | None = None
-        for candidate in latest_candidates:
-            if candidate.id not in matching_ids:
-                continue
-            similarity = cosine_similarity(reference, candidate.embedding)
+        for candidate in latest_frame.candidates:
+            with lock:
+                embedding = self.tracker.frame_embedding(candidate, latest_frame.image)
+            similarity = cosine_similarity(reference, embedding)
             if similarity is not None and similarity >= self.reid_threshold:
                 if best is None or similarity > best[1]:
                     best = (candidate, similarity)
@@ -344,13 +326,13 @@ class GroundingPointer:
             if candidate is None:
                 continue
             track_id = candidate.id
-            confidence = max(confidence, _box_overlap_score(previous_box, candidate.bbox))
+            confidence = max(confidence, box_overlap_score(previous_box, candidate.bbox))
             previous_box = candidate.bbox
         if track_id is None:
             candidate = _best_overlapping(grounded_box, frames[0].candidates, self.overlap_threshold)
             if candidate is not None:
                 track_id = candidate.id
-                confidence = _box_overlap_score(grounded_box, candidate.bbox)
+                confidence = box_overlap_score(grounded_box, candidate.bbox)
         return (track_id, confidence) if track_id is not None else None
 
     def _current_track_result(
@@ -362,8 +344,12 @@ class GroundingPointer:
         match_confidence: float,
     ) -> PointResult | None:
         candidate = next((item for item in latest_candidates if item.id == track_id), None)
-        validated = self.tracker.validate_candidate(track_id)
-        if candidate is None or validated is None:
+        if candidate is None:
+            return None
+        lock = self._state_lock if self._state_lock is not None else nullcontext()
+        with lock:
+            validated = self.tracker.validate_candidate(track_id)
+        if validated is None:
             return None
         return PointResult(validated.frame_id, validated, grounded, match_confidence)
 
@@ -401,30 +387,31 @@ def _validate_reference_box(value: Sequence[float], image: Any = None) -> BBox:
     return coordinates  # type: ignore[return-value]
 
 
-def _as_pil_rgb(image: Any) -> tuple[Any, int, int]:
-    try:
-        from PIL import Image
-    except ImportError as exc:
-        raise RuntimeError("Pillow is required to prepare images for Hugging Face grounding") from exc
-    if hasattr(image, "convert") and hasattr(image, "size"):
-        rgb = image.convert("RGB")
-        return rgb, int(rgb.height), int(rgb.width)
-    try:
-        import cv2
-        import numpy as np
-    except ImportError as exc:
-        raise RuntimeError("OpenCV and NumPy are required to prepare camera frames for grounding") from exc
-    array = np.asarray(image)
-    if array.ndim == 2:
-        rgb_array = cv2.cvtColor(array, cv2.COLOR_GRAY2RGB)
-    elif array.shape[2] == 4:
-        rgb_array = cv2.cvtColor(array, cv2.COLOR_BGRA2RGB)
-    else:
-        rgb_array = cv2.cvtColor(array, cv2.COLOR_BGR2RGB)
-    return Image.fromarray(rgb_array), int(array.shape[0]), int(array.shape[1])
+def commit_on_latest(
+    buffer: FrameBuffer,
+    compensator: BoxCompensator,
+    lock: Any,
+    commit: Any,
+    *,
+    rounds: int = 4,
+) -> Any:
+    """Carry a compensated box up to the newest frame and call ``commit(box, frame)`` under lock.
+
+    Most catch-up happens outside the perception lock; frames cannot be appended while it is
+    held, so the final step commits on the true latest frame instead of racing the camera.
+    """
+    for _ in range(rounds):
+        compensator.advance(buffer.frames_after(compensator.frame_id)[1:])
+        with lock:
+            latest = buffer.latest()
+            if latest is not None and latest.frame_id == compensator.frame_id:
+                return commit(compensator.box, latest)
+    with lock:
+        compensator.advance(buffer.frames_after(compensator.frame_id)[1:])
+        return commit(compensator.box, buffer.latest())
 
 
-def _coerce_grounding_box(item: GroundingBox | dict[str, Any]) -> GroundingBox:
+def coerce_grounding_box(item: GroundingBox | dict[str, Any]) -> GroundingBox:
     if isinstance(item, GroundingBox):
         return item
     return GroundingBox(
@@ -439,19 +426,24 @@ def _best_overlapping(
 ) -> Candidate | None:
     best: tuple[Candidate, float] | None = None
     for candidate in candidates:
-        score = _box_overlap_score(box, candidate.bbox)
+        score = box_overlap_score(box, candidate.bbox)
         if best is None or score > best[1]:
             best = (candidate, score)
     return best[0] if best is not None and best[1] >= threshold else None
 
 
-def _box_overlap_score(left: BBox, right: BBox) -> float:
-    intersection = _intersection_area(left, right)
+def box_overlap_score(reference: BBox, candidate: BBox) -> float:
+    """IoU, or the share of the reference box that lies inside the candidate if larger.
+
+    Asymmetric on purpose: a torso box inside a person track matches that person, but a large
+    cabinet box that merely contains a small person box does not claim the person's ID.
+    """
+    intersection = _intersection_area(reference, candidate)
     if intersection <= 0:
         return 0.0
-    union = _area(left) + _area(right) - intersection
-    coverage = intersection / min(_area(left), _area(right)) if min(_area(left), _area(right)) > 0 else 0.0
-    return max(box_iou(left, right), coverage)
+    reference_area = _area(reference)
+    covered = intersection / reference_area if reference_area > 0 else 0.0
+    return max(box_iou(reference, candidate), covered)
 
 
 def _intersection_area(left: BBox, right: BBox) -> float:
@@ -464,5 +456,3 @@ def _area(box: BBox) -> float:
     return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
 
 
-def _box_iou(left: BBox, right: BBox) -> float:
-    return box_iou(left, right)

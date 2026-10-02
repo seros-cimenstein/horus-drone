@@ -9,6 +9,8 @@ from .types import Candidate, Frame, SetOfMarkPayload
 
 _PERSON_COLOR = (80, 220, 40)
 _OBJECT_COLOR = (0, 165, 255)
+_OPEN_VOCAB_COLOR = (255, 0, 255)
+_POINT_COLOR = (0, 255, 255)
 
 
 def render_live_view(
@@ -46,9 +48,15 @@ def render_live_view(
     for candidate in frame.candidates:
         x1, y1, x2, y2 = (int(round(value)) for value in candidate.bbox)
         is_person = candidate.class_name.casefold() == "person"
-        color = _PERSON_COLOR if is_person else _OBJECT_COLOR
+        color = {
+            "open_vocab": _OPEN_VOCAB_COLOR,
+            "point": _POINT_COLOR,
+        }.get(candidate.source, _PERSON_COLOR if is_person else _OBJECT_COLOR)
         cv2.rectangle(rendered, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
-        lines = [f"#{candidate.id} {candidate.class_name} {candidate.confidence:.2f}"]
+        lines = [
+            f"#{candidate.id} {candidate.class_name} {candidate.confidence:.2f}",
+            f"source {candidate.source}",
+        ]
         shirt = candidate.attributes.get("shirt_colour")
         if shirt is not None:
             shirt_confidence = candidate.attributes.get("shirt_colour_confidence")
@@ -183,6 +191,7 @@ def render_set_of_marks(
                 "class_name": candidate.class_name,
                 "class_id": candidate.class_id,
                 "attributes": dict(candidate.attributes),
+                "source": candidate.source,
                 "confidence": candidate.confidence,
             }
         )

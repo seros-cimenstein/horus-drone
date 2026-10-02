@@ -46,8 +46,10 @@ perception:
   source: udp://0.0.0.0:5600
   detector_model: models/yolov8n.onnx
   embedding_model: models/osnet_x0_25_msmt17.onnx
-  grounding_model: IDEA-Research/grounding-dino-tiny
+  grounder_url: http://127.0.0.1:8100
   max_fps: 5.0
+  open_vocab_hz: 0.5
+  vocabulary: []
   onnx_intra_op_num_threads: 2
   onnx_inter_op_num_threads: 1
   ring_buffer_s: 5.0
@@ -67,5 +69,6 @@ commander:
   api_key_env: ANTHROPIC_API_KEY
   max_tokens: 800
   timeout_s: 180.0
-  max_turns: 8
+  # Claude's agentic tool-call budget applies to each stream-json turn, not the whole mission.
+  max_turns: 40
   claude_command: claude

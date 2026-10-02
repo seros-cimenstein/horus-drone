@@ -100,7 +100,8 @@ class OpenCVCameraReader:
                 raise RuntimeError(
                     "UDP/RTP camera input requires OpenCV built with GStreamer, but this build has none. "
                     "In the simulation container use Ubuntu's system python3-opencv; do not install "
-                    "opencv-python-headless, which lacks GStreamer and shadows the system package."
+                    "the opencv-headless extra (opencv-contrib-python-headless), which lacks GStreamer "
+                    "and shadows the system package."
                 )
             host, port = self.config.udp_host, self.config.udp_port
             if is_rtp_uri:

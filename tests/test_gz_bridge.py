@@ -37,6 +37,7 @@ class _Node:
     def __init__(self):
         self.publishers = {}
         self.subscription = None
+        self.subscriptions = {}
 
     def advertise(self, topic, message_type):
         assert message_type is _StringMsg
@@ -46,17 +47,21 @@ class _Node:
 
     def subscribe(self, message_type, topic, callback):
         assert message_type is _StringMsg
-        self.subscription = (topic, callback)
+        if self.subscription is None:
+            self.subscription = (topic, callback)
+        self.subscriptions[topic] = callback
         return True
 
 
 class _TaskHttpClient:
     def __init__(self):
         self.request = None
+        self.requests = []
         self.called = asyncio.Event()
 
-    async def post(self, url, *, headers, json):
+    async def post(self, url, *, headers, json=None):
         self.request = (url, headers, json)
+        self.requests.append(self.request)
         self.called.set()
         return SimpleNamespace(raise_for_status=lambda: None)
 
@@ -123,8 +128,10 @@ def test_config_defaults_and_environment_contract():
 
     assert config.commander_url == "http://127.0.0.1:8765"
     assert config.mcp_url == "http://127.0.0.1:8000/mcp"
-    assert (config.task_topic, config.events_topic, config.state_topic) == (
+    assert (config.task_topic, config.emergency_topic, config.reset_topic, config.events_topic, config.state_topic) == (
         "/horus/task",
+        "/horus/emergency",
+        "/horus/reset",
         "/horus/events",
         "/horus/state",
     )
@@ -134,11 +141,45 @@ def test_config_defaults_and_environment_contract():
             "HORUS_COMMANDER_TOKEN": "commander-secret",
             "HORUS_MCP_URL": "http://mcp:8000/mcp",
             "HORUS_MCP_TOKEN": "mcp-secret",
+            "HORUS_EMERGENCY_TOPIC": "/control/emergency",
+            "HORUS_RESET_TOPIC": "/control/reset",
         }
     )
     assert configured.commander_token == "commander-secret"
     assert configured.mcp_url == "http://mcp:8000/mcp"
     assert configured.mcp_token == "mcp-secret"
+    assert configured.emergency_topic == "/control/emergency"
+    assert configured.reset_topic == "/control/reset"
+
+
+def test_gazebo_emergency_and_reset_topics_post_authenticated_commander_requests():
+    async def scenario():
+        config = BridgeConfig(commander_url="http://commander:8765/", commander_token="secret")
+        node = _Node()
+        http_client = _TaskHttpClient()
+        bridge = GazeboBridge(node, _StringMsg, http_client, config, asyncio.get_running_loop())
+
+        emergency = node.subscriptions["/horus/emergency"]
+        await asyncio.to_thread(emergency, SimpleNamespace(data="land"))
+        await asyncio.wait_for(http_client.called.wait(), timeout=1)
+        assert http_client.request == (
+            "http://commander:8765/emergency",
+            {"Authorization": "Bearer secret"},
+            {"action": "land"},
+        )
+
+        http_client.called.clear()
+        reset = node.subscriptions["/horus/reset"]
+        await asyncio.to_thread(reset, SimpleNamespace(data="reset"))
+        await asyncio.wait_for(http_client.called.wait(), timeout=1)
+        assert http_client.request == (
+            "http://commander:8765/reset",
+            {"Authorization": "Bearer secret"},
+            None,
+        )
+        assert bridge.events_publisher is node.publishers["/horus/events"]
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(
@@ -355,6 +396,11 @@ def test_commander_events_render_tool_calls_and_errors_readably():
         "✗ stale frame"
     )
     assert line('{"kind":"task_error","error":"boom"}') == "✗ Task failed: boom"
+    assert line('{"kind":"emergency","action":"land","status":"executed","result":"ok"}') == (
+        "!! Emergency LAND executed: ok"
+    )
+    assert line('{"kind":"session_restarted"}') == "↻ Claude session restarted"
+    assert line('{"kind":"target_lost","summary":"track 3"}') == "• target lost: track 3"
     assert line('{"kind":"assistant_text","text":"Checking\\n  state"}') == "Claude: Checking state"
     long_line = line('{"kind":"assistant_text","text":"' + "x" * 1000 + '"}')
     assert len(long_line) == len("Claude: ") + 400 and long_line.endswith("…")

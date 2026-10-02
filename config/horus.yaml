@@ -36,25 +36,43 @@ executor:
   arrival_tolerance_m: 0.25
   follow_distance_m: 2.0
   target_width_m: null
-  # Monocular range from box height. The simulated people (MakeHuman mesh) are 1.90 m tall;
-  # real deployments should use the expected person height (~1.7 m).
+  # Monocular range from box height, person targets only (person label, shirt-colour attribute,
+  # or a person label remembered for the track). The simulated people (MakeHuman mesh) are 1.90 m
+  # tall; real deployments should use the expected person height (~1.7 m).
   target_height_m: 1.9
   target_match_threshold: 0.72
   camera_horizontal_fov_deg: 114.59155902616465
+  default_gimbal_pitch_deg: 0.0
   link_loss_rth_delay_s: 30.0
+  # Wall-clock freshness limit for pose/heading/range/frame samples that drive motion; the flight
+  # link requests the control messages at 20 Hz autopilot time so this holds at low sim RTF.
+  telemetry_max_age_s: 1.5
+  # Precision landing owns the descent in GUIDED; if altitude stalls below this rate for this
+  # long (autopilot prec-land failsafe, lost tag), hand back to LAND instead of hovering armed.
+  precision_landing_stall_s: 12.0
+  precision_landing_min_descent_m_s: 0.05
+  # A tag that is only detected every few frames must not pulse the setpoint to zero: the last
+  # validated centring/descent setpoint stays active this long after the last detection.
+  precision_landing_target_grace_s: 1.0
 perception:
   enabled: true
   point_compensation_enabled: true
   source: udp://0.0.0.0:5600
   detector_model: models/yolov8n.onnx
   embedding_model: models/osnet_x0_25_msmt17.onnx
-  grounding_model: IDEA-Research/grounding-dino-tiny
+  grounder_url: http://127.0.0.1:8100
   max_fps: 5.0
+  open_vocab_hz: 0.5
+  vocabulary: []
   onnx_intra_op_num_threads: 2
   onnx_inter_op_num_threads: 1
-  # Frames are kept by wall time; at real-time factor ~0.65 a 3 s simulated delay spans ~5 s wall.
-  ring_buffer_s: 10.0
+  # Frames are kept by wall time. The commander often thinks 10-25 s between get_frame and point,
+  # so keep 30 s (~140 MB at 5 fps, 640x480); tracker retention stays capped at 10 s.
+  ring_buffer_s: 30.0
   render_width_px: 640
+  # Keep a live track's identity through a marginal appearance-score dip (see the tracker): the
+  # revalidation threshold itself is never lowered, and re-acquisition gets no grace.
+  revalidation_grace_s: 1.0
   # Normalized [x1, y1, x2, y2] camera boxes for the propellers; ignore detections ≥50% covered.
   ignore_regions:
     - [0.0, 0.0, 0.22, 0.24]
@@ -70,6 +88,7 @@ commander:
   api_key_env: ANTHROPIC_API_KEY
   max_tokens: 800
   timeout_s: 900.0
+  # Claude's agentic tool-call budget applies to each stream-json turn, not the whole mission.
   max_turns: 40
   claude_command: claude
   # Claude Code commander: 'opus' tracks the newest Opus model the account can use.
