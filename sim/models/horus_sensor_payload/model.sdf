@@ -3,8 +3,10 @@
   <model name="horus_sensor_payload">
     <link name="payload">
       <!-- Virtual sensors only: no payload visuals or collisions can occlude the camera.
-           Each single-beam ToF is yawed to the sector it is bridged as (scripts/tof_bridges_indoor.sh):
-           MAVLink orientation k (clockwise, 45 deg steps) is body yaw -k*45 deg here. -->
+           Each single-beam ToF is yawed to the sector it is bridged as (scripts/tof_bridges.sh):
+           MAVLink orientation k (clockwise, 45 deg steps) is body yaw -k*45 deg here.
+           Sensor topics are deliberately unset: gz-sim scopes them under the world and every
+           enclosing model, so the same payload works in the indoor and outdoor airframes. -->
       <inertial>
         <mass>0.04</mass>
         <inertia>
@@ -14,7 +16,6 @@
       </inertial>
       <sensor name="proximity_front" type="gpu_lidar">
         <pose>0.24 0 0.08 0 0 0</pose>
-        <topic>/world/horus_indoor/model/horus_iris/model/horus_sensor_payload/link/payload/sensor/proximity_front/scan</topic>
         <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
         <lidar>
           <scan>
@@ -26,7 +27,6 @@
       </sensor>
       <sensor name="proximity_front_right" type="gpu_lidar">
         <pose>0.30 -0.30 0.08 0 0 -0.7853981634</pose>
-        <topic>/world/horus_indoor/model/horus_iris/model/horus_sensor_payload/link/payload/sensor/proximity_front_right/scan</topic>
         <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
         <lidar>
           <scan>
@@ -38,7 +38,6 @@
       </sensor>
       <sensor name="proximity_right" type="gpu_lidar">
         <pose>0 -0.32 0.08 0 0 -1.5707963268</pose>
-        <topic>/world/horus_indoor/model/horus_iris/model/horus_sensor_payload/link/payload/sensor/proximity_right/scan</topic>
         <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
         <lidar>
           <scan>
@@ -50,7 +49,6 @@
       </sensor>
       <sensor name="proximity_rear" type="gpu_lidar">
         <pose>-0.32 0 0.08 0 0 3.1415926536</pose>
-        <topic>/world/horus_indoor/model/horus_iris/model/horus_sensor_payload/link/payload/sensor/proximity_rear/scan</topic>
         <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
         <lidar>
           <scan>
@@ -62,7 +60,6 @@
       </sensor>
       <sensor name="proximity_left" type="gpu_lidar">
         <pose>0 0.32 0.08 0 0 1.5707963268</pose>
-        <topic>/world/horus_indoor/model/horus_iris/model/horus_sensor_payload/link/payload/sensor/proximity_left/scan</topic>
         <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
         <lidar>
           <scan>
@@ -74,7 +71,6 @@
       </sensor>
       <sensor name="proximity_front_left" type="gpu_lidar">
         <pose>0.30 0.30 0.08 0 0 0.7853981634</pose>
-        <topic>/world/horus_indoor/model/horus_iris/model/horus_sensor_payload/link/payload/sensor/proximity_front_left/scan</topic>
         <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
         <lidar>
           <scan>
@@ -86,7 +82,6 @@
       </sensor>
       <sensor name="range_down" type="gpu_lidar">
         <pose>-0.20 0 0.04 0 1.5707963268 0</pose>
-        <topic>/world/horus_indoor/model/horus_iris/model/horus_sensor_payload/link/payload/sensor/range_down/scan</topic>
         <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
         <lidar>
           <scan>

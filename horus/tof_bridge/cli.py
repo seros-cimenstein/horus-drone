@@ -6,6 +6,7 @@ import queue
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from .bridge import DistanceSensorReading, MultiSensorBridge, SensorSpec
@@ -13,6 +14,42 @@ from .transport import subscribe_laser_scan
 
 BRIDGE_SOURCE_SYSTEM = 254
 BRIDGE_SOURCE_COMPONENT = 196  # MAV_COMP_ID_OBSTACLE_AVOIDANCE
+
+# The standard HORUS ToF payload (sim/models/horus_sensor_payload): sensor name, MAVLink
+# DISTANCE_SENSOR orientation, and sensor ID. Orientations follow the MAVLink clockwise
+# 45-degree steps; the payload SDF yaws each beam to the matching body direction.
+PAYLOAD_SENSORS: tuple[tuple[str, int, int], ...] = (
+    ("proximity_front", 0, 0),
+    ("proximity_front_right", 1, 1),
+    ("proximity_right", 2, 2),
+    ("proximity_rear", 4, 3),
+    ("proximity_left", 6, 4),
+    ("proximity_front_left", 7, 5),
+    ("range_down", 25, 6),
+)
+PAYLOAD_LINK = "payload"
+
+
+def payload_topic_root(world: str, model_chain: str) -> str:
+    """Scoped LaserScan topic root of the ToF payload inside a Gazebo world.
+
+    ``model_chain`` is the slash- or comma-separated chain of model names between the world
+    and the payload, e.g. ``horus_iris/horus_sensor_payload`` (indoor) or
+    ``horus_iris/iris_with_gimbal/horus_sensor_payload`` (outdoor airframe). gz-sim scopes
+    sensor topics under every enclosing model, so the chain is what differs between worlds.
+    """
+    names = [name.strip() for name in model_chain.replace(",", "/").split("/") if name.strip()]
+    if not world.strip() or not names:
+        raise ValueError("--world and --model-chain must name the world and the payload's parent models")
+    scope = "".join(f"/model/{name}" for name in names)
+    return f"/world/{world.strip()}{scope}/link/{PAYLOAD_LINK}/sensor"
+
+
+def payload_sensors(world: str, model_chain: str) -> list[SensorSpec]:
+    """The seven standard payload sensors as SensorSpecs scoped to ``world``."""
+    root = payload_topic_root(world, model_chain)
+    return [SensorSpec(f"{root}/{name}/scan", orientation, sensor_id)
+            for name, orientation, sensor_id in PAYLOAD_SENSORS]
 
 
 class _PymavlinkSender:
@@ -51,9 +88,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sensor",
         action="append",
-        required=True,
         metavar="TOPIC:ORIENTATION[:ID]",
-        help="LaserScan topic and MAVLink orientation; repeat once per sensor",
+        help="LaserScan topic and MAVLink orientation; repeat once per sensor "
+             "(alternative to --world/--model-chain)",
+    )
+    parser.add_argument(
+        "--world",
+        help="Gazebo world name; with --model-chain, bridges the standard seven-sensor ToF payload",
+    )
+    parser.add_argument(
+        "--model-chain",
+        help="model names between the world and the payload, slash- or comma-separated "
+             "(e.g. horus_iris/iris_with_gimbal/horus_sensor_payload)",
     )
     parser.add_argument(
         "--mavlink",
@@ -70,9 +116,38 @@ def _parser() -> argparse.ArgumentParser:
         "--startup-timeout",
         type=float,
         default=15.0,
-        help="seconds to wait for one valid scan from every topic; 0 disables the timeout",
+        help="seconds before warning that no scan arrived yet (never fatal; the lockstep "
+             "world does not run until a flight client connects)",
     )
     return parser
+
+
+class _StartupWatch:
+    """Non-fatal startup progress for the ToF bridge.
+
+    SITL's lockstep world only advances while a flight client holds its MAVLink port, so a
+    bridge started before anyone connects legitimately sees no LaserScan for minutes. Warn
+    periodically instead of exiting: a missing topic is a configuration error the log names,
+    not a reason to stop the simulation.
+    """
+
+    def __init__(self, timeout: float, interval: float = 30.0, *,
+                 started: float | None = None) -> None:
+        self._timeout = timeout
+        self._interval = interval
+        self._started = time.monotonic() if started is None else started
+        self._next_warning = self._started + timeout
+
+    def update(self, missing: Sequence[str], *, now: float | None = None) -> str | None:
+        """Return the periodic warning to log, or None while the timeout has not elapsed."""
+        if not missing:
+            return None
+        now = time.monotonic() if now is None else now
+        if now < self._started + self._timeout or now < self._next_warning:
+            return None
+        self._next_warning = now + self._interval
+        return (f"waiting for first scan (no flight client holding SITL yet?): "
+                f"{', '.join(missing)}")
 
 
 def _parse_sensor(value: str, default_sensor_id: int) -> SensorSpec:
@@ -129,7 +204,6 @@ def _serve(
 
         return on_scan
 
-    started = time.monotonic()
     for sensor in sensors:
         nodes.append(subscribe_laser_scan(sensor.topic, scan_callback(sensor.topic)))
         print(
@@ -139,6 +213,7 @@ def _serve(
         )
 
     ready = False
+    watch = _StartupWatch(startup_timeout)
     while True:
         try:
             callback_error = callback_errors.get_nowait()
@@ -154,11 +229,11 @@ def _serve(
                 flush=True,
             )
             ready = True
-        if missing and startup_timeout and time.monotonic() - started >= startup_timeout:
-            raise RuntimeError(
-                f"no valid LaserScan received on {', '.join(missing)} within "
-                f"{startup_timeout:g} seconds"
-            )
+        if not ready:
+            # Never fatal: the world may simply have no flight client yet (see _StartupWatch).
+            warning = watch.update(missing)
+            if warning is not None:
+                print(warning, flush=True)
         time.sleep(0.05)
 
 
@@ -169,8 +244,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--rate-hz must be between 10 and 20")
     if not math.isfinite(args.startup_timeout) or args.startup_timeout < 0:
         parser.error("--startup-timeout must be finite and non-negative")
+    if bool(args.world) != bool(args.model_chain):
+        parser.error("--world and --model-chain must be given together")
+    if args.world and args.sensor:
+        parser.error("--sensor cannot be combined with --world/--model-chain")
+    if not args.world and not args.sensor:
+        parser.error("one of --sensor or --world/--model-chain is required")
     try:
-        sensors = [_parse_sensor(value, index) for index, value in enumerate(args.sensor)]
+        sensors = (payload_sensors(args.world, args.model_chain) if args.world
+                   else [_parse_sensor(value, index) for index, value in enumerate(args.sensor)])
     except ValueError as exc:
         parser.error(str(exc))
     if len({sensor.topic for sensor in sensors}) != len(sensors):
