@@ -1,0 +1,65 @@
+name: S12-urban-follow-jogger-through-street-occlusion
+driver: ../sim/scripts/civilian_life.py
+driver_args:
+  - --scenario
+  - sim/scenarios/horus_urban.yaml
+  - --group
+  - follow_jogger
+  - --trace
+  - runs/s12_jogger_trace.jsonl
+steps:
+  - tool: take_off
+    arguments:
+      altitude_m: 10.0
+      heading_deg: 98.5
+      ttl_s: 90.0
+    timeout_s: 95.0
+  - tool: goto
+    arguments:
+      pose:
+        north_m: 0.0
+        east_m: 16.0
+        up_m: 10.0
+      heading_deg: 98.5
+      ttl_s: 90.0
+    timeout_s: 95.0
+  - tool: goto
+    arguments:
+      pose:
+        north_m: -42.0
+        east_m: 16.0
+        up_m: 10.0
+      heading_deg: 98.5
+      ttl_s: 90.0
+    timeout_s: 95.0
+  - tool: goto
+    arguments:
+      pose:
+        north_m: -40.5
+        east_m: 17.32
+        up_m: 10.0
+      heading_deg: 120.0
+      ttl_s: 90.0
+    timeout_s: 95.0
+  - select_candidate:
+      attribute: shirt_colour
+      equals: red
+      choose: largest
+      store_as: jogger
+      timeout_s: 15.0
+  - start_driver: {}
+  - tool: follow
+    arguments:
+      id: "$jogger.id"
+      dist_m: 5.0
+      ttl_s: 45.0
+    timeout_s: 50.0
+    expect_status: expired
+    continue_on_failure: true
+    store_as: follow_result
+  - assert_reacquired:
+      target: "$jogger"
+      follow: "$follow_result"
+      min_time_s: 3.0
+      max_time_s: 15.0
+      output_dir: ../runs

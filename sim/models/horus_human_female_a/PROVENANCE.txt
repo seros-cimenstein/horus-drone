@@ -1,0 +1,31 @@
+Source: Gazebo Fuel OpenRobotics/Casual female, version 4
+URL: https://fuel.gazebosim.org/1.0/OpenRobotics/models/Casual%20female/4/Casual%20female.zip
+Archive SHA-256: e03944df8f010c7d6cf85fe61b2a9bf2899eed971e73fb76461f4705edeffe5d (byte-equal to the exact-version Fuel endpoint)
+Author (model.config): Rohit Salem
+Licence: Creative Commons Zero v1.0 Universal (CC0 1.0) (Fuel model-level publisher metadata at import time; the archive itself embeds no licence text)
+Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used.
+Notes: Created with MakeHuman; the asset-level licences of the bundled MakeHuman clothing, hair and skin (female_casualsuit01/02, shoes05, ponytail01, eyebrow002, eyelashes01) were not independently verified.
+Files: materials/textures/brown_eye.png, materials/textures/eyebrow002.png, materials/textures/eyelashes01.png, materials/textures/female_casualsuit01_diffuse.png, materials/textures/female_casualsuit02_diffuse.png, materials/textures/ponytail01_diffuse.png, materials/textures/shoes05_diffuse.png, materials/textures/tongue01_diffuse.png, materials/textures/young_lightskinned_female_diffuse.png, meshes/casual_female.dae
+
+Upstream model.config (verbatim):
+<?xml version="1.0"?>
+<model>
+  <name>Casual Female</name>
+  <version>1.0</version>
+  <sdf version="1.5">model.sdf</sdf>
+
+  <author>
+    <name>Rohit Salem</name>
+    <email>rohitsalem@gmail.com</email>
+  </author>
+
+  <description>
+    A standing person-Casual Female. Model created with Makehuman (http://www.makehuman.org/)
+  </description>
+</model>
+
+meshes/casual_female.dae COLLADA contributor (verbatim):
+<contributor>
+      <author>Blender User</author>
+      <authoring_tool>Blender 2.79.0 commit date:2017-09-11, commit time:10:43, hash:5bd8ac9abfa</authoring_tool>
+    </contributor>

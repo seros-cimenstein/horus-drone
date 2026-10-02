@@ -1,0 +1,30 @@
+Source: Gazebo Fuel OpenRobotics/Hatchback, version 3
+URL: https://fuel.gazebosim.org/1.0/OpenRobotics/models/Hatchback/3/Hatchback.zip
+Archive SHA-256: dcd34e68cf43863991768c3ddbdeb322d6ee8bddaa01aa7da8267bbacfdb60ed (byte-equal to the exact-version Fuel endpoint)
+Author (model.config): Nate Koenig
+Licence: Creative Commons Zero v1.0 Universal (CC0 1.0) (Fuel model-level publisher metadata at import time; the archive itself embeds no licence text)
+Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used.
+Files: materials/textures/hatchback.png, materials/textures/wheels3.png, meshes/hatchback.obj
+
+Upstream model.config (verbatim):
+<?xml version="1.0"?>
+
+<model>
+  <name>Hatchback</name>
+  <version>1.0</version>
+  <sdf version="1.6">model.sdf</sdf>
+
+  <author>
+    <name>Nate Koenig</name>
+    <email>nate@osrfoundation.org</email>
+  </author>
+
+  <description>
+    A hatchback
+  </description>
+</model>
+
+meshes/hatchback.obj header (verbatim):
+# 3ds Max Wavefront OBJ Exporter v0.97b - (c)2007 guruware
+# File Created: 05.12.2016 00:43:45
+#

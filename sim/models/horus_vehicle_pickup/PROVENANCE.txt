@@ -1,0 +1,33 @@
+Source: Gazebo Fuel OpenRobotics/Pickup, version 4
+URL: https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pickup/4/Pickup.zip
+Archive SHA-256: fa4d6702828deaef54e50717ddc341e0b9b487eaaea9a0605c91419c1744ab9e (byte-equal to the exact-version Fuel endpoint)
+Author (model.config): Nate Koenig
+Licence: Creative Commons Zero v1.0 Universal (CC0 1.0) (Fuel model-level publisher metadata at import time; the archive itself embeds no licence text)
+Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used.
+Notes: The COLLADA file names its author 'Cole' (OSRF Vehicles.max export); model.config names Nate Koenig.
+Files: materials/textures/pickup_diffuse.jpg, materials/textures/wheels2.jpg, meshes/pickup.dae
+
+Upstream model.config (verbatim):
+<?xml version="1.0"?>
+
+<model>
+  <name>Pickup</name>
+  <version>1.0</version>
+  <sdf version="1.6">model.sdf</sdf>
+
+  <author>
+    <name>Nate Koenig</name>
+    <email>nate@osrfoundation.org</email>
+  </author>
+
+  <description>
+    A pickup truck.
+  </description>
+</model>
+
+meshes/pickup.dae COLLADA contributor (verbatim):
+<contributor>
+      <author>Cole</author>
+      <authoring_tool>OpenCOLLADA for 3ds Max;  Version: 1.3.1;  Revision: 847M;  Platform: x64;  Configuration: Release_Max2012_static</authoring_tool>
+      <source_data>file:///C:/Users/Cole/Desktop/OSRF_Models/Icons/Exports/Vehicles.max</source_data>
+    </contributor>

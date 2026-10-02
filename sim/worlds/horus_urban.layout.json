@@ -1,0 +1,1767 @@
+{
+  "world": "horus_urban",
+  "kind": "urban",
+  "seed": 2028,
+  "canonical": true,
+  "bounds": {
+    "x": [
+      -75,
+      75
+    ],
+    "y": [
+      -75,
+      75
+    ]
+  },
+  "home": [
+    0,
+    0
+  ],
+  "scenario": "../scenarios/horus_urban.yaml",
+  "sdf": "horus_urban.sdf",
+  "ground": null,
+  "people": [
+    {
+      "model": "civ_commuter_01",
+      "role": "commuter",
+      "asset": "person_blue_kinematic",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        -42.0,
+        -9.0
+      ],
+      "yaw_deg": 89.95437383553924,
+      "posture": "standing",
+      "clothing": "blue",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          -42.0,
+          -9.0
+        ],
+        [
+          -42.0,
+          7.0
+        ],
+        [
+          -42.0,
+          24.0
+        ],
+        [
+          -42.0,
+          40.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.25
+    },
+    {
+      "model": "civ_commuter_02",
+      "role": "commuter",
+      "asset": "person_green_kinematic",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        -42.0,
+        8.0
+      ],
+      "yaw_deg": -89.95437383553924,
+      "posture": "standing",
+      "clothing": "green",
+      "shirt_colour_attribute": "green",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "green"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          -42.0,
+          8.0
+        ],
+        [
+          -42.0,
+          -5.0
+        ],
+        [
+          -42.0,
+          -27.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.25
+    },
+    {
+      "model": "civ_commuter_03",
+      "role": "commuter",
+      "asset": "person_dark",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        -8.0,
+        43.0
+      ],
+      "yaw_deg": 0.0,
+      "posture": "standing",
+      "clothing": "dark",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          -8.0,
+          43.0
+        ],
+        [
+          8.0,
+          43.0
+        ],
+        [
+          27.0,
+          43.0
+        ],
+        [
+          40.0,
+          43.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.25
+    },
+    {
+      "model": "civ_commuter_04",
+      "role": "commuter",
+      "asset": "person_orange",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        40.0,
+        43.0
+      ],
+      "yaw_deg": 179.9087476710785,
+      "posture": "standing",
+      "clothing": "orange",
+      "shirt_colour_attribute": "red",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "red"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          40.0,
+          43.0
+        ],
+        [
+          23.0,
+          43.0
+        ],
+        [
+          6.0,
+          43.0
+        ],
+        [
+          -8.0,
+          43.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.25
+    },
+    {
+      "model": "civ_commuter_05",
+      "role": "commuter",
+      "asset": "person_dark",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        -42.0,
+        -40.0
+      ],
+      "yaw_deg": 89.95437383553924,
+      "posture": "standing",
+      "clothing": "dark",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          -42.0,
+          -40.0
+        ],
+        [
+          -42.0,
+          -20.0
+        ],
+        [
+          -42.0,
+          -5.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.25
+    },
+    {
+      "model": "civ_commuter_06",
+      "role": "commuter",
+      "asset": "person_blue_kinematic",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        -42.0,
+        38.0
+      ],
+      "yaw_deg": -89.95437383553924,
+      "posture": "standing",
+      "clothing": "blue",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          -42.0,
+          38.0
+        ],
+        [
+          -42.0,
+          25.0
+        ],
+        [
+          -42.0,
+          12.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.25
+    },
+    {
+      "model": "civ_commuter_07",
+      "role": "commuter",
+      "asset": "person_green_kinematic",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        6.0,
+        -42.0
+      ],
+      "yaw_deg": 179.9087476710785,
+      "posture": "standing",
+      "clothing": "green",
+      "shirt_colour_attribute": "green",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "green"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          6.0,
+          -42.0
+        ],
+        [
+          -11.0,
+          -42.0
+        ],
+        [
+          -29.0,
+          -42.0
+        ],
+        [
+          -41.0,
+          -42.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.25
+    },
+    {
+      "model": "civ_commuter_08",
+      "role": "commuter",
+      "asset": "person_dark",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        40.0,
+        -42.0
+      ],
+      "yaw_deg": 0.0,
+      "posture": "standing",
+      "clothing": "dark",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          40.0,
+          -42.0
+        ],
+        [
+          25.0,
+          -42.0
+        ],
+        [
+          7.0,
+          -42.0
+        ],
+        [
+          -7.0,
+          -42.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.25
+    },
+    {
+      "model": "civ_commuter_09",
+      "role": "commuter",
+      "asset": "person_blue_kinematic",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        12.0,
+        8.0
+      ],
+      "yaw_deg": 89.95437383553924,
+      "posture": "standing",
+      "clothing": "blue",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          12.0,
+          8.0
+        ],
+        [
+          12.0,
+          24.0
+        ],
+        [
+          12.0,
+          40.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.25
+    },
+    {
+      "model": "civ_commuter_10",
+      "role": "commuter",
+      "asset": "person_green_kinematic",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        -8.0,
+        -8.0
+      ],
+      "yaw_deg": 0.0,
+      "posture": "standing",
+      "clothing": "green",
+      "shirt_colour_attribute": "green",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "green"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          -8.0,
+          -8.0
+        ],
+        [
+          8.0,
+          -8.0
+        ],
+        [
+          18.0,
+          -8.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.25
+    },
+    {
+      "model": "civ_crossing_01",
+      "role": "crossing",
+      "asset": "person_orange",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        -21.65,
+        16.0
+      ],
+      "yaw_deg": 0.0,
+      "posture": "standing",
+      "clothing": "orange",
+      "shirt_colour_attribute": "red",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "red"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          -21.65,
+          16.0
+        ],
+        [
+          -10.35,
+          16.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.0
+    },
+    {
+      "model": "civ_crossing_02",
+      "role": "crossing",
+      "asset": "person_blue_kinematic",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        -10.35,
+        18.0
+      ],
+      "yaw_deg": 180.0,
+      "posture": "standing",
+      "clothing": "blue",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          -10.35,
+          18.0
+        ],
+        [
+          -21.65,
+          18.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.0
+    },
+    {
+      "model": "civ_crossing_03",
+      "role": "crossing",
+      "asset": "person_green_kinematic",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        9.0,
+        -16.0
+      ],
+      "yaw_deg": 0.0,
+      "posture": "standing",
+      "clothing": "green",
+      "shirt_colour_attribute": "green",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "green"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          9.0,
+          -16.0
+        ],
+        [
+          23.0,
+          -16.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.0
+    },
+    {
+      "model": "civ_crossing_04",
+      "role": "crossing",
+      "asset": "person_blue_kinematic",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        23.0,
+        -14.0
+      ],
+      "yaw_deg": 180.0,
+      "posture": "standing",
+      "clothing": "blue",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          23.0,
+          -14.0
+        ],
+        [
+          9.0,
+          -14.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.0
+    },
+    {
+      "model": "civ_bus_waiting_01",
+      "role": "bus_waiting",
+      "asset": "person_blue_kinematic",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        7.4,
+        -9.0
+      ],
+      "yaw_deg": 89.95437383553924,
+      "posture": "standing",
+      "clothing": "blue",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_bus_waiting_02",
+      "role": "bus_waiting",
+      "asset": "person_green_kinematic",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        8.2,
+        -8.1
+      ],
+      "yaw_deg": 143.2394487827058,
+      "posture": "standing",
+      "clothing": "green",
+      "shirt_colour_attribute": "green",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "green"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_bus_waiting_03",
+      "role": "bus_waiting",
+      "asset": "person_dark",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        9.1,
+        -9.2
+      ],
+      "yaw_deg": 68.75493541569878,
+      "posture": "standing",
+      "clothing": "dark",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_bus_waiting_04",
+      "role": "bus_waiting",
+      "asset": "person_orange",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        7.7,
+        -10.1
+      ],
+      "yaw_deg": -11.459155902616466,
+      "posture": "standing",
+      "clothing": "orange",
+      "shirt_colour_attribute": "red",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "red"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_jogger_01",
+      "role": "jogger",
+      "asset": "person_orange",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        -42.0,
+        -31.0
+      ],
+      "yaw_deg": 89.95437383553924,
+      "posture": "standing",
+      "clothing": "orange",
+      "shirt_colour_attribute": "red",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "red"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          -42.0,
+          -31.0
+        ],
+        [
+          -42.0,
+          -14.0
+        ],
+        [
+          -42.0,
+          -1.0
+        ],
+        [
+          -42.0,
+          -14.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 2.5
+    },
+    {
+      "model": "civ_jogger_02",
+      "role": "jogger",
+      "asset": "person_blue_kinematic",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        43.0,
+        27.0
+      ],
+      "yaw_deg": 89.95437383553924,
+      "posture": "standing",
+      "clothing": "blue",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          43.0,
+          27.0
+        ],
+        [
+          43.0,
+          44.0
+        ],
+        [
+          43.0,
+          57.0
+        ],
+        [
+          43.0,
+          44.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 2.5
+    },
+    {
+      "model": "civ_jogger_03",
+      "role": "jogger",
+      "asset": "person_red_kinematic",
+      "group": "follow_jogger",
+      "behavior": "route",
+      "position": [
+        21.65,
+        -43.0
+      ],
+      "yaw_deg": 90.0,
+      "posture": "standing",
+      "clothing": "red",
+      "shirt_colour_attribute": "red",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "red"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          21.65,
+          -43.0
+        ],
+        [
+          21.65,
+          -21.65
+        ],
+        [
+          18.0,
+          -21.65
+        ],
+        [
+          18.0,
+          -10.35
+        ],
+        [
+          21.65,
+          -10.35
+        ],
+        [
+          21.65,
+          10.0
+        ]
+      ],
+      "route_mode": "once",
+      "speed_m_s": 2.5
+    },
+    {
+      "model": "civ_park_sitting_01",
+      "role": "park_sitting",
+      "asset": "person_sitting",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        28.0,
+        -1.0
+      ],
+      "yaw_deg": 0.0,
+      "posture": "sitting",
+      "clothing": "blue",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.22,
+        "x_max_m": 0.46,
+        "y_min_m": -0.22,
+        "y_max_m": 0.22,
+        "top_z_m": 1.17,
+        "torso_z_m": 0.7,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_park_sitting_02",
+      "role": "park_sitting",
+      "asset": "person_sitting",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        34.0,
+        1.5
+      ],
+      "yaw_deg": 90.0,
+      "posture": "sitting",
+      "clothing": "blue",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.22,
+        "x_max_m": 0.46,
+        "y_min_m": -0.22,
+        "y_max_m": 0.22,
+        "top_z_m": 1.17,
+        "torso_z_m": 0.7,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_park_sitting_03",
+      "role": "park_sitting",
+      "asset": "person_sitting",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        29.0,
+        4.0
+      ],
+      "yaw_deg": 0.0,
+      "posture": "sitting",
+      "clothing": "blue",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.22,
+        "x_max_m": 0.46,
+        "y_min_m": -0.22,
+        "y_max_m": 0.22,
+        "top_z_m": 1.17,
+        "torso_z_m": 0.7,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_park_sitting_04",
+      "role": "park_sitting",
+      "asset": "person_sitting",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        35.0,
+        4.0
+      ],
+      "yaw_deg": 180.0,
+      "posture": "sitting",
+      "clothing": "blue",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.22,
+        "x_max_m": 0.46,
+        "y_min_m": -0.22,
+        "y_max_m": 0.22,
+        "top_z_m": 1.17,
+        "torso_z_m": 0.7,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_plaza_crowd_01",
+      "role": "plaza_crowd",
+      "asset": "person_dark",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        -5.5,
+        3.3
+      ],
+      "yaw_deg": 22.918311805232932,
+      "posture": "standing",
+      "clothing": "dark",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_plaza_crowd_02",
+      "role": "plaza_crowd",
+      "asset": "person_blue_kinematic",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        -3.5,
+        2.7
+      ],
+      "yaw_deg": -28.64788975654116,
+      "posture": "standing",
+      "clothing": "blue",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_plaza_crowd_03",
+      "role": "plaza_crowd",
+      "asset": "person_green_kinematic",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        -1.4,
+        4.2
+      ],
+      "yaw_deg": 114.59155902616465,
+      "posture": "standing",
+      "clothing": "green",
+      "shirt_colour_attribute": "green",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "green"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_plaza_crowd_04",
+      "role": "plaza_crowd",
+      "asset": "person_dark",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        1.2,
+        3.6
+      ],
+      "yaw_deg": -137.50987083139756,
+      "posture": "standing",
+      "clothing": "dark",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_plaza_crowd_05",
+      "role": "plaza_crowd",
+      "asset": "person_orange",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        3.8,
+        2.8
+      ],
+      "yaw_deg": 63.02535746439056,
+      "posture": "standing",
+      "clothing": "orange",
+      "shirt_colour_attribute": "red",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "red"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_plaza_crowd_06",
+      "role": "plaza_crowd",
+      "asset": "person_blue_kinematic",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        5.3,
+        0.8
+      ],
+      "yaw_deg": 171.88733853924697,
+      "posture": "standing",
+      "clothing": "blue",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_plaza_crowd_07",
+      "role": "plaza_crowd",
+      "asset": "person_green_kinematic",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        4.2,
+        -1.6
+      ],
+      "yaw_deg": -34.37746770784939,
+      "posture": "standing",
+      "clothing": "green",
+      "shirt_colour_attribute": "green",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "green"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_plaza_crowd_08",
+      "role": "plaza_crowd",
+      "asset": "person_dark",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        2.0,
+        -3.7
+      ],
+      "yaw_deg": 28.64788975654116,
+      "posture": "standing",
+      "clothing": "dark",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_plaza_crowd_09",
+      "role": "plaza_crowd",
+      "asset": "person_blue_kinematic",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        -0.5,
+        -4.2
+      ],
+      "yaw_deg": 103.13240312354819,
+      "posture": "standing",
+      "clothing": "blue",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_plaza_crowd_10",
+      "role": "plaza_crowd",
+      "asset": "person_orange",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        -3.0,
+        -3.6
+      ],
+      "yaw_deg": -120.32113697747289,
+      "posture": "standing",
+      "clothing": "orange",
+      "shirt_colour_attribute": "red",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "red"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_plaza_crowd_11",
+      "role": "plaza_crowd",
+      "asset": "person_green_kinematic",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        -5.3,
+        -1.8
+      ],
+      "yaw_deg": 160.42818263663048,
+      "posture": "standing",
+      "clothing": "green",
+      "shirt_colour_attribute": "green",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "green"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_plaza_crowd_12",
+      "role": "plaza_crowd",
+      "asset": "person_dark",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        -3.7,
+        0.3
+      ],
+      "yaw_deg": -85.94366926962348,
+      "posture": "standing",
+      "clothing": "dark",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_red_shirt_01",
+      "role": "red_shirt",
+      "asset": "person_red_kinematic",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        0.2,
+        5.6
+      ],
+      "yaw_deg": -45.836623610465864,
+      "posture": "standing",
+      "clothing": "red",
+      "shirt_colour_attribute": "red",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "red"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_collapsed_01",
+      "role": "collapsed",
+      "asset": "person_collapsed_kinematic",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        -8.0,
+        22.0
+      ],
+      "yaw_deg": 11.459155902616466,
+      "posture": "lying",
+      "clothing": "dark",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.27,
+        "x_max_m": 0.27,
+        "y_min_m": -0.963,
+        "y_max_m": 0.963,
+        "top_z_m": 0.323,
+        "torso_z_m": 0.25,
+        "height_m": 1.926
+      }
+    }
+  ],
+  "vehicles": [
+    {
+      "model": "veh_car_01",
+      "type": "car",
+      "behavior": "route",
+      "position": [
+        -32.0,
+        -17.9
+      ],
+      "yaw_deg": 0.0,
+      "footprint": {
+        "length_m": 4.4,
+        "width_m": 1.9,
+        "height_m": 2.05
+      },
+      "variant": 0,
+      "route": [
+        [
+          -32.0,
+          -17.9
+        ],
+        [
+          -14.1,
+          -17.9
+        ],
+        [
+          -14.1,
+          17.9
+        ],
+        [
+          -49.9,
+          17.9
+        ],
+        [
+          -49.9,
+          -17.9
+        ]
+      ],
+      "speed_m_s": 6.0,
+      "turn_radius_m": 5.0
+    },
+    {
+      "model": "veh_car_02",
+      "type": "car",
+      "behavior": "route",
+      "position": [
+        -14.1,
+        32.0
+      ],
+      "yaw_deg": 90.0,
+      "footprint": {
+        "length_m": 4.4,
+        "width_m": 1.9,
+        "height_m": 2.05
+      },
+      "variant": 0,
+      "route": [
+        [
+          -14.1,
+          32.0
+        ],
+        [
+          -14.1,
+          46.1
+        ],
+        [
+          14.1,
+          46.1
+        ],
+        [
+          14.1,
+          17.9
+        ],
+        [
+          -14.1,
+          17.9
+        ]
+      ],
+      "speed_m_s": 7.0,
+      "turn_radius_m": 5.0
+    },
+    {
+      "model": "veh_car_03",
+      "type": "car",
+      "behavior": "route",
+      "position": [
+        32.0,
+        -14.1
+      ],
+      "yaw_deg": 180.0,
+      "footprint": {
+        "length_m": 4.4,
+        "width_m": 1.9,
+        "height_m": 2.05
+      },
+      "variant": 0,
+      "route": [
+        [
+          32.0,
+          -14.1
+        ],
+        [
+          14.1,
+          -14.1
+        ],
+        [
+          14.1,
+          -49.9
+        ],
+        [
+          49.9,
+          -49.9
+        ],
+        [
+          49.9,
+          -14.1
+        ]
+      ],
+      "speed_m_s": 5.5,
+      "turn_radius_m": 5.0
+    },
+    {
+      "model": "veh_van_01",
+      "type": "van",
+      "behavior": "route",
+      "position": [
+        -17.9,
+        32.0
+      ],
+      "yaw_deg": -90.0,
+      "footprint": {
+        "length_m": 5.4,
+        "width_m": 2.15,
+        "height_m": 2.65
+      },
+      "variant": 0,
+      "route": [
+        [
+          -17.9,
+          32.0
+        ],
+        [
+          -17.9,
+          17.9
+        ],
+        [
+          -46.1,
+          17.9
+        ],
+        [
+          -46.1,
+          46.1
+        ],
+        [
+          -17.9,
+          46.1
+        ]
+      ],
+      "speed_m_s": 5.0,
+      "turn_radius_m": 5.8
+    },
+    {
+      "model": "veh_bus_01",
+      "type": "bus",
+      "behavior": "route",
+      "position": [
+        6.0,
+        -14.1
+      ],
+      "yaw_deg": 180.0,
+      "footprint": {
+        "length_m": 9.2,
+        "width_m": 2.55,
+        "height_m": 3.6
+      },
+      "variant": 0,
+      "route": [
+        [
+          6.0,
+          -14.1
+        ],
+        [
+          -14.1,
+          -14.1
+        ],
+        [
+          -14.1,
+          14.1
+        ],
+        [
+          14.1,
+          14.1
+        ],
+        [
+          14.1,
+          -14.1
+        ]
+      ],
+      "speed_m_s": 5.0,
+      "turn_radius_m": 7.0
+    }
+  ],
+  "animals": [],
+  "follow": {
+    "model": "civ_jogger_03",
+    "group": "follow_jogger",
+    "route": [
+      [
+        21.65,
+        -43.0
+      ],
+      [
+        21.65,
+        -21.65
+      ],
+      [
+        18.0,
+        -21.65
+      ],
+      [
+        18.0,
+        -10.35
+      ],
+      [
+        21.65,
+        -10.35
+      ],
+      [
+        21.65,
+        10.0
+      ]
+    ],
+    "speed_m_s": 2.5,
+    "occluder_models_or_collisions": [
+      "jogger_shelter_roof_collision"
+    ],
+    "occluder_type": "shelter",
+    "occluder_xy": [
+      21.65,
+      -5.0
+    ],
+    "follower_altitude_m": 10.0,
+    "follower_horizontal_m": 5.0,
+    "expected_occlusion_s": 3.3,
+    "shirt_colour_attribute": "red",
+    "stage_xy": [
+      17.32,
+      -40.5
+    ]
+  },
+  "transit_altitude_m": 38.23,
+  "areas": {
+    "roads": {
+      "x": [
+        -48.0,
+        -16.0,
+        16.0,
+        48.0
+      ],
+      "y": [
+        -48.0,
+        -16.0,
+        16.0,
+        48.0
+      ]
+    },
+    "sidewalk_offset_m": 5.65,
+    "plaza": {
+      "center": [
+        0,
+        0
+      ],
+      "half_size": 9.0
+    },
+    "bus_stop": [
+      8.5,
+      -9.8
+    ],
+    "park": {
+      "center": [
+        32,
+        0
+      ],
+      "half_size": 9.0
+    },
+    "crosswalk_centres": [
+      [
+        -16.0,
+        16.0
+      ],
+      [
+        16.0,
+        -16.0
+      ],
+      [
+        48.0,
+        16.0
+      ],
+      [
+        -48.0,
+        -16.0
+      ]
+    ]
+  },
+  "attempts": 1,
+  "dressing": {
+    "stratum": "canonical",
+    "environment": {
+      "profile": "canonical",
+      "sun_direction": [
+        -0.42,
+        0.26,
+        -0.87
+      ],
+      "sun_diffuse": [
+        0.98,
+        0.95,
+        0.86
+      ],
+      "sun_specular": [
+        0.34,
+        0.33,
+        0.3
+      ],
+      "ambient": [
+        0.58,
+        0.6,
+        0.57
+      ],
+      "background": [
+        0.68,
+        0.77,
+        0.84
+      ],
+      "ground_tint": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "foliage_tint": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "surface_tint": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "sun_elevation_deg": 60.46
+    },
+    "clutter": [],
+    "events": []
+  }
+}

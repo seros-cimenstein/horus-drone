@@ -1,0 +1,30 @@
+Source: Gazebo Fuel OpenRobotics/Prius Hybrid, version 3
+URL: https://fuel.gazebosim.org/1.0/OpenRobotics/models/Prius%20Hybrid/3/Prius%20Hybrid.zip
+Archive SHA-256: ea5d10f1a2c4e89f8a0441f2c9e623575ecd9a7670c81c3f23bb9204ca32b1ab (byte-equal to the exact-version Fuel endpoint)
+Author (model.config): Ian Chen
+Licence: Creative Commons Zero v1.0 Universal (CC0 1.0) (Fuel model-level publisher metadata at import time; the archive itself embeds no licence text)
+Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used.
+Files: materials/textures/Hybrid.png, materials/textures/Hybrid_Interior.png, materials/textures/Wheels3.png, meshes/Hybrid.obj
+
+Upstream model.config (verbatim):
+<?xml version="1.0"?>
+
+<model>
+  <name>Prius Hybrid</name>
+  <version>1.0</version>
+  <sdf version="1.6">model.sdf</sdf>
+
+  <author>
+    <name>Ian Chen</name>
+    <email>iche033@osrfoundation.org</email>
+  </author>
+
+  <description>
+    Toyota Prius Hybrid
+  </description>
+</model>
+
+meshes/Hybrid.obj header (verbatim):
+# 3ds Max Wavefront OBJ Exporter v0.97b - (c)2007 guruware
+# File Created: 10.01.2017 19:57:05
+#

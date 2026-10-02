@@ -1,0 +1,4 @@
+name: S11-urban-find-red-shirt-in-plaza
+steps:
+  - text: >-
+      Take off to 10 m, then search the plaza around home (approximately NED north -9 to 9 m, east -9 to 9 m). Inspect the live camera frame and candidate table. Find the person in the red shirt among the crowd; distinguish that person from orange clothing and other red-looking detections, and do not choose if the shirt evidence is ambiguous. If needed, reposition for a clearer view and inspect another frame. Use the current tracker ID, approach only to a safe 3 m standoff, and report the ID, the visual evidence that identifies the red shirt, and the person's approximate NED position relative to home. Then return home and land.

@@ -1,0 +1,114 @@
+world: horus_forest
+rate_hz: 10
+seed: 2027
+interactions: true
+ground:
+  origin_xy: [-75.0, -75.0]
+  cell_m: 2.0
+  file: horus_forest_ground.npy
+agents:
+  - model: civ_hiker_01
+    kind: pedestrian
+    group: ambient
+    behavior: route
+    speed_m_s: 1.25
+    mode: pingpong
+    waypoints:
+      - {x: -58, y: -47}
+      - {x: -42, y: -35}
+      - {x: -25, y: -23}
+      - {x: -10, y: -7}
+      - {x: 11, y: 13}
+      - {x: 31, y: 25}
+      - {x: 48, y: 48}
+    z_offset: 0.0
+  - model: civ_hiker_02
+    kind: pedestrian
+    group: ambient
+    behavior: route
+    speed_m_s: 1
+    mode: pingpong
+    waypoints:
+      - {x: -25, y: -23}
+      - {x: -10, y: -7}
+      - {x: 11, y: 13}
+      - {x: 31, y: 25}
+      - {x: 48, y: 48}
+    z_offset: 0.0
+  - model: civ_hiker_03
+    kind: pedestrian
+    group: ambient
+    behavior: route
+    speed_m_s: 1.15
+    mode: pingpong
+    waypoints:
+      - {x: 11, y: 13}
+      - {x: 22, y: 19}
+      - {x: 31, y: 25}
+      - {x: 39, y: 35}
+      - {x: 48, y: 48}
+    z_offset: 0.0
+  - model: civ_ranger_01
+    kind: pedestrian
+    group: ambient
+    behavior: route
+    speed_m_s: 1
+    mode: pingpong
+    waypoints:
+      - {x: -10, y: -7}
+      - {x: -25, y: -23}
+      - {x: -37, y: -32}
+      - {x: -48, y: -39}
+      - {x: -58, y: -47}
+    z_offset: 0.0
+  - model: civ_family_01
+    kind: pedestrian
+    group: ambient
+    behavior: idle
+    pose: {x: 25.2, y: 35.4, yaw_deg: 5.7296}
+    fidget_deg: 10
+    fidget_period_s: 8
+    z_offset: 0.0
+  - model: civ_family_02
+    kind: pedestrian
+    group: ambient
+    behavior: idle
+    pose: {x: 26.4, y: 37.2, yaw_deg: -28.6479}
+    z_offset: 0.0
+  - model: civ_family_03
+    kind: pedestrian
+    group: ambient
+    behavior: idle
+    pose: {x: 31.4, y: 36.2, yaw_deg: 154.6986}
+    z_offset: 0.0
+  - model: civ_family_04
+    kind: pedestrian
+    group: ambient
+    behavior: idle
+    pose: {x: 32.2, y: 33.6, yaw_deg: 166.1578}
+    z_offset: 0.0
+  - model: civ_missing_hiker_01
+    kind: pedestrian
+    group: ambient
+    behavior: idle
+    pose: {x: -42, y: 20, yaw_deg: 22.9183}
+    z_offset: 0.0
+  - model: civ_injured_01
+    kind: pedestrian
+    group: ambient
+    behavior: idle
+    pose: {x: -6, y: 30, yaw_deg: 68.7549}
+    z_offset: 0.0
+  - model: civ_hiker_04
+    kind: pedestrian
+    group: follow_hiker
+    behavior: route
+    speed_m_s: 1.25
+    mode: once
+    waypoints:
+      - {x: -16, y: -18}
+      - {x: -10, y: -7}
+      - {x: -2, y: 3}
+      - {x: 11, y: 13}
+      - {x: 22, y: 19}
+    z_offset: 0.0

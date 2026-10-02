@@ -1,0 +1,30 @@
+Source: Gazebo Fuel OpenRobotics/SUV, version 4
+URL: https://fuel.gazebosim.org/1.0/OpenRobotics/models/SUV/4/SUV.zip
+Archive SHA-256: 729c066a1a2c1ba75a4453050a3c5022f02ccdfa75a4d4db4bab56104e3a1d54 (byte-equal to the exact-version Fuel endpoint)
+Author (model.config): Nate Koenig
+Licence: Creative Commons Zero v1.0 Universal (CC0 1.0) (Fuel model-level publisher metadata at import time; the archive itself embeds no licence text)
+Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used.
+Files: materials/textures/suv.png, materials/textures/wheels_01.png, meshes/suv.obj
+
+Upstream model.config (verbatim):
+<?xml version="1.0"?>
+
+<model>
+  <name>SUV</name>
+  <version>1.0</version>
+  <sdf version="1.6">model.sdf</sdf>
+
+  <author>
+    <name>Nate Koenig</name>
+    <email>nate@osrfoundation.org</email>
+  </author>
+
+  <description>
+    An SUV.
+  </description>
+</model>
+
+meshes/suv.obj header (verbatim):
+# 3ds Max Wavefront OBJ Exporter v0.97b - (c)2007 guruware
+# File Created: 02.10.2016 09:23:07
+#

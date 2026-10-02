@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import math
-import re
-import subprocess
-import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
+
+from scripts.gz_sim import _SimClock, load_gz_bindings
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,84 +103,21 @@ def run(
             sleep(min(interval, 0.005))
 
 
-class _SimClock:
-    """Gazebo simulation time from the ~5 Hz world statistics, interpolated between messages.
-
-    Statistics are read from a ``gz topic -e`` subprocess rather than an in-process subscription:
-    a Python transport callback in this process starves the thread that delivers set_pose service
-    replies, so requests time out. A pipe reader thread releases the GIL while it waits.
-    """
-
-    _SIM_TIME = re.compile(r"sim_time\s*\{\s*sec:\s*(\d+)(?:\s*nsec:\s*(\d+))?")
-    _RTF = re.compile(r"real_time_factor:\s*([0-9.eE+-]+)")
-
-    def __init__(self, topic: str = "/world/horus_indoor/stats") -> None:
-        self._sample: tuple[float, float, float] | None = None  # sim_s, wall_s, real_time_factor
-        self._lock = threading.Lock()
-        self._process = subprocess.Popen(
-            # stdbuf: the gz CLI block-buffers when piped, which would deliver the clock in bursts.
-            ["stdbuf", "-oL", "gz", "topic", "-e", "-t", topic], stdout=subprocess.PIPE, text=True, bufsize=1
-        )
-        threading.Thread(target=self._read, daemon=True).start()
-
-    def _read(self) -> None:
-        buffer: list[str] = []
-        assert self._process.stdout is not None
-        for line in self._process.stdout:
-            buffer.append(line)
-            if not line.strip():  # messages are separated by a blank line
-                self._parse("".join(buffer))
-                buffer.clear()
-
-    def _parse(self, text: str) -> None:
-        sim = self._SIM_TIME.search(text)
-        rtf = self._RTF.search(text)
-        if sim is None:
-            return
-        sim_seconds = int(sim.group(1)) + int(sim.group(2) or 0) * 1e-9
-        factor = float(rtf.group(1)) if rtf else 0.0
-        with self._lock:
-            self._sample = (sim_seconds, time.monotonic(), max(0.0, factor) if math.isfinite(factor) else 0.0)
-
-    def close(self) -> None:
-        self._process.terminate()
-
-    def wait_ready(self, timeout_s: float = 30.0) -> None:
-        deadline = time.monotonic() + timeout_s
-        while self() is None:
-            if time.monotonic() > deadline or self._process.poll() is not None:
-                raise RuntimeError("no Gazebo world statistics received")
-            time.sleep(0.05)
-
-    def __call__(self) -> float | None:
-        with self._lock:
-            sample = self._sample
-        if sample is None:
-            return None
-        sim_seconds, wall_seconds, rtf = sample
-        # Extrapolate at most one second past the last message so a paused world stays paused.
-        return sim_seconds + min(time.monotonic() - wall_seconds, 1.0) * rtf
-
 
 def main() -> None:
     try:
-        from gz.msgs10.boolean_pb2 import Boolean
-        from gz.msgs10.pose_pb2 import Pose
-        from gz.transport13 import Node
-    except (ImportError, OSError) as exc:
-        raise SystemExit(
-            "Gazebo Python bindings are unavailable; install python3-gz-transport13 and python3-gz-msgs10"
-        ) from exc
+        bindings = load_gz_bindings()
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
 
-    node = Node()
+    node = bindings.node()
     sim_clock = _SimClock()
     sim_clock.wait_ready()
     print("Moving person_blue through the S5 corridor-screen occlusion at 20 Hz of simulation time", flush=True)
     try:
-        run(node, Pose, Boolean, clock=lambda: sim_clock() or 0.0)
+        run(node, bindings.pose, bindings.boolean, clock=lambda: sim_clock() or 0.0)
     finally:
         sim_clock.close()
-
 
 if __name__ == "__main__":
     main()

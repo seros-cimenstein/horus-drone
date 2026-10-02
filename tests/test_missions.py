@@ -164,3 +164,219 @@ class TestCommanderMissions:
                 equals="blue",
                 choose="smallest",
             )
+
+    def test_select_candidate_polls_until_a_later_candidate_matches(self, tmp_path):
+        mission = tmp_path / "select-candidate.yaml"
+        mission.write_text(
+            "steps:\n"
+            "  - select_candidate:\n"
+            "      attribute: shirt_colour\n"
+            "      equals: green\n"
+            "      choose: largest\n"
+            "      store_as: target\n"
+            "      timeout_s: 2.0\n"
+            "  - tool: follow\n"
+            "    arguments:\n"
+            "      id: $target.id\n"
+            "      ttl_s: 2.0\n"
+            "    wait: false\n",
+            encoding="utf-8",
+        )
+        responses = iter(
+            [
+                {"candidate_table": []},
+                {
+                    "candidate_table": [
+                        {
+                            "id": 42,
+                            "class_name": "person",
+                            "bbox": [0, 0, 30, 50],
+                            "attributes": {"shirt_colour": "green"},
+                        }
+                    ]
+                },
+            ]
+        )
+        calls = []
+
+        async def tool_call(_session, name, arguments=None):
+            calls.append((name, arguments))
+            if name == "list_candidates":
+                return next(responses)
+            if name == "follow":
+                return {"task_id": "follow-1"}
+            raise AssertionError(f"unexpected tool {name}")
+
+        call_tool = AsyncMock(side_effect=tool_call)
+        sleep = AsyncMock()
+        with patch("horus.repl.app._tool_call", call_tool):
+            with patch("horus.repl.app.asyncio.sleep", sleep):
+                with redirect_stdout(io.StringIO()):
+                    asyncio.run(run_mission(session=object(), path=mission))
+
+        assert [name for name, _ in calls] == [
+            "list_candidates",
+            "list_candidates",
+            "follow",
+        ]
+        assert calls[-1][1] == {"id": 42, "ttl_s": 2.0}
+        sleep.assert_awaited_once_with(0.5)
+
+    def test_select_candidate_timeout_reports_last_candidate_table(self, tmp_path):
+        mission = tmp_path / "select-candidate-timeout.yaml"
+        mission.write_text(
+            "steps:\n"
+            "  - select_candidate:\n"
+            "      attribute: shirt_colour\n"
+            "      equals: green\n"
+            "      choose: largest\n"
+            "      store_as: target\n"
+            "      timeout_s: 0.01\n",
+            encoding="utf-8",
+        )
+        calls = []
+
+        async def tool_call(_session, name, arguments=None):
+            calls.append(name)
+            if name == "list_candidates":
+                return {
+                    "candidate_table": [
+                        {
+                            "id": 9,
+                            "class_name": "person",
+                            "bbox": [0, 0, 20, 40],
+                            "attributes": {"shirt_colour": "red"},
+                        }
+                    ]
+                }
+            raise AssertionError(f"unexpected tool {name}")
+
+        call_tool = AsyncMock(side_effect=tool_call)
+        with patch("horus.repl.app._tool_call", call_tool):
+            with redirect_stdout(io.StringIO()):
+                with pytest.raises(TimeoutError) as exc_info:
+                    asyncio.run(run_mission(session=object(), path=mission))
+
+        message = str(exc_info.value)
+        assert "after 0.01s" in message
+        assert "last candidate table summary" in message
+        assert '"id": 9' in message
+        assert '"shirt_colour": "red"' in message
+        assert calls and set(calls) == {"list_candidates"}
+
+    def test_select_candidate_without_timeout_queries_once(self, tmp_path):
+        mission = tmp_path / "select-candidate-once.yaml"
+        mission.write_text(
+            "steps:\n"
+            "  - select_candidate:\n"
+            "      attribute: shirt_colour\n"
+            "      equals: green\n"
+            "      choose: largest\n"
+            "      store_as: target\n",
+            encoding="utf-8",
+        )
+        call_tool = AsyncMock(return_value={"candidate_table": []})
+        sleep = AsyncMock()
+        with patch("horus.repl.app._tool_call", call_tool):
+            with patch("horus.repl.app.asyncio.sleep", sleep):
+                with redirect_stdout(io.StringIO()):
+                    with pytest.raises(RuntimeError, match="no candidate matched"):
+                        asyncio.run(run_mission(session=object(), path=mission))
+
+        assert call_tool.await_count == 1
+        call_tool.assert_awaited_once()
+        sleep.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "timeout_literal", ["0", "-1", ".nan", ".inf", "true", "null", "[]"]
+    )
+    def test_select_candidate_rejects_invalid_timeout(self, tmp_path, timeout_literal):
+        mission = tmp_path / "select-candidate-invalid-timeout.yaml"
+        mission.write_text(
+            "steps:\n"
+            "  - select_candidate:\n"
+            "      attribute: shirt_colour\n"
+            "      equals: green\n"
+            "      choose: largest\n"
+            "      store_as: target\n"
+            f"      timeout_s: {timeout_literal}\n",
+            encoding="utf-8",
+        )
+        call_tool = AsyncMock(return_value={"candidate_table": []})
+        with patch("horus.repl.app._tool_call", call_tool):
+            with redirect_stdout(io.StringIO()):
+                with pytest.raises(
+                    ValueError, match="timeout_s must be a finite positive number"
+                ):
+                    asyncio.run(run_mission(session=object(), path=mission))
+
+        call_tool.assert_not_awaited()
+
+
+class TestMissionDriverArgs:
+    def test_driver_args_are_appended_to_the_literal_driver_command(self, tmp_path):
+        mission = tmp_path / "outdoor.yaml"
+        driver = tmp_path / "civilian_life.py"
+        driver.touch()
+        arguments = [
+            "--scenario",
+            "sim/scenarios/horus_urban.yaml",
+            "--group",
+            "follow_jogger",
+        ]
+        mission.write_text(
+            "driver: civilian_life.py\n"
+            "driver_args:\n"
+            "  - --scenario\n"
+            "  - sim/scenarios/horus_urban.yaml\n"
+            "  - --group\n"
+            "  - follow_jogger\n"
+            "steps:\n"
+            "  - start_driver: {}\n",
+            encoding="utf-8",
+        )
+
+        class BackgroundDriver:
+            returncode = None
+
+            def terminate(self):
+                self.returncode = -15
+
+            async def wait(self):
+                return self.returncode
+
+        process = BackgroundDriver()
+        launch = AsyncMock(return_value=process)
+        with patch("horus.repl.app.asyncio.create_subprocess_exec", launch):
+            asyncio.run(run_mission(session=object(), path=mission))
+
+        launch.assert_awaited_once_with(
+            sys.executable, str(driver.resolve()), *arguments
+        )
+        assert process.returncode == -15
+
+    def test_driver_args_requires_a_driver(self, tmp_path):
+        mission = tmp_path / "missing_driver.yaml"
+        mission.write_text(
+            "driver_args: [--group, follow_jogger]\nsteps: []\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="driver_args requires a driver"):
+            asyncio.run(run_mission(session=object(), path=mission))
+
+    @pytest.mark.parametrize(
+        ("driver_args", "error"),
+        [
+            ("--group follow_jogger", "list of strings"),
+            ("[--group, 7]", "items must be strings"),
+        ],
+    )
+    def test_driver_args_rejects_non_list_or_non_string_items(self, tmp_path, driver_args, error):
+        mission = tmp_path / "invalid_driver_args.yaml"
+        (tmp_path / "driver.py").touch()
+        mission.write_text(
+            f"driver: driver.py\ndriver_args: {driver_args}\nsteps: []\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match=error):
+            asyncio.run(run_mission(session=object(), path=mission))
