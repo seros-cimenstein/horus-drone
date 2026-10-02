@@ -1,0 +1,29 @@
+Source: Gazebo Fuel OpenRobotics/TruckDelivery, version 2
+URL: https://fuel.gazebosim.org/1.0/OpenRobotics/models/TruckDelivery/2/TruckDelivery.zip
+Archive SHA-256: 8bfbad7401d9f9d0d819e1ac068efc95ce0b2fd3ba32779c8ac6273a98fb39f0 (byte-equal to the exact-version Fuel endpoint)
+Author (model.config): Roselle Carmen
+Licence: Creative Commons Attribution 4.0 International (CC BY 4.0) (Fuel model-level publisher metadata at import time; the archive itself embeds no licence text)
+Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used.
+Attribution: "TruckDelivery" by Roselle Carmen (Open Robotics), Gazebo Fuel, licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Modified as above.
+Files: materials/textures/TruckDelivery_Diffuse.png, meshes/truck.obj
+
+Upstream model.config (verbatim):
+<?xml version="1.0"?>
+<model>
+  <name>TruckDelivery</name>
+  <version>1.0</version>
+  <sdf version="1.6">model.sdf</sdf>
+
+  <author>
+    <name>Roselle Carmen</name>
+    <email>rosellec@openrobotics.org</email>
+  </author>
+
+  <description>
+    open sided delivery truck
+  </description>
+</model>
+
+meshes/truck.obj header (verbatim):
+# Blender v2.83.0 OBJ File: ''
+# www.blender.org

@@ -1,0 +1,1 @@
+Derived from CC0 MakeHuman textures in sim/models/person_standing (OpenRobotics Standing person, CC0 1.0) and sim/models/horus_human_female_a (OpenRobotics Casual female v4, CC0 1.0) by sim/scripts/import_licensed_assets.py: grey-scale tint bases and clothing region/luminance templates.

@@ -33,12 +33,16 @@
                     </box>
                 </geometry>
             </collision>
+            <!-- Primitive body collision: this kinematic person is moved through the corridor and its
+                 route grazes the wall corner; a trimesh there made DART contacts collapse the real-time
+                 factor to ~0.2, which starved SITL of heartbeats. -->
             <collision name="person">
-                <pose>0 0 0.02 0.04 0 0</pose>
+                <pose>0 -0.1 0.78 0 0 0</pose>
                 <geometry>
-                    <mesh>
-                        <uri>model://person_standing/meshes/standing.dae</uri>
-                    </mesh>
+                    <cylinder>
+                        <radius>0.22</radius>
+                        <length>1.5</length>
+                    </cylinder>
                 </geometry>
             </collision>
             <!-- Own DAE copy so the mesh loads this model's blue tshirt02_texture.png. -->

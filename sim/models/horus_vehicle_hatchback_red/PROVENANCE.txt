@@ -1,0 +1,37 @@
+Source: Gazebo Fuel OpenRobotics/Hatchback red, version 4
+URL: https://fuel.gazebosim.org/1.0/OpenRobotics/models/Hatchback%20red/4/Hatchback%20red.zip
+Archive SHA-256: a99e5e16fabdd15e0fb962ff5294493f45f7a29df8615128cecc082f9fc910cd (byte-equal to the exact-version Fuel endpoint)
+Author (model.config): Nate Koenig
+Licence: Creative Commons Zero v1.0 Universal (CC0 1.0) (Fuel model-level publisher metadata at import time; the archive itself embeds no licence text)
+Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used.
+Files: materials/textures/hatchback_red.png, meshes/hatchback.obj
+Copied: materials/textures/wheels3.png from sim/models/horus_vehicle_hatchback/materials/textures/wheels3.png (base Hatchback v3 archive, CC0 1.0)
+
+Upstream model.config (verbatim):
+<?xml version="1.0"?>
+
+<model>
+  <name>Hatchback red</name>
+  <version>1.0</version>
+  <sdf version="1.6">model.sdf</sdf>
+
+  <author>
+    <name>Nate Koenig</name>
+    <email>nate@osrfoundation.org</email>
+  </author>
+
+  <depend>
+    <model>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Hatchback</uri>
+    </model>
+  </depend>
+
+  <description>
+    An red hatchback
+  </description>
+</model>
+
+meshes/hatchback.obj header (verbatim):
+# 3ds Max Wavefront OBJ Exporter v0.97b - (c)2007 guruware
+# File Created: 05.12.2016 00:43:45
+#

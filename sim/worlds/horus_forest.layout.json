@@ -1,0 +1,691 @@
+{
+  "world": "horus_forest",
+  "kind": "forest",
+  "seed": 2027,
+  "canonical": true,
+  "bounds": {
+    "x": [
+      -75,
+      75
+    ],
+    "y": [
+      -75,
+      75
+    ]
+  },
+  "home": [
+    0,
+    0
+  ],
+  "scenario": "../scenarios/horus_forest.yaml",
+  "sdf": "horus_forest.sdf",
+  "ground": {
+    "file": "../scenarios/horus_forest_ground.npy",
+    "origin_xy": [
+      -75,
+      -75
+    ],
+    "cell_m": 2.0
+  },
+  "people": [
+    {
+      "model": "civ_hiker_01",
+      "role": "hiker",
+      "asset": "person_orange",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        -58.0,
+        -47.0
+      ],
+      "yaw_deg": 34.37746770784939,
+      "posture": "standing",
+      "clothing": "orange",
+      "shirt_colour_attribute": "red",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "red"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          -58.0,
+          -47.0
+        ],
+        [
+          -42.0,
+          -35.0
+        ],
+        [
+          -25.0,
+          -23.0
+        ],
+        [
+          -10.0,
+          -7.0
+        ],
+        [
+          11.0,
+          13.0
+        ],
+        [
+          31.0,
+          25.0
+        ],
+        [
+          48.0,
+          48.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.25
+    },
+    {
+      "model": "civ_hiker_02",
+      "role": "hiker",
+      "asset": "person_blue_kinematic",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        -25.0,
+        -23.0
+      ],
+      "yaw_deg": 40.10704565915762,
+      "posture": "standing",
+      "clothing": "blue",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          -25.0,
+          -23.0
+        ],
+        [
+          -10.0,
+          -7.0
+        ],
+        [
+          11.0,
+          13.0
+        ],
+        [
+          31.0,
+          25.0
+        ],
+        [
+          48.0,
+          48.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.0
+    },
+    {
+      "model": "civ_hiker_03",
+      "role": "hiker",
+      "asset": "person_green_kinematic",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        11.0,
+        13.0
+      ],
+      "yaw_deg": 28.64788975654116,
+      "posture": "standing",
+      "clothing": "green",
+      "shirt_colour_attribute": "green",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "green"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          11.0,
+          13.0
+        ],
+        [
+          22.0,
+          19.0
+        ],
+        [
+          31.0,
+          25.0
+        ],
+        [
+          39.0,
+          35.0
+        ],
+        [
+          48.0,
+          48.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.15
+    },
+    {
+      "model": "civ_ranger_01",
+      "role": "ranger",
+      "asset": "person_hivis",
+      "group": "ambient",
+      "behavior": "route",
+      "position": [
+        -10.0,
+        -7.0
+      ],
+      "yaw_deg": 40.10704565915762,
+      "posture": "standing",
+      "clothing": "hivis",
+      "shirt_colour_attribute": "green",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "green"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          -10.0,
+          -7.0
+        ],
+        [
+          -25.0,
+          -23.0
+        ],
+        [
+          -37.0,
+          -32.0
+        ],
+        [
+          -48.0,
+          -39.0
+        ],
+        [
+          -58.0,
+          -47.0
+        ]
+      ],
+      "route_mode": "pingpong",
+      "speed_m_s": 1.0
+    },
+    {
+      "model": "civ_family_01",
+      "role": "family",
+      "asset": "person_red_kinematic",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        25.2,
+        35.4
+      ],
+      "yaw_deg": 5.729577951308233,
+      "posture": "standing",
+      "clothing": "red",
+      "shirt_colour_attribute": "red",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "red"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_family_02",
+      "role": "family",
+      "asset": "person_blue_kinematic",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        26.4,
+        37.2
+      ],
+      "yaw_deg": -28.64788975654116,
+      "posture": "standing",
+      "clothing": "blue",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_family_03",
+      "role": "family",
+      "asset": "person_green_kinematic",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        31.4,
+        36.2
+      ],
+      "yaw_deg": 154.6986046853223,
+      "posture": "standing",
+      "clothing": "green",
+      "shirt_colour_attribute": "green",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "green"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_family_04",
+      "role": "family",
+      "asset": "person_dark",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        32.2,
+        33.6
+      ],
+      "yaw_deg": 166.15776058793872,
+      "posture": "standing",
+      "clothing": "dark",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_missing_hiker_01",
+      "role": "missing_hiker",
+      "asset": "person_laying_kinematic",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        -42.0,
+        20.0
+      ],
+      "yaw_deg": 22.918311805232932,
+      "posture": "lying",
+      "clothing": "orange",
+      "shirt_colour_attribute": "red",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "red"
+      ],
+      "envelope": {
+        "x_min_m": -0.27,
+        "x_max_m": 0.27,
+        "y_min_m": -0.963,
+        "y_max_m": 0.963,
+        "top_z_m": 0.323,
+        "torso_z_m": 0.25,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_injured_01",
+      "role": "injured",
+      "asset": "person_sitting",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        -6.0,
+        30.0
+      ],
+      "yaw_deg": 68.75493541569878,
+      "posture": "sitting",
+      "clothing": "blue",
+      "shirt_colour_attribute": "blue",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "blue"
+      ],
+      "envelope": {
+        "x_min_m": -0.22,
+        "x_max_m": 0.46,
+        "y_min_m": -0.22,
+        "y_max_m": 0.22,
+        "top_z_m": 1.17,
+        "torso_z_m": 0.7,
+        "height_m": 1.926
+      }
+    },
+    {
+      "model": "civ_hiker_04",
+      "role": "hiker",
+      "asset": "person_green_kinematic",
+      "group": "follow_hiker",
+      "behavior": "route",
+      "position": [
+        -16.0,
+        -18.0
+      ],
+      "yaw_deg": 28.64788975654116,
+      "posture": "standing",
+      "clothing": "green",
+      "shirt_colour_attribute": "green",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "green"
+      ],
+      "envelope": {
+        "x_min_m": -0.071,
+        "x_max_m": 0.252,
+        "y_min_m": -0.27,
+        "y_max_m": 0.27,
+        "top_z_m": 1.926,
+        "torso_z_m": 1.1,
+        "height_m": 1.926
+      },
+      "route": [
+        [
+          -16.0,
+          -18.0
+        ],
+        [
+          -10.0,
+          -7.0
+        ],
+        [
+          -2.0,
+          3.0
+        ],
+        [
+          11.0,
+          13.0
+        ],
+        [
+          22.0,
+          19.0
+        ]
+      ],
+      "route_mode": "once",
+      "speed_m_s": 1.25
+    }
+  ],
+  "vehicles": [],
+  "animals": [],
+  "follow": {
+    "model": "civ_hiker_04",
+    "group": "follow_hiker",
+    "route": [
+      [
+        -16.0,
+        -18.0
+      ],
+      [
+        -10.0,
+        -7.0
+      ],
+      [
+        -2.0,
+        3.0
+      ],
+      [
+        11.0,
+        13.0
+      ],
+      [
+        22.0,
+        19.0
+      ]
+    ],
+    "speed_m_s": 1.25,
+    "occluder_models_or_collisions": [
+      "follow_occlusion_bush_lower_collision",
+      "follow_occlusion_bush_middle_collision",
+      "follow_occlusion_bush_upper_collision"
+    ],
+    "occluder_xy": [
+      -13.42,
+      -16.164
+    ],
+    "occluder_radius_m": null,
+    "follower_altitude_m": 8.0,
+    "follower_horizontal_m": 3.0,
+    "expected_occlusion_s": 2.6,
+    "shirt_colour_attribute": "green",
+    "stage_xy": [
+      -12.1006,
+      -15.7487
+    ]
+  },
+  "transit_altitude_m": 31.8,
+  "areas": {
+    "trail": [
+      [
+        -69.0,
+        -59.0
+      ],
+      [
+        -58.0,
+        -47.0
+      ],
+      [
+        -48.0,
+        -39.0
+      ],
+      [
+        -37.0,
+        -32.0
+      ],
+      [
+        -27.0,
+        -24.0
+      ],
+      [
+        -16.0,
+        -18.0
+      ],
+      [
+        -10.0,
+        -7.0
+      ],
+      [
+        -2.0,
+        3.0
+      ],
+      [
+        11.0,
+        13.0
+      ],
+      [
+        22.0,
+        19.0
+      ],
+      [
+        31.0,
+        25.0
+      ],
+      [
+        39.0,
+        35.0
+      ],
+      [
+        48.0,
+        48.0
+      ],
+      [
+        61.0,
+        63.0
+      ]
+    ],
+    "creek": [
+      [
+        -68.0,
+        50.0
+      ],
+      [
+        -55.0,
+        42.0
+      ],
+      [
+        -45.0,
+        33.0
+      ],
+      [
+        -35.0,
+        25.0
+      ],
+      [
+        -24.0,
+        17.0
+      ],
+      [
+        -13.0,
+        12.0
+      ],
+      [
+        -2.0,
+        11.0
+      ],
+      [
+        10.0,
+        7.0
+      ],
+      [
+        20.0,
+        0.0
+      ],
+      [
+        31.0,
+        -6.0
+      ],
+      [
+        42.0,
+        -15.0
+      ],
+      [
+        50.0,
+        -27.0
+      ],
+      [
+        64.0,
+        -39.0
+      ]
+    ],
+    "clearing": {
+      "center": [
+        -7.0,
+        31.0
+      ],
+      "radius": 17.0
+    },
+    "camp": [
+      29.0,
+      35.0
+    ]
+  },
+  "attempts": 1,
+  "dressing": {
+    "stratum": "canonical",
+    "environment": {
+      "profile": "canonical",
+      "sun_direction": [
+        -0.42,
+        0.26,
+        -0.87
+      ],
+      "sun_diffuse": [
+        0.98,
+        0.95,
+        0.86
+      ],
+      "sun_specular": [
+        0.34,
+        0.33,
+        0.3
+      ],
+      "ambient": [
+        0.58,
+        0.6,
+        0.57
+      ],
+      "background": [
+        0.68,
+        0.77,
+        0.84
+      ],
+      "ground_tint": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "foliage_tint": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "surface_tint": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "sun_elevation_deg": 60.46
+    },
+    "clutter": [],
+    "events": []
+  }
+}

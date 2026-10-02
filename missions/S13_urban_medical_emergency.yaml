@@ -1,0 +1,9 @@
+name: S13-urban-medical-emergency
+steps:
+  - text: >-
+      Take off to 10 m and locate the collapsed person from the live camera and candidate table. Confirm the collapsed posture visually, retain the current tracker ID, and do not guess if the observation is uncertain. The 8 m orbit around the person at NED (22, -8) must not be flown at 10 m: its north arc at NED (30, -8) intersects urban_building_11, with -0.60 m clearance after the 0.6 m drone radius. After identification, climb vertically at the current open plaza position to 24 m, transit to the east-side orbit entry at approximately NED (22, 0), then orbit the person with an 8 m radius at 24 m for up to 25 seconds. The nearby roof HVAC reaches 21.23 m; the measured minimum orbit clearance at 24 m is 2.57 m. Keep 24 m throughout the orbit and do not descend over the building. Adjust the gimbal down as needed to keep the person in frame. Report the track ID, approximate NED position relative to home, and only the traffic and bystanders actually visible. This same mission instruction authorizes the following response sequence: after your report, the runner will hold overhead for 20 seconds, then return home and land. Do not issue hold, RTH, or land yourself; finish the report and return control for that timed hold and authorized return.
+  - tool: hold
+    delay_s: 20.0
+  - tool: rth
+    delay_s: 90.0
+  - tool: land

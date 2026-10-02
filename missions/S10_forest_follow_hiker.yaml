@@ -1,0 +1,56 @@
+name: S10-forest-follow-hiker-through-foliage-occlusion
+driver: ../sim/scripts/civilian_life.py
+driver_args:
+  - --scenario
+  - sim/scenarios/horus_forest.yaml
+  - --group
+  - follow_hiker
+  - --trace
+  - runs/s10_hiker_trace.jsonl
+steps:
+  - tool: take_off
+    arguments:
+      altitude_m: 28.0
+      ttl_s: 180.0
+    timeout_s: 185.0
+  - tool: goto
+    arguments:
+      pose:
+        north_m: -15.7487
+        east_m: -12.1006
+        up_m: 28.0
+      heading_deg: 240.0
+      ttl_s: 90.0
+    timeout_s: 95.0
+  - tool: goto
+    arguments:
+      pose:
+        north_m: -15.7487
+        east_m: -12.1006
+        up_m: 6.8
+      heading_deg: 240.0
+      ttl_s: 90.0
+    timeout_s: 95.0
+  - select_candidate:
+      attribute: shirt_colour
+      equals: green
+      choose: largest
+      store_as: hiker
+      timeout_s: 15.0
+  # The 8.5 m slant-range lane frames the person; a trail-edge bush gives a 2.6 s occlusion.
+  - start_driver: {}
+  - tool: follow
+    arguments:
+      id: "$hiker.id"
+      dist_m: 8.5
+      ttl_s: 45.0
+    timeout_s: 50.0
+    expect_status: expired
+    continue_on_failure: true
+    store_as: follow_result
+  - assert_reacquired:
+      target: "$hiker"
+      follow: "$follow_result"
+      min_time_s: 1.0
+      max_time_s: 8.0
+      output_dir: ../runs
