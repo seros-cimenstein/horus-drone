@@ -3,7 +3,7 @@
 
 Each line: {"wall_time", "sim_time", "models": {name: [x, y, z, yaw_rad]}} in Gazebo world (ENU) coordinates.
 
-Usage: gt_trace.py OUTPUT.jsonl [--rate-hz 2] [--models horus_iris,person_red,...]
+Usage: gt_trace.py OUTPUT.jsonl [--rate-hz 2] [--models horus_iris,person_red,...] [--world horus_urban]
 Stops on SIGINT/SIGTERM.
 """
 
@@ -19,13 +19,19 @@ import time
 DEFAULT_MODELS = "horus_iris,person_red,person_blue,person_green,person_laying,home_apriltag_pad"
 
 
+def pose_info_topic(world: str = "horus_indoor", topic: str | None = None) -> str:
+    return topic or f"/world/{world}/pose/info"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output")
     parser.add_argument("--rate-hz", type=float, default=2.0)
     parser.add_argument("--models", default=DEFAULT_MODELS)
-    parser.add_argument("--topic", default="/world/horus_indoor/pose/info")
+    parser.add_argument("--world", default="horus_indoor")
+    parser.add_argument("--topic", help="explicit pose-info topic (overrides --world)")
     args = parser.parse_args()
+    topic = pose_info_topic(args.world, args.topic)
     from gz.msgs10.pose_v_pb2 import Pose_V
     from gz.transport13 import Node
 
@@ -44,8 +50,9 @@ def main() -> None:
                     latest[pose.name] = [pose.position.x, pose.position.y, pose.position.z, yaw]
 
     node = Node()
-    if not node.subscribe(Pose_V, args.topic, on_poses):
-        raise SystemExit(f"could not subscribe to {args.topic}")
+
+    if not node.subscribe(Pose_V, topic, on_poses):
+        raise SystemExit(f"could not subscribe to {topic}")
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())

@@ -32,6 +32,33 @@ if [[ ! "${sitl_param_file}" =~ ^[A-Za-z0-9_./-]+$ ]]; then
   printf 'HORUS_SITL_PARAM_FILE must be a simple container path.\n' >&2
   exit 2
 fi
+# Default stays the indoor demo; a procedural world passes an absolute container SDF path
+# (its bundle must already exist locally so the rsync below ships it to the remote).
+remote_world="${1:-${HORUS_REMOTE_WORLD:-horus_indoor.sdf}}"
+if [[ ! "${remote_world}" =~ ^[A-Za-z0-9/_.-]+$ ]]; then
+  printf 'Remote world must be a simple world name or container SDF path (got %s).\n' "${remote_world}" >&2
+  exit 2
+fi
+# The executor config and SITL parameters follow the world kind, the same rule start_sim.sh
+# uses for its automatic outdoor parameter file. Explicit overrides still win.
+remote_world_stem="${remote_world##*/}"
+case "${remote_world_stem}" in
+  horus_forest*) remote_kind=forest ;;
+  horus_urban*) remote_kind=urban ;;
+  *) remote_kind="" ;;
+esac
+remote_config="${HORUS_REMOTE_CONFIG:-}"
+if [[ -z "${remote_config}" && -n "${remote_kind}" ]]; then
+  remote_config="/horus/config/horus_${remote_kind}.yaml"
+fi
+remote_config="${remote_config:-/horus/config/horus.yaml}"
+if [[ ! "${remote_config}" =~ ^[A-Za-z0-9/_.-]+$ ]]; then
+  printf 'HORUS_REMOTE_CONFIG must be a simple container path (got %s).\n' "${remote_config}" >&2
+  exit 2
+fi
+if [[ -z "${HORUS_SITL_PARAM_FILE:-}" && -n "${remote_kind}" ]]; then
+  sitl_param_file="/horus/config/ardupilot/horus_sitl_outdoor.parm"
+fi
 
 state_dir="${HORUS_REMOTE_STATE_DIR}"
 local_mcp_port="${HORUS_MCP_LOCAL_PORT}"
@@ -206,13 +233,16 @@ if [[ ! -f models/yolov8n.onnx || ! -f models/osnet_x0_25_msmt17.onnx ]]; then
 fi
 REMOTE_MODELS
 
-printf 'Starting headless Gazebo/SITL on %s.\n' "${HORUS_REMOTE}"
+printf 'Starting headless Gazebo/SITL on %s (%s).\n' "${HORUS_REMOTE}" "${remote_world}"
+printf 'MCP config: %s (SITL params: %s)\n' "${remote_config}" "${sitl_param_file}"
 remote_gz_override="${HORUS_REMOTE_GZ_IP:--}"
 remote_relay="${HORUS_GZ_RELAY_REMOTE:--}"
 ssh -T "${HORUS_REMOTE}" bash -s -- \
   "${HORUS_REMOTE_DIR}" "${HORUS_LOCAL_IP}" "${remote_gz_override}" \
   "${HORUS_GZ_PARTITION}" "${remote_relay}" "${HORUS_REMOTE_SIM_IMAGE}" \
-  "${remote_container}" "${HORUS_REMOTE_SIM_GPU}" "${sitl_param_file}" <<'REMOTE_START'
+  "${remote_container}" "${HORUS_REMOTE_SIM_GPU}" "${sitl_param_file}" \
+  "${HORUS_REMOTE_SIM_MEMORY_LIMIT:-8g}" "${HORUS_REMOTE_SIM_MEMORY_SWAP_LIMIT:-9g}" \
+  "${remote_world}" <<'REMOTE_START'
 set -Eeuo pipefail
 remote_dir="$1"
 local_ip="$2"
@@ -223,6 +253,9 @@ image="$6"
 container="$7"
 gpu_mode="$8"
 param_file="$9"
+memory_limit="${10}"
+memory_swap_limit="${11}"
+world="${12}"
 if [[ "${remote_dir}" == /* ]]; then
   project_dir="${remote_dir}"
 else
@@ -255,7 +288,9 @@ export HORUS_SIM_IMAGE="${image}"
 export HORUS_SIM_CONTAINER_NAME="${container}"
 export HORUS_SIM_GPU="${gpu_mode}"
 export HORUS_SITL_PARAM_FILE="${param_file}"
-./sim/run.sh start horus_indoor.sdf
+export HORUS_SIM_MEMORY_LIMIT="${memory_limit}"
+export HORUS_SIM_MEMORY_SWAP_LIMIT="${memory_swap_limit}"
+./sim/run.sh start "${world}"
 REMOTE_START
 remote_started=1
 printf '%s\n' "${remote_container}" > "${started_file}"
@@ -264,10 +299,29 @@ remote_project_dir="${HORUS_REMOTE_DIR}"
 if [[ "${remote_project_dir}" != /* ]]; then
   remote_project_dir="\$HOME/${remote_project_dir}"
 fi
-printf 'Starting authenticated MCP on %s.\n' "${HORUS_REMOTE}"
+printf 'Checking optional text grounder on %s before MCP startup.\n' "${HORUS_REMOTE}"
+ssh -T "${HORUS_REMOTE}" bash -s -- "${remote_container}" <<'REMOTE_GROUNDER'
+set -Eeuo pipefail
+container="$1"
+if ! docker exec "${container}" test -x /horus/models/grounder-venv/bin/python; then
+  printf '%s\n' 'Optional grounder venv is absent; continuing without text grounding.'
+  exit 0
+fi
+docker exec "${container}" bash /horus/scripts/start_grounder.sh
+for ((attempt = 0; attempt < 120; attempt++)); do
+  if docker exec "${container}" /opt/horus-venv/bin/python -c \
+    'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8100/health", timeout=0.4)' \
+    >/dev/null 2>&1; then
+    printf '%s\n' 'Grounder health check passed on 127.0.0.1:8100.'
+    exit 0
+  fi
+  sleep 1
+done
+printf '%s\n' 'Optional grounder did not become healthy within 120 seconds; starting MCP without it.' >&2
+REMOTE_GROUNDER
 printf '%s\n' "${HORUS_MCP_TOKEN}" | ssh -T "${HORUS_REMOTE}" \
   bash "${remote_project_dir}/scripts/koko/start_mcp.sh" "${remote_container}" \
-  "${HORUS_REMOTE_CONFIG:-/horus/config/horus.yaml}" "${HORUS_LOG_LEVEL:-INFO}"
+  "${remote_config}" "${HORUS_LOG_LEVEL:-INFO}"
 
 ssh -T "${HORUS_REMOTE}" bash -s -- "${remote_container}" <<'REMOTE_READY'
 set -Eeuo pipefail

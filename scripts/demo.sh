@@ -4,6 +4,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 SIM_DIR="${PROJECT_DIR}/sim"
+source "${SIM_DIR}/scripts/procedural_world.sh"
 CONTAINER="${HORUS_SIM_CONTAINER_NAME:-horus-sim}"
 MCP_URL="${HORUS_MCP_URL:-http://127.0.0.1:8000/mcp}"
 COMMANDER_URL="${HORUS_COMMANDER_URL:-http://127.0.0.1:8765}"
@@ -12,14 +13,20 @@ if [[ ! "${COMMANDER_URL}" =~ ^http://127\.0\.0\.1:([0-9]{1,5})/?$ ]]; then
   exit 2
 fi
 COMMANDER_PORT="${BASH_REMATCH[1]}"
-remote_mode=0
+remote_mode=1
 remote_host="${HORUS_REMOTE:-koko}"
 sim_cleanup_needed=0
 remote_cleanup_needed=0
 record_path=""
+procedural=0
+procedural_seed=""
+procedural_kind=""
+procedural_stratum=""
 
 usage() {
-  printf 'Usage: %s [--remote [host]] [--record out.mp4]\n' "${0##*/}"
+  printf 'Usage: %s [--remote [host] | --local] [--procedural [--seed N] [--kind forest|urban] [--stratum baseline|chaotic]] [--record out.mp4]\n' "${0##*/}"
+  printf '%s\n' 'Default: visible laptop GUI with simulation and perception on Koko.'
+  printf '%s\n' '--procedural starts a generated outdoor world instead of the indoor demo (--local only).'
 }
 
 while (( $# > 0 )); do
@@ -33,6 +40,10 @@ while (( $# > 0 )); do
         shift
       fi
       ;;
+    --local)
+      remote_mode=0
+      shift
+      ;;
     --record)
       if (( $# < 2 )) || [[ -z "$2" ]]; then
         printf '%s\n' '--record requires an output path.' >&2
@@ -40,6 +51,40 @@ while (( $# > 0 )); do
         exit 2
       fi
       record_path="$2"
+      shift 2
+      ;;
+    --procedural)
+      procedural=1
+      shift
+      ;;
+    --seed)
+      if (( $# < 2 )) || [[ ! "$2" =~ ^[1-9][0-9]*$ ]]; then
+        printf -- '--seed requires a positive integer (got %s).\n' "${2:-<missing>}" >&2
+        usage >&2
+        exit 2
+      fi
+      procedural_seed="$2"
+      procedural=1
+      shift 2
+      ;;
+    --kind)
+      if (( $# < 2 )) || [[ ! "$2" =~ ^(forest|urban)$ ]]; then
+        printf -- '--kind must be forest or urban (got %s).\n' "${2:-<missing>}" >&2
+        usage >&2
+        exit 2
+      fi
+      procedural_kind="$2"
+      procedural=1
+      shift 2
+      ;;
+    --stratum)
+      if (( $# < 2 )) || [[ ! "$2" =~ ^(baseline|chaotic)$ ]]; then
+        printf -- '--stratum must be baseline or chaotic (got %s).\n' "${2:-<missing>}" >&2
+        usage >&2
+        exit 2
+      fi
+      procedural_stratum="$2"
+      procedural=1
       shift 2
       ;;
     -h|--help)
@@ -112,7 +157,29 @@ export HORUS_MCP_TOKEN HORUS_COMMANDER_TOKEN
 export HORUS_MCP_URL="${MCP_URL}"
 export HORUS_COMMANDER_URL="${COMMANDER_URL}"
 export HORUS_SIM_CONTAINER_NAME="${CONTAINER}"
-export HORUS_SITL_PARAM_FILE="${HORUS_SITL_PARAM_FILE:-/horus/config/ardupilot/horus_sitl.parm}"
+if (( procedural == 1 )); then
+  # Generated outdoor worlds carry the outdoor fence/wind/gimbal parameters.
+  export HORUS_SITL_PARAM_FILE="${HORUS_SITL_PARAM_FILE:-/horus/config/ardupilot/horus_sitl_outdoor.parm}"
+else
+  export HORUS_SITL_PARAM_FILE="${HORUS_SITL_PARAM_FILE:-/horus/config/ardupilot/horus_sitl.parm}"
+fi
+
+if (( procedural == 1 )) && (( remote_mode == 1 )); then
+  # Generate on the laptop; remote_up.sh rsyncs sim/generated and starts this SDF remotely.
+  procedural_kind="${procedural_kind:-forest}"
+  if [[ -z "${procedural_seed}" ]]; then
+    procedural_seed="$(( (RANDOM << 15 | RANDOM) % 90000 + 10000 ))"
+    printf 'Random procedural seed for this run: %s\n' "${procedural_seed}"
+  fi
+  if ! procedural_sdf="$(generate_procedural_world "${procedural_kind}" "${procedural_seed}" "${procedural_stratum}")"; then
+    exit 1
+  fi
+  procedural_stem="$(procedural_world_stem "${procedural_kind}" "${procedural_seed}")"
+  export HORUS_REMOTE_WORLD="${procedural_sdf}"
+  export HORUS_GUI_WORLD="${procedural_stem}"
+  # The remote MCP must run with the outdoor executor config, not the indoor default.
+  export HORUS_REMOTE_CONFIG="/horus/config/horus_${procedural_kind}.yaml"
+fi
 # The MCP run pointer holds a container path (/horus/...); the host commander needs a host path.
 export HORUS_EVENT_LOG="${HORUS_EVENT_LOG:-${PROJECT_DIR}/runs/demo/$(date -u +%Y%m%dT%H%M%SZ)-commander-events.jsonl}"
 
@@ -258,13 +325,30 @@ if docker container inspect "${CONTAINER}" >/dev/null 2>&1; then
   exit 1
 fi
 if (( remote_mode == 1 )); then
-  printf 'Starting the headless simulation and MCP on %s...\n' "${HORUS_REMOTE}"
-  "${PROJECT_DIR}/scripts/koko/remote_up.sh"
+  printf 'Starting the headless simulation and MCP on %s (%s)...\n' \
+    "${HORUS_REMOTE}" "${HORUS_REMOTE_WORLD:-horus_indoor.sdf}"
+  "${PROJECT_DIR}/scripts/koko/remote_up.sh" "${HORUS_REMOTE_WORLD:-horus_indoor.sdf}"
   remote_cleanup_needed=1
 else
   sim_cleanup_needed=1
-  printf 'Starting the GUI indoor simulation in %s...\n' "${CONTAINER}"
-  "${SIM_DIR}/run.sh" start --gui horus_indoor.sdf
+  if (( procedural == 1 )); then
+    printf 'Starting the GUI procedural %s simulation in %s...\n' \
+      "${procedural_kind:-forest}" "${CONTAINER}"
+    run_args=(start --gui --procedural)
+    if [[ -n "${procedural_seed}" ]]; then
+      run_args+=(--seed "${procedural_seed}")
+    fi
+    if [[ -n "${procedural_kind}" ]]; then
+      run_args+=(--kind "${procedural_kind}")
+    fi
+    if [[ -n "${procedural_stratum}" ]]; then
+      run_args+=(--stratum "${procedural_stratum}")
+    fi
+  else
+    printf 'Starting the GUI indoor simulation in %s...\n' "${CONTAINER}"
+    run_args=(start --gui horus_indoor.sdf)
+  fi
+  "${SIM_DIR}/run.sh" "${run_args[@]}"
   docker exec --workdir /horus --env "HORUS_MCP_TOKEN=${HORUS_MCP_TOKEN}" \
     "${CONTAINER}" /opt/horus-venv/bin/horus-mcp &
   mcp_exec_pid=$!

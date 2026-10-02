@@ -99,15 +99,68 @@ if [[ -n "${HORUS_SIM_RUN_DIR:-}" ]]; then
 else
   log_dir=/horus/sim/logs
 fi
-pid_files=("${log_dir}/tof_bridge.pid" "${log_dir}/sitl.pid" \
-  "${log_dir}/gui.pid" "${log_dir}/gazebo.pid")
+grounder_pid_file=/horus/sim/logs/horus-grounder.pid
+if [[ -f "${grounder_pid_file}" ]]; then
+  grounder_pid=""
+  read -r grounder_pid < "${grounder_pid_file}" || true
+  if [[ "${grounder_pid}" =~ ^[1-9][0-9]*$ ]] \
+    && kill -0 "${grounder_pid}" 2>/dev/null; then
+    grounder_command="$(tr '\0' ' ' < "/proc/${grounder_pid}/cmdline" 2>/dev/null || true)"
+    if [[ "${grounder_command}" == *horus.grounder.server* ]]; then
+      kill -TERM "${grounder_pid}" 2>/dev/null || true
+      for ((attempt = 0; attempt < 10; attempt++)); do
+        kill -0 "${grounder_pid}" 2>/dev/null || break
+        sleep 0.5
+      done
+      kill -KILL "${grounder_pid}" 2>/dev/null || true
+    fi
+  fi
+  rm -f -- "${grounder_pid_file}"
+fi
+pid_files=("${log_dir}/civilian_life.pid" "${log_dir}/tof_bridge.pid" \
+  "${log_dir}/mavlink_keeper.pid" \
+  "${log_dir}/sitl.pid" "${log_dir}/gui.pid" "${log_dir}/gazebo.pid")
+
+civilian_life_pid_matches() {
+  local pid="$1" command
+  [[ "${pid}" =~ ^[1-9][0-9]*$ && -r "/proc/${pid}/cmdline" ]] || return 1
+  command="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+  [[ "${command}" == *"/horus/sim/scripts/civilian_life.py"* ]]
+}
+
+pid_is_alive() {
+  local pid_file="$1" pid
+  read -r pid < "${pid_file}" || true
+  [[ "${pid:-}" =~ ^[1-9][0-9]*$ ]] || return 1
+  if [[ "${pid_file}" == "${log_dir}/civilian_life.pid" ]]; then
+    civilian_life_pid_matches "${pid}" && kill -0 "${pid}" 2>/dev/null
+  else
+    kill -0 -- "-${pid}" 2>/dev/null
+  fi
+}
+
+signal_pid_file() {
+  local pid_file="$1" signal="$2" pid
+  read -r pid < "${pid_file}" || true
+  [[ "${pid:-}" =~ ^[1-9][0-9]*$ ]] || return 0
+  if [[ "${pid_file}" == "${log_dir}/civilian_life.pid" ]]; then
+    kill -0 "${pid}" 2>/dev/null || return 0
+    if ! civilian_life_pid_matches "${pid}"; then
+      printf 'Refusing to signal civilian PID %s: it is not civilian_life.py.\n' "${pid}" >&2
+      return 0
+    fi
+    kill "-${signal}" -- "${pid}" 2>/dev/null || true
+  else
+    kill "-${signal}" -- "-${pid}" 2>/dev/null || true
+  fi
+}
 
 for pid_file in "${pid_files[@]}"; do
   [[ -f "${pid_file}" ]] || continue
   pid=""
   read -r pid < "${pid_file}" || true
   [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || continue
-  kill -TERM -- "-${pid}" 2>/dev/null || true
+  signal_pid_file "${pid_file}" TERM
 done
 for ((attempt = 0; attempt < 10; attempt++)); do
   alive=0
@@ -116,7 +169,7 @@ for ((attempt = 0; attempt < 10; attempt++)); do
     pid=""
     read -r pid < "${pid_file}" || true
     [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || continue
-    if kill -0 -- "-${pid}" 2>/dev/null; then
+    if pid_is_alive "${pid_file}"; then
       alive=1
     fi
   done
@@ -128,5 +181,5 @@ for pid_file in "${pid_files[@]}"; do
   pid=""
   read -r pid < "${pid_file}" || true
   [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || continue
-  kill -KILL -- "-${pid}" 2>/dev/null || true
+  signal_pid_file "${pid_file}" KILL
 done
