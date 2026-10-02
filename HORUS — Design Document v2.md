@@ -161,14 +161,14 @@ A bad AI decision cannot produce a dangerous maneuver: the executor and ArduPilo
 | Category | Tools |
 | --- | --- |
 | State | `get_state`, `get_frame`, `list_candidates`, `get_map`, `get_link_status` |
-| Skills | `take_off`, `goto(pose)`, `follow(id)`, `orbit(id)`, `scan(area)`, `approach(id, dist)` |
-| Grounding | `point(frame_id, description)` (fallback) |
+| Skills | `take_off`, `goto(pose)`, `follow(id, target_size_m)`, `orbit(id, radius, target_size_m)`, `scan(area)`, `approach(id, dist, target_size_m)` |
+| Grounding | `set_vocabulary(terms)` (continuous open-vocabulary detection), `point(frame_id, description|box)` (may seed a new tracker ID) |
 | Recognition | `set_target_profile(profile)`, `train_specialist(desc, refs)`, `load_model(package)`, `set_mode(name)` |
-| Tasks | `get_task_status(task_id)`, `wait_for_task(task_id, timeout_s)`, `cancel(task_id)` |
+| Tasks | `get_task_status(task_id)`, `wait_for_task(task_id, timeout_s)`, `wait_events(after_id, timeout_s)`, `cancel(task_id)` |
 | Missions (stretch) | `upload_mission`, `start_mission`, `get_mission_log`, `clear_mission` |
 | Emergency | `hold`, `rth`, `land` |
 
-Skills take tracker IDs rather than pixel regions. Long actions return a `task_id` immediately. Every state and frame response is timestamped. The server is authenticated, reached only through an encrypted tunnel, and built on the Python MCP SDK over streamable HTTP, with pymavlink or MAVSDK to ArduPilot.
+Skills take tracker IDs rather than pixel regions. Long actions return a `task_id` immediately. `wait_events` blocks asynchronously until an executor or perception transition arrives (or its timeout expires), so the commander can observe task completion, target loss/reacquisition, link state, emergency actions, and perception changes without polling. Every state and frame response is timestamped. The server is authenticated, reached only through an encrypted tunnel, and built on the Python MCP SDK over streamable HTTP, with pymavlink or MAVSDK to ArduPilot.
 
 ## Simulation plan (ArduPilot SITL + Gazebo)
 

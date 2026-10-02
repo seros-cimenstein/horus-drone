@@ -4,15 +4,15 @@ HORUS is a safety-first supervisory-control core for ArduPilot: a remote command
 
 ## Architecture
 
-- `horus/flight/` owns a threaded `pymavlink` connection, timestamped telemetry cache, heartbeat age, battery/proximity/status-text observations, and explicit Guided/arm/takeoff/LAND/RTL/yaw/velocity operations.
-- `horus/executor/` serializes bounded `take_off`, `goto`, `approach`, `follow`, `orbit`, and raster `scan` tasks. Long skills return task IDs; tasks report requested and executed targets, any clamp reason, terminal status, and whether the action completed. TTL expiry, cancellation, and skill completion stop motion in Guided with zero velocity. `hold`, `rth`, and `land` preempt queued work.
-- `horus/perception/` reads the UDP H.264 camera or a video source, detects proposals, tracks persistent IDs with appearance embeddings, keeps a timestamped frame/pose ring buffer, emits a numbered set-of-mark JPEG and candidate table, supports embedding matching and a tiny labeled-reference classifier, and provides a lazy-loaded grounding fallback for old frames.
-- `horus/mcp_server/` exposes state, frame/candidate, grounding, recognition-profile, task, bounded skill, and emergency tools over the Python MCP SDK's streamable HTTP transport. Every HTTP request requires a bearer token; detector labels and ArduPilot status text are returned as explicitly quoted untrusted values.
-- `horus/commander/` defaults to a headless Claude Code CLI agent that talks to HORUS only through authenticated MCP tools; the Anthropic and OpenAI API-backed clients remain optional.
-- `horus/repl/` provides the terminal controls and runs replayable YAML skill sequences from `missions/`.
+- `horus/flight/` owns a threaded `pymavlink` connection, timestamped telemetry cache, heartbeat age, battery/proximity/status-text observations, vehicle roll/pitch (`ATTITUDE`) and gimbal attitude (`MOUNT_STATUS`) each stamped with its own monotonic receive time, and explicit Guided/arm/takeoff/LAND/RTL/yaw/velocity operations.
+- `horus/executor/` serializes bounded `take_off`, `goto`, `approach`, `follow`, `orbit`, raster `scan`, and camera-driven `search` tasks. Long skills return task IDs; target tasks report range and range source as well as requested/executed targets, clamps, and terminal status. `approach`, `follow`, and `orbit` all hold at zero velocity and re-identify the target by appearance when a frame drops or fails to validate it, bounded by the task TTL, and all three publish `target_lost`/`target_reacquired` events with the loss cause (candidate gone/stale versus reference appearance mismatch). `target_size_m` supplies a known object height, and the configured `target_height_m` ranges person targets only — the current label, a classless candidate, or track-level person evidence (a shirt-colour attribute, or a person label remembered for the track) — so a frame that mislabels a person (for example as `kite`) does not remove the range, and any disagreement used is reported in `tracking.range_source_note`. A non-person-labeled target without that evidence refuses (the error names the label) until `target_size_m` or a measured forward ToF range is available. TTL expiry, cancellation, and skill completion stop motion in Guided with zero velocity; `hold`, `rth`, and `land` preempt queued and running work. An emergency takes effect even while a skill step is mid-flight (revalidating its target or sending a command): the step's own completion, failure, TTL, or cancellation path never sends a later Guided, hold, or velocity command after the emergency, and the preempted task stays `cancelled`. An emergency waits at most for one guarded flight-command operation already in progress (for example a velocity setpoint, or a hold's Guided switch plus zero-velocity setpoint), never for perception or model work. Translations require pose telemetry, and target skills also a heading sample, no older than `executor.telemetry_max_age_s` (default 1.5 s wall); forward ToF ranges and search frames older than that are ignored. The flight link requests `ATTITUDE`, `LOCAL_POSITION_NED`, `GLOBAL_POSITION_INT` and `SYSTEM_TIME` at 20 Hz of autopilot time (the rest at 5 Hz) so that wall-clock gaps stay well under the guard down to a simulation real-time factor of ~0.1; a low-RTF run raises the limit explicitly instead of relaxing the guard silently.
+- `horus/perception/` reads the UDP H.264 camera or a video source, tracks detector and CSRT-seeded (`open_vocab`/`point`) targets with appearance embeddings, keeps a timestamped frame/pose ring buffer, emits a numbered set-of-mark JPEG and candidate table, and uses the loopback grounder service for continuous vocabulary detection and point-by-description. `horus/perception/scene.py` is a pure standard-library scene monitor fed by every processed frame: per-track image-motion history and fixed-camera region watches (see [Scene tools](#scene-tools-image-motion-and-region-watches)).
+- `horus/mcp_server/` exposes state, frame/candidate, grounding, recognition-profile, scene (motion and region-watch), task, bounded skill, emergency, and event-wait tools over the Python MCP SDK's streamable HTTP transport. `wait_events` returns executor and perception transitions without polling task status. Every HTTP request requires a bearer token; detector labels and ArduPilot status text are returned as explicitly quoted untrusted values.
+- `horus/commander/` maintains one Claude Code or Anthropic/OpenAI API conversation per mission, streams executor/perception events into it, and bypasses the model for authenticated emergency controls. An emergency interrupts the running model turn and drops operator requests and emergency notices that were queued before it and not yet sent to the model. An API-provider turn that is interrupted or fails (for example during a tool call) is removed from the conversation as a whole, so the next turn never carries an unanswered tool call; cancelling a turn still waiting for its predecessor leaves the predecessor's history intact.
+- `horus/repl/` provides the terminal controls and runs replayable YAML skill sequences from `missions/`. Free text runs in the background, so emergency commands can still be typed during a model turn.
 - `horus/tof_bridge/` forwards Gazebo LaserScan ranges as MAVLink `DISTANCE_SENSOR` messages. `config/ardupilot/horus_sitl.parm` enables MAVLink proximity and the proximity avoidance bit.
 
-**Safety-critical control decision:** ArduCopter's simple proximity avoidance is intended for Guided **velocity** targets, not Guided position targets. All executor translations—including `goto` and scan waypoints—therefore use a local pose-feedback controller and velocity-only `SET_POSITION_TARGET_LOCAL_NED` messages at 10–20 Hz. Horizontal speed, vertical speed, distance, altitude, and geofence bounds are enforced in `config/horus.yaml` before motion. `hold` remains in Guided and continually commands zero velocity; after `executor.link_loss_rth_delay_s`, it escalates to RTH/RTL. It never relies on LOITER/ALT_HOLD without an RC pilot.
+**Safety-critical control decision:** ArduCopter's simple proximity avoidance is intended for Guided **velocity** targets, not Guided position targets. All executor translations—including `goto` and scan waypoints—therefore use a local pose-feedback controller and velocity-only `SET_POSITION_TARGET_LOCAL_NED` messages at 10–20 Hz. Horizontal speed, vertical speed, distance, altitude, and geofence bounds are enforced in `config/horus.yaml` before motion. `hold` remains in Guided and continually commands zero velocity; once no MCP call (including the commander's event long-poll) has reached HORUS for `executor.link_loss_rth_delay_s`, it treats the supervisory link as lost and escalates to RTH/RTL. It never relies on LOITER/ALT_HOLD without an RC pilot.
 
 MCP and cloud links are supervisory only. The HTTP listener binds to loopback by default; do not expose it publicly. Use a strong `HORUS_MCP_TOKEN` and an RC override. Proximity avoidance parameters do not replace validation in SITL or a controlled test area.
 
@@ -50,9 +50,15 @@ python -m pip install -e '.[commander,commander-openai,test]'
 
 For OpenAI, also set `commander.api_key_env` to `OPENAI_API_KEY` and choose an OpenAI-compatible `commander.model`; configure `base_url` when using an API-compatible endpoint.
 
-`perception` installs NumPy and ONNX Runtime for CPU-only YOLO and appearance embedding; it does not install PyTorch, Ultralytics, or OpenCV. `bash scripts/fetch_models.sh` checks pinned SHA256 hashes and prepares the OSNet checkpoint with a flexible batch axis. That one-time conversion uses the small `model-tools` ONNX extra, not Torch. `grounding` is an optional, lazy fallback that installs Torch/torchvision/Transformers only when you choose to use text grounding.
+`perception` installs NumPy and ONNX Runtime for CPU-only YOLO and appearance embedding; it does not install PyTorch, Ultralytics, or OpenCV. `bash scripts/fetch_models.sh` checks pinned SHA256 hashes and prepares the OSNet checkpoint with a flexible batch axis. That one-time conversion uses the small `model-tools` ONNX extra, not Torch. The optional `grounder` extra pins Python 3.10-compatible PyTorch 2.5.1, torchvision 0.20.1, Transformers 4.46.3, SciPy 1.10.1, and Pillow 10.4.0; `horus-grounder` serves `/detect` and `/health` on `127.0.0.1:8100` using Grounding DINO tiny by default, with a 320 px shortest-edge processor setting for CPU inference and source-pixel boxes.
 
-The optional `opencv-headless` extra is for local image/video sources that do not need GStreamer. It must not be installed in the simulation environment: the sim uses Ubuntu's `python3-opencv` build with GStreamer support. For sim, install `.[server,perception,model-tools,test]` and run in a venv that can import the system package (for example one created with `--system-site-packages`); the core NumPy `<2` constraint keeps the pip runtime compatible with Ubuntu's NumPy 1.x OpenCV bindings, and the UDP camera reader checks `cv2.getBuildInformation()` and reports a clear error if GStreamer is absent. OpenCV is needed by both image preprocessing and the camera, but the pip headless wheel has no GStreamer.
+For a standalone Python install without system OpenCV, use `python -m pip install -e '.[grounder,opencv-headless]'`, then run `horus-grounder`. Select `owlv2-base-patch16-ensemble` with `horus-grounder --model owlv2-base-patch16-ensemble`; Grounding DINO tiny is the default.
+
+The `opencv-headless` extra installs `opencv-contrib-python-headless`, the pip build that provides the CSRT tracker used by `point` seeding, open-vocabulary seeds, and point latency compensation. Do not install it alongside `opencv-python-headless` or any other OpenCV wheel, because they all provide the same `cv2` module.
+
+The optional `opencv-headless` extra is for local image/video sources that do not need GStreamer. It must not be installed in the simulation environment: the sim uses Ubuntu's `python3-opencv` build with GStreamer support. For sim, install `.[server,perception,model-tools,test]` and run in a venv that can import the system package (for example one created with `--system-site-packages`); the core NumPy `<2` constraint keeps the pip runtime compatible with Ubuntu's NumPy 1.x OpenCV bindings, and the UDP camera reader checks `cv2.getBuildInformation()` and reports a clear error if GStreamer is absent. OpenCV is needed by both image preprocessing and the camera, but the pip headless wheels (including the contrib build) have no GStreamer.
+
+For the simulation container, install the optional runtime without rebuilding the image by running `docker exec horus-sim bash /horus/scripts/setup_grounder.sh` once. It creates `/horus/models/grounder-venv`, caches model weights under `/horus/models/hf`, and subsequent simulation starts launch the service automatically. Logs are written to `sim/logs/horus-grounder.log`; if the venv is absent, simulation startup continues without the service.
 
 The fetched YOLOv8n ONNX checkpoint is published by [Kalray/yolov8](https://huggingface.co/Kalray/yolov8), whose model card declares AGPL-3.0; assess those terms before closed-product use or redistribution. The OSNet x0.25 ReID checkpoint is published by [anriha/osnet_x0_25_msmt17](https://huggingface.co/anriha/osnet_x0_25_msmt17) under MIT.
 
@@ -106,9 +112,11 @@ For the end-to-end GUI commander demo, build the overlay described in
 ./scripts/demo.sh
 ```
 
-The script starts the indoor GUI simulation, its automatic ToF bridge,
-container MCP with perception, host `horus-commander-serve`, and
-`horus-gz-bridge`; Ctrl-C stops the processes and retains run logs. Add
+By default, the script starts Gazebo/SITL, the automatic ToF bridge, and
+perception MCP on Koko, with a visible Gazebo GUI, `horus-gz-bridge`, and
+`horus-commander-serve` on the laptop. Use `--remote HOST` for another SSH
+host, or explicitly select `--local` to run the entire stack on the laptop.
+Ctrl-C stops the managed processes and retains server run logs. Add
 `--record out.mp4` to capture the Gazebo XWayland window with ffmpeg
 `x11grab` (`xwininfo` selects the window region when available; otherwise the
 full `:0` display is recorded). Native Wayland windows are not captured.
@@ -122,10 +130,14 @@ holds that port, e.g. `HORUS_COMMANDER_URL=http://127.0.0.1:8766 ./scripts/demo.
 Commander events are appended to `HORUS_EVENT_LOG` (default
 `runs/demo/<UTC>-commander-events.jsonl`).
 
+The host commander keeps one Claude Code `stream-json` process for the mission (API providers retain the same per-mission message history). Each `/task` message is tagged `[operator]`; the service event pump forwards relevant MCP events to an active mission without starting a session on its own. `commander.max_turns` defaults to 40 agentic tool-call turns per response, while `commander.timeout_s` bounds each response.
+
+The authenticated loopback service exposes `POST /task` with `{"text":"..."}`, `POST /emergency` with `{"action":"hold"|"land"|"rth"}`, and `POST /reset`. Short exact imperatives such as `STOP!`, `land now`, or `return home` on `/task` use the direct emergency path; longer requests are left to the commander. The GUI's HOLD/LAND/RTH and NEW MISSION buttons publish on `/horus/emergency` and `/horus/reset`.
+
 ### Split laptop/Koko deployment
 
-To run the headless Gazebo/SITL, ToF bridge, and perception MCP on Koko while
-keeping the Gazebo GUI and commander bridge on the laptop, use:
+This is the default demo deployment. To select Koko explicitly while keeping
+the Gazebo GUI and commander bridge visible on the laptop, use:
 
 ```bash
 ./scripts/demo.sh --remote koko
@@ -150,6 +162,11 @@ addresses when needed:
   `HORUS_REMOTE_IP`, and `HORUS_LOCAL_IP`.
 - `HORUS_REMOTE_SIM_IMAGE` (default `horus-sim:local-s1s2`) and
   `HORUS_REMOTE_SIM_GPU` (default `amd`; uses Mesa `radeonsi` and `/dev/dri`).
+- `HORUS_REMOTE_SIM_MEMORY_LIMIT` (default `8g`) caps the remote container's
+  RAM; `HORUS_REMOTE_SIM_MEMORY_SWAP_LIMIT` (default `9g`) caps **RAM plus
+  swap**, allowing at most 1 GiB swap with the defaults. These limits apply
+  to Gazebo, SITL, perception, and the optional grounder together, not the
+  laptop GUI. They do not constrain unrelated Koko host processes.
 - `HORUS_REMOTE_GZ_IP` and `HORUS_LOCAL_GZ_IP` select Gazebo's advertised
   interfaces; `HORUS_GZ_PARTITION` (default `horus`) must match on both hosts.
 - If multicast discovery is blocked, set `HORUS_GZ_RELAY_REMOTE` to the
@@ -192,7 +209,23 @@ the LAN.
    horus-mcp
    ```
 
-The camera opens asynchronously with retry/backoff. `get_state` reports whether it is connecting, streaming, or stalled and includes the last-frame age. For UDP/RTP input, the GStreamer pipeline and camera watchdog enforce timeouts; OpenCV timeout properties are not passed to the GStreamer backend. Flight, emergency, and state tools remain available without video; set `perception.enabled: false` in `config/horus.yaml` or start with `horus-mcp --no-perception` for a flight-only run.
+The camera opens asynchronously with retry/backoff. `get_state` reports whether it is connecting, streaming, or stalled and includes the last-frame age. For UDP/RTP input, the GStreamer pipeline and camera watchdog enforce timeouts; OpenCV timeout properties are not passed to the GStreamer backend. Flight, emergency, and state tools remain available without video; set `perception.enabled: false` in `config/horus.yaml` or start with `horus-mcp --no-perception` for a flight-only run. A flight-only server needs only the `server` extra: NumPy, OpenCV, and ONNX Runtime are imported only when perception starts, so `horus-mcp --help` and `horus-mcp --no-perception` run without them. A real flight link is still required to serve.
+
+`set_target_profile` validates every reference and trains the optional labeled head before it replaces the active profile. A rejected profile returns an error and leaves the previous references, head, and recognition mode in effect. `target_match_confidence` in `get_map` candidates and the perception API's `list_candidates`/`get_candidate` records reflects the candidate's appearance in the current frame on every frame of a track, not only the first. Tracks are embedded lazily, at most once per track per frame, and share that embedding with executor revalidation. The revalidation threshold itself is never relaxed: a live, continuously associated track survives a score that dips no more than `perception.revalidation_grace_margin` (default 0.05) below the threshold for up to `perception.revalidation_grace_s` (default 1 s) after its last accepted validation — a correctly tracked target's score wobbles across the threshold (0.7917 then 0.7196 on the next frame), while a total appearance change (an identity swap) still fails immediately and a persistent dip still loses the target once the window expires. Re-acquisition after a loss gets no grace and keeps the class/shirt-colour gates and the full threshold. Appearance comparisons are logged per frame at DEBUG and aggregated into one `perception_reid_summary` INFO line per second (comparison count, best score and candidate, whether the reference's own track was among them), so a long hold cannot flood the log. When a profile needs appearance evidence that is unavailable, the score is 0.0; a class-only profile scores by class. `point` with latency compensation re-identifies the old-frame reference by the current-frame appearance of the latest candidates (same lazy cache) before falling back to box geometry, so a look-alike that crossed into the old box does not take the ID.
+
+#### Scene tools: image motion and region watches
+
+All scene coordinates are fractions of the processed frame (`x` right, `y` down, 0–1) and everything is image-relative. Frame timestamps are capture-time `time.monotonic()`; each frame carries the camera state sampled at capture: local position, heading, vehicle roll/pitch (from MAVLink `ATTITUDE`), and gimbal pitch/roll/yaw (from `MOUNT_STATUS`), each with the age of its own latest message on the monotonic clock, so UTC/NTP steps never change freshness. Camera state older than 1.5 s is unavailable, never assumed stationary. Zoom/field of view is not reported by the current telemetry and is listed as unmeasured, so a zoom change can move the image undetected. The full schema is in the docstrings of `horus/perception/scene.py` and the MCP tools.
+
+- `get_candidate_motion(id)` fits the tracker ID's last ≤2 s of processed boxes: centre and size rates in frame fractions per second, a log-scale rate, the fit residual and a fit confidence, plus `camera_motion`. `camera_motion.status` is `moving` (measured vehicle/gimbal drift beyond tolerance: the rates include ego-motion), `within_tolerance` (sub-tolerance and unmeasured components listed in `unmeasured` can still contribute), or `unknown` (no fresh camera state). It is never a metric or ground speed. Without an estimate, `available` is false with `reason` `no_frames`, `unknown_track`, `stale_frames`, `not_visible`, or `insufficient_samples` (fewer than 3 samples or 0.25 s); gaps over 1 s, clock resets, and frame-size changes restart the history (`stream_discontinuity`).
+- `watch_region(name, box, class_name=None, dwell_s=None, absence_s=1.0, ttl_s=None)` watches a normalized box on the latest fresh frame and anchors it to that frame's camera state. A target is inside when its box centre is inside; `class_name` matches any detector or open-vocabulary label case-insensitively. Targets already inside are initial occupants without an enter event. `region_enter`, `region_exit` (after `absence_s` counted from the first frame that no longer saw the target inside; `reason` `left_region` when seen outside, `disappeared` when the track vanished), and `region_dwell` (once, after `dwell_s` of continuous inside observation) go to `wait_events` with quoted labels. Camera drift beyond 0.5 m horizontal, 0.3 m vertical, 3° heading, 3° vehicle roll/pitch, or 2° gimbal pitch/roll/yaw, a stale camera state, or a frame-size change emits `region_watch_paused`; no transitions happen while paused. After 1 s steady on the reference view, or after a stream gap, `region_watch_resumed` re-adopts current occupancy without inventing enter/exit events. At most 16 watches; reusing a name replaces a watch silently; each watch's events are budgeted (burst 10, 2/s) with suppressed counts reported. `ttl_s` ends a watch with `region_watch_expired`; the perception watchdog enforces it even while the camera delivers no frames.
+- `list_region_watches()` reports stream freshness and, per watch, `active`/`stale`/`paused` status, the camera reference, unmeasured camera components, occupants and timers; stale or paused occupancy is last-confirmed state. `remove_region_watch(watch_id)` errors for unknown IDs; after it returns the watch generates no new events (earlier events stay in the `wait_events` history).
+
+The commander wakes the active mission for region events; enter/exit/dwell repeats of the same watch within 10 s are counted rather than sent, while pause, resume, and expiry always wake it. Watches never command flight.
+
+Label filters (`watch_region`, `search`, `resolve_candidate`) compare tracker labels exactly (case-insensitive), with no synonym mapping. The default `models/yolov8n.onnx` detector emits only the 80 COCO labels listed in `horus/perception/detector.py` — including the animals bird, cat, dog, horse, sheep, cow, elephant, bear, zebra, and giraffe — so a label it cannot emit, such as `deer`, never matches. Open-vocabulary seeds carry the grounder's label; using them with these filters needs a running grounder and `set_vocabulary`, and that combination has not been exercised.
+
+`search(area, class_name=None, reference_id=None, ttl_s=None)` is the bounded camera-driven search/re-acquisition skill. It flies exactly the clamped raster of `scan` and checks each newly processed frame once. With `class_name`, the largest candidate with that detector/open-vocabulary label that also passes fresh appearance validation is a match; with `reference_id`, a lost tracker ID must be re-identified above the similarity threshold from its stored appearance. On a match the executor commands zero velocity and holds, the task succeeds with `tracking.found_id`, and a `target_found` event (label quoted) wakes the commander; covering the area without a match fails the task. TTL, cancellation, clamps, and `hold`/`rth`/`land` preemption behave as for every skill. Mission YAML may use `search` as a step.
 
 5. In the REPL network namespace, use the same token to connect:
 
@@ -200,7 +233,7 @@ The camera opens asynchronously with retry/backoff. `get_state` reports whether 
    horus --server-url http://127.0.0.1:8000/mcp
    ```
 
-   The terminal accepts `/state`, `/goto NORTH_M EAST_M ALTITUDE_M`, `/take_off [ALTITUDE_M]`, `/hold`, `/rth`, `/land`, `/approach ID [DISTANCE_M]`, `/follow ID [DISTANCE_M]`, and `/orbit ID [RADIUS_M]`. Other text is handled by the authenticated Claude Code MCP backend without an API key. Direct REPL commands and emergency tools do not require a cloud provider key.
+   The terminal accepts `/state`, `/goto NORTH_M EAST_M ALTITUDE_M`, `/take_off [ALTITUDE_M]`, `/hold`, `/rth`, `/land` (also the bare single words `hold`, `rth`, `land`), `/approach ID [DISTANCE_M]`, `/follow ID [DISTANCE_M]`, `/orbit ID [RADIUS_M]`, and `/quit`. Other text is handled by the authenticated Claude Code MCP backend without an API key; a sentence that merely starts with an emergency word, such as `land next to the hiker`, is free text for the commander. Free-text requests are sent one at a time in the background, so the prompt stays available while the model works. `/hold`, `/rth`, and `/land` call the MCP emergency tool directly (through the commander's own session once it has started). They interrupt the running model turn and discard free text queued behind it; the model then receives an `[operator emergency]` notice. End of input waits for the running request to finish, while `/quit` cancels it. Direct REPL commands and emergency tools do not require a cloud provider key.
 6. Run the named mission through the REPL CLI:
 
    ```bash
@@ -217,13 +250,72 @@ The camera opens asynchronously with retry/backoff. `get_state` reports whether 
    ```
    S5 takes off facing the room, selects the largest detected person with a blue-shirt attribute, starts `scripts/move_target.py` (a `start_driver` mission step, so the route is timed from the follow) and follows that tracker ID for 45 seconds. The target's route is paced by Gazebo simulation time and crosses behind `corridor_screen`, hidden from the follower for 2–3 s. The follow task records every loss/re-acquisition in autopilot time, with embedding validation and ID preservation/rematching; each run writes a JSON result under `runs/`. `sim/scripts/s5_follow_trials.sh` runs the scenario on the remote simulator and judges each run against Gazebo ground truth (`sim/scripts/s5_analyze.py`).
 
-7. For `horus_indoor.sdf`, `start_sim.sh` automatically launches one ToF bridge after SITL opens TCP `127.0.0.1:5763`. To run or restart it manually on a running indoor world:
+   Mission YAML may specify a top-level `driver`, `driver_args` (a list of
+   literal strings, requiring `driver`), and `driver_min_duration_s`.
+   The `driver` path itself resolves relative to the mission YAML.
+   `driver_args` are passed unchanged: mission `$` variables are not expanded,
+   and paths inside the arguments are not rebased. The driver resolves relative
+   argument paths against the runner's current working directory. Run missions
+   from the repository root; both trial scripts `cd` to the project root, and
+   the remote S5 runner uses `/horus`. For example:
 
-   ```bash
-   bash scripts/tof_bridges_indoor.sh
+   ```yaml
+   driver: ../sim/scripts/civilian_life.py
+   driver_args:
+     - --scenario
+     - sim/scenarios/horus_urban.yaml
+     - --group
+     - follow_jogger
    ```
 
-   The bridge sends all seven LaserScan topics over one MAVLink connection from system 254/component 196. Sensor IDs 0–5 use horizontal orientations `0, 1, 2, 4, 6, 7`; ID 6 feeds the downward rangefinder at orientation 25 (`PITCH_270`). The Gazebo lidars render at 10 Hz (20 Hz costs ~40% real-time factor on an integrated GPU); the bridge forwards each sensor at 10–20 Hz (default 20). It waits up to `HORUS_TOF_STARTUP_TIMEOUT` (default 60 s) for first scans, because the lockstep world only runs once a MAVLink client holds SITL port 5760. `horus_sitl.parm` configures `RNGFND1_TYPE 10` and `RNGFND1_ORIENT 25`.
+   A `select_candidate` step requires `attribute`, `equals`, `choose: largest`,
+   and `store_as`. Its optional `timeout_s` must be a finite positive number;
+   when supplied, the runner polls `list_candidates` every 0.5 seconds until a
+   match is found or the timeout expires. On timeout it raises an error with
+   the timeout and a summary of the last candidate table. Without `timeout_s`,
+   it queries once and fails immediately if no candidate matches. The optional
+   `min_confidence` (finite, in [0, 1], default 0.5) rejects a match whose
+   detector confidence is below it, so the largest exact-attribute hit is never
+   a low-confidence detector artifact; when matches exist but all fail the
+   floor, the error names the best rejected match. For example:
+
+   ```yaml
+   - select_candidate:
+       attribute: shirt_colour
+       equals: green
+       choose: largest
+       store_as: hiker
+       timeout_s: 30.0
+       min_confidence: 0.5
+   ```
+
+   A `resolve_candidate` step resolves a public cue to exactly one current
+   tracker ID or abstains; it never picks among look-alikes. It requires
+   `class_name` and `store_as`; `attribute`/`equals` (together), `timeout_s`
+   (default 10 s, positive) and `settle_s` (default 1 s) are optional. The runner
+   polls `list_candidates` until a candidate matches or `timeout_s` expires, then
+   keeps observing for `settle_s`. If two or more matching IDs were visible
+   together during that window, it prints an `abstain` outcome with reason
+   `ambiguous` and the candidate IDs; without a match it abstains with
+   `no_match`. An abstaining run skips its remaining steps and still exits
+   successfully; a resolved run stores the candidate (so `$target.id` works):
+
+   ```yaml
+   - resolve_candidate:
+       class_name: person
+       attribute: shirt_colour
+       equals: red
+       store_as: target
+       timeout_s: 15.0
+   ```
+
+7. For every world that carries the ToF payload (`horus_indoor.sdf`, `horus_forest*`, `horus_urban*`), `start_sim.sh` automatically launches one ToF bridge after SITL opens TCP `127.0.0.1:5763`. To run or restart it manually on a running world:
+
+   ```bash
+   bash scripts/tof_bridges.sh --world horus_indoor --model-chain horus_iris/horus_sensor_payload
+   ```
+
+   The bridge sends all seven LaserScan topics over one MAVLink connection from system 254/component 196. Sensor IDs 0–5 use horizontal orientations `0, 1, 2, 4, 6, 7`; ID 6 feeds the downward rangefinder at orientation 25 (`PITCH_270`). The Gazebo lidars render at 10 Hz (20 Hz costs ~40% real-time factor on an integrated GPU); the bridge forwards each sensor at 10–20 Hz (default 20). It waits up to `HORUS_TOF_STARTUP_TIMEOUT` (default 60 s) for first scans, because the lockstep world only runs once a MAVLink client holds SITL port 5760. Both `horus_sitl.parm` and `horus_sitl_outdoor.parm` configure `RNGFND1_TYPE 10` and `RNGFND1_ORIENT 25`.
 
 ## GPS-free S4 and precision landing
 
@@ -233,7 +325,7 @@ Use `config/ardupilot/horus_sitl_nogps.parm` for the Copter-4.7.1 GPS-denied pro
 
 Set `flight.gps_free_mode: true` in `config/horus.yaml` to send the configured WGS-84 `global_origin_latitude_deg`, `global_origin_longitude_deg`, and `global_origin_altitude_m` with `SET_GPS_GLOBAL_ORIGIN` on MAVLink connect. This sets the EKF global origin only; it does not fabricate local-position telemetry.
 
-During `rth` or `land`, precision landing waits until the vehicle is within 3 m of local home, points the gimbal down, and requires a fresh tag36h11 id-0 detection before switching to GUIDED centering. Horizontal correction is proportional to the tag's image offset (full 0.35 m/s at a half-frame offset, zero inside a 5% deadband); descent at 0.15 m/s runs while the tag is within a 15% cone, so the vehicle centres and descends together. Below 0.6 m the tag overflows the camera and the centred vehicle is handed to vertical LAND. Before visual acquisition, RTL/LAND remains in control; after acquisition, tag loss commands a zero-velocity hold. The gimbal is levelled again after the landing and at every take-off. `get_state` reports `precision_landing` counters (detections, acquisitions, completed landings, last fallback). The mount range must match the model: `MNT1_PITCH_MIN -135` / `MNT1_PITCH_MAX 45` (upstream `gazebo-iris-gimbal.parm`), otherwise a -90° command points the camera 45° past nadir. The pad's tag is built from geometry in the world file (Gazebo renders the PNG texture override black). `python3 scripts/landing_error.py` streams planar ground-truth error between Gazebo models `horus_iris` and `home_apriltag_pad` from `/world/horus_indoor/pose/info`; it attaches to an existing world and does not start a simulator.
+During `rth` or `land`, precision landing waits until the vehicle is within 3 m of local home, points the gimbal down, and requires a fresh tag36h11 id-0 detection before switching to GUIDED centering. Horizontal correction is proportional to the tag's image offset (full 0.35 m/s at a half-frame offset, zero inside a 5% deadband); descent at 0.15 m/s runs while the tag is within a 15% cone, so the vehicle centres and descends together. Below 0.6 m the tag overflows the camera and the centred vehicle is handed to vertical LAND. Before visual acquisition, RTL/LAND remains in control; after acquisition, tag loss commands a zero-velocity hold. A heading sample older than `executor.telemetry_max_age_s` blocks acquisition and, once acquired, also commands the zero-velocity hold, because the tag offset is rotated into NED by the heading. Because GUIDED velocity setpoints mask the autopilot's own precision-landing failsafe, precision control hands the descent to LAND — the same hand-off as the 0.6 m hand-off — whenever it stops making progress or loses control: no descent progress (measured against `executor.precision_landing_min_descent_m_s` on the autopilot clock when it is fresh, over `executor.precision_landing_stall_s` of wall time, so a legitimate descent at low real-time factor is not misread) or a stale pose / detector / gimbal error after acquisition, both reported via `precision_landing_stalled` and `get_state`'s `last_fallback`. An armed GUIDED hover above the pad is never left as the terminal state. The tag detector only sees the pad on a fraction of frames at range, so the last validated centring/descent setpoint stays active for `executor.precision_landing_target_grace_s` (default 1 s) after the last detection instead of dropping to zero on every miss — that pulsing (0.15 m/s alternating with 0) is averaged by the autopilot into a near-hover. Past the grace, a lost tag returns to the zero-velocity hold. Each second of tag-controlled flight logs the tag pixel error, gimbal pitch, commanded NED velocity and altitude. The gimbal is levelled again after the landing and at every take-off. `get_state` reports `precision_landing` counters (detections, acquisitions, completed landings, last fallback). The mount range must match the model: `MNT1_PITCH_MIN -135` / `MNT1_PITCH_MAX 45` (upstream `gazebo-iris-gimbal.parm`), otherwise a -90° command points the camera 45° past nadir. The pad's tag is built from geometry in the world file (Gazebo renders the PNG texture override black). `python3 scripts/landing_error.py` streams planar ground-truth error between Gazebo models `horus_iris` and `home_apriltag_pad` from `/world/horus_indoor/pose/info`; it attaches to an existing world and does not start a simulator.
 
 Measured results for S0–S7 are in [Simulation results](#simulation-results).
 
@@ -258,7 +350,7 @@ Without `--netem-interface`, D is measured and waited in SITL simulation time; `
 
 ## Configuration and tests
 
-`config/horus.yaml` is parsed strictly; unknown keys are rejected. Set `executor.target_width_m` only after calibrating the actual target width and camera geometry. Without a measured/calibrated range, `approach` and `orbit` fail safe rather than issuing unbounded forward motion; visual follow can keep the target centered without translating. Results never report a requested but unexecuted point as reached.
+`config/horus.yaml` is parsed strictly; unknown keys are rejected. Set `executor.target_width_m` only after calibrating the actual target width and camera geometry. Range sources are preferred measured/declared first: a fresh forward ToF range within the 8° bearing gate, then `target_size_m` (a known object height for this call), then the configured `executor.target_height_m` for person targets (the detector label, a classless candidate, or track-level person evidence: a shirt-colour attribute or a person label remembered for the track), then `target_width_m`. A non-person-labeled target without person evidence is refused rather than ranged from a person height; the error names the detector label so the caller can pass `target_size_m`. Without any measured/calibrated range, `approach` and `orbit` fail safe rather than issuing unbounded forward motion; visual follow can keep the target centered without translating. Results never report a requested but unexecuted point as reached.
 `perception.ignore_regions` configures normalized `[x1, y1, x2, y2]` image boxes; detector proposals with at least 50% of their area in any box are discarded before tracking.
 
 Run the project test suite with:
@@ -267,10 +359,45 @@ Run the project test suite with:
 pytest
 ```
 
-The suite covers executor state/TTL/clamping and profile-match rejection, polygon geofence projection in the room/concave corner/corridor, synthetic tracker re-identification and set-of-mark rendering, optical-flow/rangefinder bridge behavior, MCP authentication and box-point configuration, GPS-free origin/gimbal/SITL-clock telemetry, rendered AprilTag 36h11 id-0 precision landing, Gazebo landing-error parsing, and S7 sim/wall delay, RTF, identity, and compensation behavior. Full flight safety and performance acceptance still requires SITL/Gazebo scenarios.
+The suite covers executor state/TTL/clamping and profile-match rejection, emergencies that arrive during a running step, stale pose/heading/forward-ToF refusal, polygon geofence projection in the room/concave corner/corridor, synthetic tracker re-identification and set-of-mark rendering, optical-flow/rangefinder bridge behavior, MCP authentication and box-point configuration, REPL emergency routing during a running commander turn, GPS-free origin/gimbal/SITL-clock telemetry, rendered AprilTag 36h11 id-0 precision landing, Gazebo landing-error parsing, and S7 sim/wall delay, RTF, identity, and compensation behavior. Full flight safety and performance acceptance still requires SITL/Gazebo scenarios.
 
 ## Simulation model attributions
 
 `person_standing` and the red, blue, and green shirt variants adapt OpenRobotics' [Standing person](https://fuel.gazebosim.org/1.0/OpenRobotics/models/Standing%20person) from Gazebo Fuel, licensed CC0 1.0. Each variant carries its own copy of `standing.dae` that points the T-shirt material at the variant's recolored texture (`tshirt_red.png`, `tshirt_green.png`, `tshirt_blue.png`) and the remaining textures at `person_standing`; the shirt texture files and material names are unique per variant because Gazebo's Ogre2 renderer caches textures by file name, so identically named textures render as whichever colour loads first. `horus_indoor.sdf` uses three point lights.
 
 `person_laying` adapts OpenRobotics' [ElderMalePatient](https://fuel.gazebosim.org/1.0/OpenRobotics/models/ElderMalePatient), authored by Roselle Carmen and licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The Fuel description credits Autodesk Character Generator and Mixamo. The local copy retains the source mesh and texture; its SDF model name and mesh URI are localized and the model is marked static.
+
+## Outdoor missions
+
+The hand-written outdoor mission set is S9–S13 on the canonical worlds; procedurally generated worlds get generated missions from the campaign harness (see [Procedural worlds and campaigns](#procedural-worlds-and-campaigns)). Start only one world at a time; in one terminal run `./sim/run.sh start horus_forest.sdf` or `./sim/run.sh start horus_urban.sdf`. With the world running, start the MCP server in the simulation container using the matching flight config (the `HORUS_MCP_TOKEN` must already be set):
+
+```bash
+docker exec --interactive --workdir /horus \
+  --env "HORUS_MCP_TOKEN=${HORUS_MCP_TOKEN}" \
+  --env HORUS_CONFIG=/horus/config/horus_forest.yaml \
+  horus-sim /opt/horus-venv/bin/horus-mcp
+```
+
+For each run command below, use a second terminal with the same token. The runner executes inside the container so `civilian_life.py` has Gazebo bindings; `/horus` is its working directory, and scenario arguments remain repository-root-relative.
+
+`sim/scripts/start_sim.sh` already starts the scenario's `ambient` group and writes its ground-truth trace under the active run logs. Do not start another ambient driver in a mission; S10 and S12 launch only their dedicated `follow_hiker` and `follow_jogger` groups.
+
+| Mission | World / config | Run |
+| --- | --- | --- |
+| S9 — find the missing hiker | `horus_forest.sdf` / `config/horus_forest.yaml` | `docker exec --workdir /horus --env "HORUS_MCP_TOKEN=${HORUS_MCP_TOKEN}" horus-sim /opt/horus-venv/bin/horus --server-url http://127.0.0.1:8000/mcp --config config/horus_forest.yaml --mission missions/S9_forest_find_missing_hiker.yaml` |
+| S10 — follow hiker through tree occlusion | `horus_forest.sdf` / `config/horus_forest.yaml` | `docker exec --workdir /horus --env "HORUS_MCP_TOKEN=${HORUS_MCP_TOKEN}" horus-sim /opt/horus-venv/bin/horus --server-url http://127.0.0.1:8000/mcp --config config/horus_forest.yaml --mission missions/S10_forest_follow_hiker.yaml` |
+| S11 — find the red shirt in the plaza | `horus_urban.sdf` / `config/horus_urban.yaml` | `docker exec --workdir /horus --env "HORUS_MCP_TOKEN=${HORUS_MCP_TOKEN}" horus-sim /opt/horus-venv/bin/horus --server-url http://127.0.0.1:8000/mcp --config config/horus_urban.yaml --mission missions/S11_urban_find_red_shirt.yaml` |
+| S12 — follow jogger through street occlusion | `horus_urban.sdf` / `config/horus_urban.yaml` | `docker exec --workdir /horus --env "HORUS_MCP_TOKEN=${HORUS_MCP_TOKEN}" horus-sim /opt/horus-venv/bin/horus --server-url http://127.0.0.1:8000/mcp --config config/horus_urban.yaml --mission missions/S12_urban_follow_jogger.yaml` |
+| S13 — urban medical emergency | `horus_urban.sdf` / `config/horus_urban.yaml` | `docker exec --workdir /horus --env "HORUS_MCP_TOKEN=${HORUS_MCP_TOKEN}" horus-sim /opt/horus-venv/bin/horus --server-url http://127.0.0.1:8000/mcp --config config/horus_urban.yaml --mission missions/S13_urban_medical_emergency.yaml` |
+
+S9 flies a listed trail and clearing route under the canopy (28 m transits, 5–8 m search legs) to find the missing hiker. S10 stages at 8 m, follows the green-shirt hiker at an 8.5 m slant range (a trail-edge bush occludes the camera for 2.6 s) and asserts a 1–8 s re-acquisition. S11 handles ambiguity in the plaza crowd at 10 m; S12 follows the red-shirt jogger at 10 m and asserts a 3–15 s re-acquisition under the bus-stop canopy; S13 finds the collapsed person, orbits at 8 m after a 24 m transit, holds for 20 s, then performs the authorized return.
+
+`gt_trace.py` keeps its indoor defaults and accepts `--world horus_forest` or `--world horus_urban`; use `--models` to list the outdoor model names to record, or `--topic` to override `/world/<world>/pose/info`. `s6_analyze.py` likewise keeps the S6 defaults and accepts `--target-model`, `--distractor-models`, and `--success-distance-m`. For example, a trace named `runs/urban_groundtruth.jsonl` can be analyzed with prefix `runs/urban` and `--target-model civ_red_shirt_01`.
+
+## Procedural worlds and campaigns
+
+`python3 -m sim.worldgen --procedural --seed N [--kind forest|urban] [--stratum baseline|chaotic]` samples a complete world into `sim/generated/horus_<kind>_pN/`; the same command without `--procedural` regenerates the canonical `sim/worlds/horus_{forest,urban}.sdf`, their scenarios and the generated person models. The generator varies the layout (forest: trail, creek, clearing, camp, hiker/ranger/family routes, follow target and occluder bush, tree field, rocks and logs, terrain grid; urban: road grid, buildings, plaza with the landing pad, park, crosswalks, sidewalk routes, circulating traffic and parked cars, lamps, wires and shelters), the sampled environment (sun, sky, ground and foliage tints), the dressing stratum (`baseline`, or `chaotic` with harsher light, more animals and clutter and a denser disturbance schedule), per-world civilian appearances (body, skin, hair, clothing textures and accessories, each with its classifier labels), vehicles, fauna (dogs with walkers, deer and crows in the forest meadow, pigeons and cats in the urban plaza and park) and sim-time disturbance events (hesitate, speed change, breakdown, startle, reverse) that stay inside each agent's declared speed and acceleration limits.
+
+A layout is accepted only after it passes the real-geometry report in `sim/worldgen/validation.py` — the same report the test suite runs on the canonical worlds: a clear home column; the clearing scan raster at 10 m clear by 2 m (forest); every actor's footprint clear of static geometry over its whole executed path (standing walkers ≥0.1 m, vehicles ≥0.3 m over their filleted lanes, animals ≥0.05 m); a follow plan with 2.5–4.0 s occlusion, ≥2 m lane and ≥1.5 m column clearance, the target framed from the stage and uniquely identifiable by the shirt-colour class the detector reports; a safe line-of-sight vantage with a clear descent for each person of interest. The sampler additionally keeps every route and wander area inside the 60 m geofence. Rejected candidates are re-sampled from the same seed; if a seed cannot be sampled the CLI exits non-zero naming the seed and the top rejection reasons.
+
+`./sim/run.sh start --procedural [--seed N] [--kind forest|urban] [--stratum baseline|chaotic]` generates and starts one such world (default kind `forest`); without `--seed` a random 5-digit seed is chosen and printed for reproduction. `python3 sim/scripts/procedural_campaign.py` runs the generated missions end to end — by default seeds 1–3 for both kinds — with `--random N` for N distinct random seeds (printed), `--seeds ...` for explicit ones, and `--kinds`, `--tests` and `--vantages` to select the sweep; results land in `runs/campaign/<UTC timestamp>/` (`summary.json`, `summary.md`, and one directory per world holding `episode_result.json`, logs and traces). `scripts/koko/procedural_campaign.sh` runs the same campaign detached on the Koko host, with `--status` and `--fetch` to check and retrieve results. See `sim/README.md` for the generator, layout and scenario details.
