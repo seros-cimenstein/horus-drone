@@ -1,0 +1,51 @@
+# Outdoor GPS flight with a home-centred circular fence and maximum altitude.
+# Generated worlds top out at 24.12 m forest canopy and 32.23 m urban rooftop HVAC.
+FENCE_ENABLE 1
+FENCE_TYPE 3
+FENCE_ACTION 1
+FENCE_RADIUS 95
+FENCE_MARGIN 5
+FENCE_ALT_MAX 55
+
+# Return above the tallest forest canopy and urban rooftop hazards.
+RTL_ALT_M 45
+
+# Moderate wind from the west with variable gust/turbulence strength.
+# Parameter names are from the Copter 4.7.1 SITL model.
+SIM_WIND_DIR 270
+SIM_WIND_SPD 4
+SIM_WIND_TURB 2
+
+# MAVLink-backed horizontal proximity sectors from the ToF payload (sim/models/horus_sensor_payload,
+# bridged by scripts/tof_bridges.sh): ArduPilot's simple avoidance brakes before obstacles instead
+# of flying through them.
+PRX1_TYPE 2
+AVOID_ENABLE 3
+# Stop 1 m from proximity obstacles (default 2 m), matching the indoor profile so the executor's
+# clearance margins (orbit 1.5 m, scan 2 m) stay reachable.
+AVOID_MARGIN 1.0
+
+# Downward ToF (payload range_down, 4 m range) as a short-range landing/altitude input.
+RNGFND1_TYPE 10
+RNGFND1_ORIENT 25
+RNGFND1_MIN_CM 5
+RNGFND1_MAX_CM 400
+
+# Keep the ArduCopter SITL GPS model enabled with its default non-glitched settings.
+
+# Outdoor mount starts neutral, pitched 45 degrees below level; missions may aim it over MAVLink.
+MNT1_TYPE 1
+MNT1_DEFLT_MODE 1
+MNT1_PITCH_MIN -135
+MNT1_PITCH_MAX 45
+MNT1_YAW_MIN -160
+MNT1_YAW_MAX 160
+MNT1_NEUTRAL_X 0
+MNT1_NEUTRAL_Y -45
+MNT1_NEUTRAL_Z 0
+MNT1_RETRACT_X 0
+MNT1_RETRACT_Y -45
+MNT1_RETRACT_Z 0
+SERVO9_FUNCTION 8
+SERVO10_FUNCTION 7
+SERVO11_FUNCTION 6
