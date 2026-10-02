@@ -33,8 +33,10 @@ perception:
   source: udp://0.0.0.0:5600
   detector_model: models/yolov8n.onnx
   embedding_model: models/osnet_x0_25_msmt17.onnx
-  grounding_model: IDEA-Research/grounding-dino-tiny
+  grounder_url: http://127.0.0.1:8100
   max_fps: 5.0
+  open_vocab_hz: 0.5
+  vocabulary: []
   onnx_intra_op_num_threads: 2
   onnx_inter_op_num_threads: 1
   ring_buffer_s: 5.0

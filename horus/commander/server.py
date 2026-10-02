@@ -117,6 +117,18 @@ class CommanderASGI:
                 return
             await self._submit_task(receive, send)
             return
+        if path == "/emergency":
+            if method != "POST":
+                await _send_json(send, 405, {"error": "method not allowed"}, [(b"allow", b"POST")])
+                return
+            await self._submit_emergency(receive, send)
+            return
+        if path == "/reset":
+            if method != "POST":
+                await _send_json(send, 405, {"error": "method not allowed"}, [(b"allow", b"POST")])
+                return
+            await self._reset_mission(send)
+            return
         if path == "/events":
             if method != "GET":
                 await _send_json(send, 405, {"error": "method not allowed"}, [(b"allow", b"GET")])
@@ -148,10 +160,91 @@ class CommanderASGI:
 
         task_id = uuid4().hex
         self.event_hub.publish({"kind": "task_accepted", "task_id": task_id, "text": text})
-        worker = asyncio.create_task(self._process_task(task_id, text))
+        action = emergency_action(text)
+        if action is not None:
+            self.event_hub.publish({
+                "kind": "emergency",
+                "action": action,
+                "source": "operator",
+                "status": "requested",
+            })
+            worker = asyncio.create_task(self._process_emergency(task_id, action))
+        elif _is_reset_command(text):
+            worker = asyncio.create_task(self._process_reset(task_id))
+        else:
+            worker = asyncio.create_task(self._process_task(task_id, text))
+        self._track_worker(worker)
+        await _send_json(send, 202, {"status": "accepted", "task_id": task_id})
+
+    async def _submit_emergency(self, receive: Any, send: Any) -> None:
+        try:
+            payload = json.loads(await _read_body(receive))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            await _send_json(send, 400, {"error": "request body must be valid JSON"})
+            return
+        except _ClientDisconnected:
+            return
+        action = payload.get("action") if isinstance(payload, dict) else None
+        if not isinstance(action, str) or action not in {"hold", "land", "rth"}:
+            await _send_json(send, 400, {"error": "action must be hold, land, or rth"})
+            return
+        task_id = uuid4().hex
+        self.event_hub.publish({
+            "kind": "emergency",
+            "action": action,
+            "source": "operator",
+            "status": "requested",
+        })
+        worker = asyncio.create_task(self._process_emergency(task_id, action))
+        self._track_worker(worker)
+        await _send_json(send, 202, {"status": "accepted", "task_id": task_id, "action": action})
+
+    async def _reset_mission(self, send: Any) -> None:
+        self.event_hub.publish({"kind": "session_reset_requested"})
+        try:
+            await self.commander.reset()
+        except Exception as exc:
+            self.event_hub.publish({"kind": "session_reset_error", "error": str(exc)})
+            await _send_json(send, 503, {"error": str(exc)})
+            return
+        self.event_hub.publish({"kind": "session_reset"})
+        await _send_json(send, 200, {"status": "reset"})
+
+    def _track_worker(self, worker: asyncio.Task[None]) -> None:
         self._workers.add(worker)
         worker.add_done_callback(self._workers.discard)
-        await _send_json(send, 202, {"status": "accepted", "task_id": task_id})
+
+    async def _process_emergency(self, task_id: str, action: str) -> None:
+        try:
+            result = await self.commander.emergency(action)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.event_hub.publish({
+                "kind": "emergency",
+                "task_id": task_id,
+                "action": action,
+                "source": "operator",
+                "status": "error",
+                "error": str(exc),
+            })
+        else:
+            self.event_hub.publish({
+                "kind": "emergency",
+                "task_id": task_id,
+                "action": action,
+                "source": "operator",
+                "status": "executed",
+                "result": result,
+            })
+
+    async def _process_reset(self, task_id: str) -> None:
+        try:
+            await self.commander.reset()
+        except Exception as exc:
+            self.event_hub.publish({"kind": "session_reset_error", "task_id": task_id, "error": str(exc)})
+        else:
+            self.event_hub.publish({"kind": "session_reset", "task_id": task_id})
 
     async def _process_task(self, task_id: str, text: str) -> None:
         try:
@@ -230,6 +323,29 @@ class CommanderASGI:
             elif message["type"] == "lifespan.shutdown":
                 await send({"type": "lifespan.shutdown.complete"})
                 return
+
+
+def emergency_action(text: str) -> str | None:
+    """Recognize only short imperative emergency commands; longer requests stay with the model."""
+    command = " ".join(text.lower().split()).rstrip(".,!?;:")
+    words = command.split()
+    if words and words[-1] in {"now", "immediately"}:
+        words.pop()
+        command = " ".join(words)
+    return {
+        "stop": "hold",
+        "halt": "hold",
+        "abort": "hold",
+        "hold": "hold",
+        "freeze": "hold",
+        "land": "land",
+        "rth": "rth",
+        "return home": "rth",
+    }.get(command)
+
+
+def _is_reset_command(text: str) -> bool:
+    return text.strip().lower().rstrip(".!?") in {"new mission", "reset"}
 
 
 def create_app(

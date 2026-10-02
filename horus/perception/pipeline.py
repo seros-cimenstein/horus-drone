@@ -12,12 +12,30 @@ import threading
 import time
 from typing import Any, NamedTuple
 
+from horus.events import EventBus
 from .attributes import classify_shirt_colour
 from .camera import OpenCVCameraReader
-from .grounding import FrameBuffer, Grounder, GrounderConfig, GroundingPointer
+from .grounding import (
+    FrameBuffer,
+    Grounder,
+    GrounderConfig,
+    GroundingPointer,
+    box_overlap_score,
+    coerce_grounding_box,
+    commit_on_latest,
+)
 from .recognition import TinyEmbeddingClassifier
-from .tracker import PersistentTracker, cosine_similarity
-from .types import Candidate, Detection, Frame, FrameObservation, PointResult
+from .scene import SceneMonitor
+from .tracker import BoxCompensator, PersistentTracker, cosine_similarity
+from .types import (
+    Candidate,
+    Detection,
+    Frame,
+    FrameObservation,
+    GroundingBox,
+    PointResult,
+    StaleFrameError,
+)
 
 
 class _FrameStats(NamedTuple):
@@ -27,6 +45,15 @@ class _FrameStats(NamedTuple):
     detections: int
     ignored: int
     candidates: int
+
+
+class _TargetProfile(NamedTuple):
+    """Recognition state replaced as one object so readers never see a half-applied profile."""
+
+    value: Any = None
+    embeddings: tuple[tuple[float, ...], ...] = ()
+    classifier: TinyEmbeddingClassifier | None = None
+    recognition_mode: str = "embedding"
 
 
 _STATS_WINDOW = 30
@@ -48,25 +75,31 @@ class PerceptionSystem:
         buffer: FrameBuffer | None = None,
         grounder: Grounder | None = None,
         grounder_config: GrounderConfig | None = None,
+        open_vocab_hz: float = 0.5,
+        vocabulary: Sequence[str] = (),
+        event_bus: EventBus | None = None,
         ignore_regions: Sequence[Sequence[float]] = (),
     ) -> None:
+        if isinstance(open_vocab_hz, bool) or not math.isfinite(open_vocab_hz) or open_vocab_hz <= 0:
+            raise ValueError("open_vocab_hz must be a finite positive number")
         self.detector = detector
         self.tracker = tracker
         self.ignore_regions = tuple(tuple(region) for region in ignore_regions)
         self.camera = camera
         self.buffer = buffer if buffer is not None else FrameBuffer()
+        self._lock = threading.RLock()
+        self._event_bus = event_bus
+        self._grounder = grounder
+        self._grounder_config = grounder_config or GrounderConfig()
         self._pointer = GroundingPointer(
             self.buffer,
             tracker,
             grounder,
-            grounder_config=grounder_config,
+            grounder_config=self._grounder_config,
+            state_lock=self._lock,
         )
         self.mode = "active"
-        self._target_profile: Any = None
-        self._target_embeddings: tuple[tuple[float, ...], ...] = ()
-        self._classifier: TinyEmbeddingClassifier | None = None
-        self._recognition_mode = "embedding"
-        self._lock = threading.RLock()
+        self._profile = _TargetProfile()
         self._stop_event = threading.Event()
         self._worker: threading.Thread | None = None
         self._worker_error: BaseException | None = None
@@ -84,6 +117,19 @@ class PerceptionSystem:
         self._release_complete.set()
         self._stats_lock = threading.Lock()
         self._frame_stats: deque[_FrameStats] = deque(maxlen=_STATS_WINDOW)
+        self._vocabulary_lock = threading.Lock()
+        self._vocabulary = _normalize_vocabulary(vocabulary)
+        self._open_vocab_hz = float(open_vocab_hz)
+        self._open_vocab_wake = threading.Event()
+        self._open_vocab_thread: threading.Thread | None = None
+        self._grounder_status_lock = threading.Lock()
+        self._grounder_status: dict[str, Any] = {
+            "status": "unavailable",
+            "reason": "grounder is not configured" if grounder is None else "not queried yet",
+            "last_latency_ms": None,
+        }
+        # Camera-relative motion history and region watches; region events go to the shared bus.
+        self._scene = SceneMonitor(event_bus.publish if event_bus is not None else None)
 
     def process_frame(
         self,
@@ -131,6 +177,16 @@ class PerceptionSystem:
             )
             finished = time.perf_counter()
             self.buffer.append(processed)
+            shape = getattr(image, "shape", None)
+            if shape is not None and len(shape) >= 2:
+                self._scene.observe(
+                    processed.frame_id,
+                    processed.timestamp,
+                    shape[1],
+                    shape[0],
+                    processed.candidates,
+                    processed.pose,
+                )
             with self._stats_lock:
                 self._frame_stats.append(
                     _FrameStats(
@@ -158,7 +214,7 @@ class PerceptionSystem:
     def list_candidates(self) -> list[dict[str, Any]]:
         """Return current candidates as dict-friendly records with stable integer IDs."""
         frame = self.buffer.latest()
-        return [self._candidate_dict(candidate) for candidate in frame.candidates] if frame else []
+        return [self._candidate_dict(candidate, frame) for candidate in frame.candidates] if frame else []
 
     def get_candidate(self, candidate_id: int) -> dict[str, Any] | None:
         """Return a visible current candidate by integer tracker ID, or ``None``."""
@@ -166,7 +222,34 @@ class PerceptionSystem:
         if frame is None:
             return None
         candidate = next((item for item in frame.candidates if item.id == int(candidate_id)), None)
-        return self._candidate_dict(candidate) if candidate is not None else None
+        return self._candidate_dict(candidate, frame) if candidate is not None else None
+
+    def candidate_motion(self, candidate_id: int) -> dict[str, Any]:
+        """Recent normalized image motion of a tracker ID (camera-relative, never metric speed)."""
+        return self._scene.candidate_motion(candidate_id)
+
+    def watch_region(
+        self,
+        name: str,
+        box: Sequence[float],
+        *,
+        class_name: str | None = None,
+        dwell_s: float | None = None,
+        absence_s: float = 1.0,
+        ttl_s: float | None = None,
+    ) -> dict[str, Any]:
+        """Create/replace a fixed-camera image-region watch emitting region events on the bus."""
+        return self._scene.watch_region(
+            name, box, class_name=class_name, dwell_s=dwell_s, absence_s=absence_s, ttl_s=ttl_s
+        )
+
+    def list_region_watches(self) -> dict[str, Any]:
+        """Active region watches with status, camera reference, occupancy and timers."""
+        return self._scene.list_region_watches()
+
+    def remove_region_watch(self, watch_id: str) -> dict[str, Any]:
+        """Remove a region watch; unknown IDs raise ``LookupError``."""
+        return self._scene.remove_region_watch(watch_id)
 
     def validate_candidate(
         self,
@@ -183,6 +266,25 @@ class PerceptionSystem:
                 min_confidence=min_confidence,
             )
             return self._candidate_dict(candidate) if candidate is not None else None
+
+    def validate_candidate_failure(
+        self,
+        candidate_id: int,
+        *,
+        max_age_seconds: float = 0.75,
+        min_confidence: float = 0.0,
+    ) -> str | None:
+        """Reason ``validate_candidate`` rejects this ID, or ``None`` when it validates.
+
+        ``not_visible``, ``stale``, ``no_reference_appearance`` or ``appearance_mismatch``; the
+        executor reports the rejected candidate's actual cause from this.
+        """
+        with self._lock:
+            return self.tracker.validate_candidate_failure(
+                int(candidate_id),
+                max_age_seconds=max_age_seconds,
+                min_confidence=min_confidence,
+            )
 
     def validate_id(
         self,
@@ -237,12 +339,31 @@ class PerceptionSystem:
             compensate=compensate,
         )
 
+    def set_vocabulary(self, terms: list[str]) -> dict[str, Any]:
+        """Replace up to sixteen open-vocabulary terms and wake the detection loop."""
+        vocabulary = _normalize_vocabulary(terms)
+        if len(vocabulary) > 16:
+            raise ValueError("vocabulary may contain at most 16 distinct terms")
+        with self._vocabulary_lock:
+            changed = vocabulary != self._vocabulary
+            self._vocabulary = vocabulary
+        if changed and self._event_bus is not None:
+            self._event_bus.publish(
+                "vocabulary_changed",
+                f"Open-vocabulary terms changed ({len(vocabulary)} terms)",
+                terms=list(vocabulary),
+            )
+        self._open_vocab_wake.set()
+        if vocabulary and self._grounder is not None and not self._stop_event.is_set():
+            self._start_open_vocab_worker()
+        return {"terms": list(vocabulary), "count": len(vocabulary)}
+
     def set_target_profile(self, profile: Any) -> dict[str, Any]:
-        """Set embedding references and optionally train a tiny head on labeled examples."""
-        self._target_profile = profile
-        self._target_embeddings = ()
-        self._classifier = None
-        self._recognition_mode = "embedding"
+        """Set embedding references and optionally train a tiny head on labeled examples.
+
+        The new profile replaces the previous one only after every reference is validated and
+        the head is trained; a rejected profile leaves the prior recognition state untouched.
+        """
         reference_vectors: list[tuple[float, ...]] = []
         training_vectors: list[tuple[float, ...]] = []
         training_labels: list[str] = []
@@ -316,15 +437,16 @@ class PerceptionSystem:
                     if normalized is not None:
                         reference_vectors.append(normalized)
 
+        classifier: TinyEmbeddingClassifier | None = None
         if training_vectors:
             classifier = TinyEmbeddingClassifier()
             classifier.fit(training_vectors, training_labels)
-            self._classifier = classifier
-        self._target_embeddings = tuple(reference_vectors)
+        with self._lock:
+            self._profile = _TargetProfile(profile, tuple(reference_vectors), classifier)
         return {
             "reference_count": len(reference_vectors),
             "training_example_count": len(training_vectors),
-            "classifier_trained": self._classifier is not None,
+            "classifier_trained": classifier is not None,
             "target_class": _profile_value(profile, "target_class"),
         }
 
@@ -333,23 +455,27 @@ class PerceptionSystem:
         selected = name.strip().lower()
         if selected in {"active", "normal"}:
             self.mode = "active"
-        elif selected == "paused":
+            return self.mode
+        if selected == "paused":
             self.mode = "paused"
-        elif selected in {"embedding", "step_1"}:
-            self.mode = "active"
-            self._recognition_mode = "embedding"
+            return self.mode
+        if selected in {"embedding", "step_1"}:
+            recognition_mode = "embedding"
         elif selected in {"classifier", "tiny_head", "step_2"}:
-            if self._classifier is None or not self._classifier.fitted:
+            recognition_mode = "classifier"
+        else:
+            raise ValueError("mode must be active, paused, embedding/step_1, or classifier/step_2")
+        with self._lock:
+            profile = self._profile
+            if recognition_mode == "classifier" and (
+                profile.classifier is None or not profile.classifier.fitted
+            ):
                 raise RuntimeError(
                     "train a labeled tiny embedding head with set_target_profile before selecting classifier mode"
                 )
             self.mode = "active"
-            self._recognition_mode = "classifier"
-        else:
-            raise ValueError("mode must be active, paused, embedding/step_1, or classifier/step_2")
-        if selected in {"embedding", "step_1", "classifier", "tiny_head", "step_2"}:
-            return self._recognition_mode
-        return self.mode
+            self._profile = profile._replace(recognition_mode=recognition_mode)
+        return recognition_mode
 
     def start(
         self,
@@ -381,14 +507,16 @@ class PerceptionSystem:
                 daemon=True,
             )
             self._watchdog_thread.start()
+            self._start_open_vocab_worker()
             self._worker.start()
         return self
 
     def close(self) -> None:
-        """Stop camera processing without waiting indefinitely on a native capture call."""
+        """Stop camera and open-vocabulary processing without waiting indefinitely."""
         self._stop_event.set()
+        self._open_vocab_wake.set()
         self._release_camera_async()
-        threads = (self._worker, self._watchdog_thread)
+        threads = (self._worker, self._watchdog_thread, self._open_vocab_thread)
         for thread in threads:
             if thread is not None and thread is not threading.current_thread():
                 thread.join(timeout=1.0)
@@ -402,7 +530,8 @@ class PerceptionSystem:
                 self._worker = None
             if self._watchdog_thread is not None and not self._watchdog_thread.is_alive():
                 self._watchdog_thread = None
-
+            if self._open_vocab_thread is not None and not self._open_vocab_thread.is_alive():
+                self._open_vocab_thread = None
     @property
     def worker_error(self) -> BaseException | None:
         """Background-loop failure, if any, for the owner to report or handle."""
@@ -421,14 +550,20 @@ class PerceptionSystem:
                 "camera": self._camera_state,
                 "last_frame_age_s": age,
                 "reason": self._camera_reason,
+                "grounder": self._grounder_status_snapshot(),
             }
 
+    def _grounder_status_snapshot(self) -> dict[str, Any]:
+        with self._grounder_status_lock:
+            return dict(self._grounder_status)
+
     def processing_stats(self) -> dict[str, Any]:
-        """Median detector and tracker/ReID cost and processed-frame rate over recent frames."""
+        """Median detector/tracker cost and recent grounder availability."""
         with self._stats_lock:
             samples = tuple(self._frame_stats)
+        grounder_status = self._grounder_status_snapshot()
         if not samples:
-            return {"frames": 0}
+            return {"frames": 0, "grounder": grounder_status}
         span = samples[-1].finished_at - samples[0].finished_at
         latest = samples[-1]
         return {
@@ -439,7 +574,164 @@ class PerceptionSystem:
             "detections": latest.detections,
             "ignored": latest.ignored,
             "candidates": latest.candidates,
+            "grounder": grounder_status,
         }
+
+    def _start_open_vocab_worker(self) -> None:
+        if self._grounder is None or self._stop_event.is_set():
+            return
+        with self._vocabulary_lock:
+            if not self._vocabulary:
+                return
+            if self._open_vocab_thread is not None and self._open_vocab_thread.is_alive():
+                return
+            self._open_vocab_thread = threading.Thread(
+                target=self._run_open_vocab,
+                name="horus-open-vocabulary",
+                daemon=True,
+            )
+            self._open_vocab_thread.start()
+
+    def _run_open_vocab(self) -> None:
+        interval = 1.0 / self._open_vocab_hz
+        next_run = 0.0
+        while not self._stop_event.is_set():
+            wait_s = max(0.0, next_run - time.monotonic())
+            woke = self._open_vocab_wake.wait(wait_s) if wait_s else False
+            self._open_vocab_wake.clear()
+            if self._stop_event.is_set():
+                return
+            if woke:
+                next_run = 0.0
+            with self._vocabulary_lock:
+                vocabulary = self._vocabulary
+            if not vocabulary or self._grounder is None:
+                next_run = time.monotonic() + 0.25
+                continue
+            if time.monotonic() < next_run:
+                continue
+            frame = self.buffer.latest()
+            if frame is None:
+                next_run = time.monotonic() + min(interval, 0.1)
+                continue
+            started = time.perf_counter()
+            try:
+                boxes = self._grounder.detect(
+                    frame.image,
+                    list(vocabulary),
+                    box_threshold=self._grounder_config.box_threshold,
+                    text_threshold=self._grounder_config.text_threshold,
+                )
+            except Exception as exc:
+                latency_ms = (time.perf_counter() - started) * 1000.0
+                self._set_grounder_status(
+                    "unavailable",
+                    f"{type(exc).__name__}: {exc}",
+                    latency_ms,
+                )
+            else:
+                latency_ms = (time.perf_counter() - started) * 1000.0
+                self._set_grounder_status("ok", None, latency_ms)
+                self._seed_open_vocab_boxes(frame.frame_id, boxes, vocabulary)
+            next_run = time.monotonic() + interval
+
+    def _set_grounder_status(
+        self,
+        status: str,
+        reason: str | None,
+        latency_ms: float,
+    ) -> None:
+        with self._grounder_status_lock:
+            self._grounder_status = {
+                "status": status,
+                "reason": reason,
+                "last_latency_ms": round(latency_ms, 1),
+            }
+
+    def _seed_open_vocab_boxes(
+        self,
+        frame_id: int,
+        boxes: Sequence[GroundingBox | Mapping[str, Any]],
+        vocabulary: Sequence[str],
+    ) -> None:
+        confirmed: set[int] = set()
+        try:
+            source_image = self.buffer.frames_after(frame_id)[0].image
+        except StaleFrameError:
+            return
+        height, width = source_image.shape[:2]
+        for raw_box in boxes:
+            try:
+                item = coerce_grounding_box(raw_box)
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            if item.confidence < self._grounder_config.box_threshold:
+                continue
+            # Propellers and other configured regions are never targets.
+            if self.ignore_regions and _bbox_in_ignore_region(item.bbox, width, height, self.ignore_regions):
+                continue
+            label = item.label.strip() if item.label else ""
+            if not label:
+                label = vocabulary[0]
+            try:
+                compensator = BoxCompensator(item.bbox, self.buffer.frames_after(frame_id)[0])
+            except (StaleFrameError, RuntimeError, ValueError):
+                continue
+
+            def commit(placed_box: Any, current_frame: Frame | None) -> Candidate | None:
+                if placed_box is None or current_frame is None:
+                    return None
+                candidates = current_frame.candidates
+                best = max(
+                    candidates,
+                    key=lambda candidate: box_overlap_score(placed_box, candidate.bbox),
+                    default=None,
+                )
+                best_overlap = box_overlap_score(placed_box, best.bbox) if best is not None else 0.0
+                if best is not None and best.source == "open_vocab" and best_overlap >= _SEED_CONFIRM_OVERLAP:
+                    # Re-detected: snap the drifting CSRT seed back onto the grounder box.
+                    try:
+                        self.tracker.confirm_seed(best.id, placed_box, current_frame, confidence=item.confidence)
+                    except (RuntimeError, ValueError):
+                        return None
+                    confirmed.add(best.id)
+                    return None
+                # Already tracked by the detector or a point seed: keep that ID.
+                if best_overlap >= _SEED_DEDUPE_OVERLAP:
+                    return None
+                if sum(candidate.source != "detector" for candidate in candidates) >= _MAX_SEEDED_TRACKS:
+                    return None
+                try:
+                    seeded = self.tracker.seed(
+                        placed_box,
+                        current_frame,
+                        label=label,
+                        confidence=item.confidence,
+                        source="open_vocab",
+                    )
+                except (RuntimeError, ValueError):
+                    return None
+                confirmed.add(seeded.id)
+                current_frame.candidates = self.tracker.current_candidates
+                return seeded
+
+            try:
+                candidate = commit_on_latest(self.buffer, compensator, self._lock, commit)
+            except StaleFrameError:
+                continue
+            if candidate is not None and self._event_bus is not None:
+                self._event_bus.publish(
+                    "object_detected",
+                    f"Open-vocabulary object detected: {label}",
+                    id=candidate.id,
+                    label=label,
+                    score=candidate.confidence,
+                )
+        with self._lock:
+            if self.tracker.age_unconfirmed_seeds(confirmed, max_misses=_SEED_MAX_MISSES):
+                latest = self.buffer.latest()
+                if latest is not None:
+                    latest.candidates = self.tracker.current_candidates
 
     def _set_camera_status(
         self,
@@ -509,6 +801,9 @@ class PerceptionSystem:
 
     def _watch_camera(self) -> None:
         while not self._stop_event.is_set():
+            # The watchdog keeps running while capture stalls or backs off, so region-watch TTLs
+            # expire on time even when no frame arrives and nobody queries the watches.
+            self._scene.expire_watches()
             with self._camera_lock:
                 operation = self._camera_operation
                 started = self._camera_operation_started
@@ -586,33 +881,44 @@ class PerceptionSystem:
                     return
                 backoff_s = min(backoff_s * 2.0, 8.0)
 
-    def _candidate_dict(self, candidate: Candidate) -> dict[str, Any]:
+    def _candidate_dict(self, candidate: Candidate, frame: Frame | None = None) -> dict[str, Any]:
+        profile = self._profile
         result = candidate.to_dict()
+        target = profile.value
+        classifier = profile.classifier
+        class_name = _profile_value(target, "class_name") if target is not None else None
+        class_id = _profile_value(target, "class_id") if target is not None else None
+        class_mismatch = (class_name is not None and candidate.class_name != class_name) or (
+            class_id is not None and candidate.class_id != class_id
+        )
+        embedding = candidate.embedding
+        needs_embedding = classifier is not None or (bool(profile.embeddings) and not class_mismatch)
+        if embedding is None and needs_embedding and frame is not None:
+            # Tracks are embedded only when created; score later frames from the shared per-frame cache.
+            with self._lock:
+                embedding = self.tracker.frame_embedding(candidate, frame.image)
         predicted_label: str | None = None
         recognition_confidence: float | None = None
-        if self._classifier is not None and candidate.embedding is not None:
-            predicted_label, recognition_confidence = self._classifier.predict(candidate.embedding)
+        if classifier is not None and embedding is not None:
+            predicted_label, recognition_confidence = classifier.predict(embedding)
             result["recognized_class"] = predicted_label
             result["recognition_confidence"] = recognition_confidence
-        if self._target_profile is not None:
-            class_name = _profile_value(self._target_profile, "class_name")
-            class_id = _profile_value(self._target_profile, "class_id")
-            target_class = _profile_value(self._target_profile, "target_class")
-            if target_class is None and self._classifier is not None and class_name in self._classifier.labels:
+        if target is not None:
+            target_class = _profile_value(target, "target_class")
+            if target_class is None and classifier is not None and class_name in classifier.labels:
                 target_class = class_name
-            if target_class is not None and self._classifier is not None:
+            if target_class is not None and classifier is not None:
                 result["target_match_confidence"] = (
                     recognition_confidence if predicted_label == str(target_class) else 0.0
                 )
-            elif class_name is not None and candidate.class_name != class_name:
+            elif class_mismatch:
                 result["target_match_confidence"] = 0.0
-            elif class_id is not None and candidate.class_id != class_id:
-                result["target_match_confidence"] = 0.0
-            elif self._classifier is None and self._target_embeddings and candidate.embedding is not None:
+            elif classifier is None and profile.embeddings:
+                # Missing appearance evidence scores 0.0, never the class-only 1.0.
                 scores = [
                     score
-                    for vector in self._target_embeddings
-                    if (score := cosine_similarity(vector, candidate.embedding)) is not None
+                    for vector in profile.embeddings
+                    if (score := cosine_similarity(vector, embedding)) is not None
                 ]
                 result["target_match_confidence"] = max(scores, default=0.0)
             elif class_name is not None or class_id is not None:
@@ -772,3 +1078,29 @@ def _normalize_vector(values: Sequence[float]) -> tuple[float, ...] | None:
     if scale <= 1e-12 / norm:
         return None
     return tuple(value / norm for value in scaled)
+
+
+def _normalize_vocabulary(terms: Sequence[str]) -> tuple[str, ...]:
+    if isinstance(terms, (str, bytes)) or not isinstance(terms, Sequence):
+        raise ValueError("vocabulary must be a sequence of strings")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        if not isinstance(term, str):
+            raise ValueError("vocabulary terms must be strings")
+        value = term.strip()
+        key = value.casefold()
+        if value and key not in seen:
+            normalized.append(value)
+            seen.add(key)
+    if len(normalized) > 16:
+        raise ValueError("vocabulary may contain at most 16 distinct terms")
+    return tuple(normalized)
+
+
+_SEED_DEDUPE_OVERLAP = 0.5
+_SEED_CONFIRM_OVERLAP = 0.3
+# Grounder cycles an open-vocabulary seed may go unconfirmed before it is dropped (~6 s at 0.5 Hz).
+_SEED_MAX_MISSES = 3
+# Each seeded track costs one CSRT update (~18 ms on Koko) per processed frame.
+_MAX_SEEDED_TRACKS = 6

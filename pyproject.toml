@@ -29,12 +29,13 @@ perception = [
 ]
 
 model-tools = ["onnx>=1.16,<2"]
-opencv-headless = ["opencv-python-headless>=4.8,<4.12"]
-grounding = [
-  "torch>=2.1",
-  "torchvision>=0.16",
-  "transformers>=4.40,<5",
-  "Pillow>=10",
+opencv-headless = ["opencv-contrib-python-headless>=4.8,<4.12"]
+grounder = [
+  "torch==2.5.1",
+  "torchvision==0.20.1",
+  "transformers==4.46.3",
+  "scipy==1.10.1",
+  "Pillow==10.4.0",
 ]
 commander-anthropic = ["anthropic>=0.34,<1"]
 commander-openai = ["openai>=1.30,<3"]
@@ -54,6 +55,7 @@ horus-mcp-call = "horus.mcp_server.client:main"
 horus-commander-serve = "horus.commander.server:main"
 horus-gz-bridge = "horus.gz_bridge:main"
 horus-tof-bridge = "horus.tof_bridge.cli:main"
+horus-grounder = "horus.grounder.server:main"
 
 [tool.setuptools.packages.find]
 include = ["horus*"]

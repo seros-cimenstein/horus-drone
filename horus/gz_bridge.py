@@ -21,6 +21,8 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_COMMANDER_URL = "http://127.0.0.1:8765"
 DEFAULT_MCP_URL = "http://127.0.0.1:8000/mcp"
 DEFAULT_TASK_TOPIC = "/horus/task"
+DEFAULT_EMERGENCY_TOPIC = "/horus/emergency"
+DEFAULT_RESET_TOPIC = "/horus/reset"
 DEFAULT_EVENTS_TOPIC = "/horus/events"
 DEFAULT_STATE_TOPIC = "/horus/state"
 STATE_POLL_INTERVAL = 0.5
@@ -34,6 +36,8 @@ class BridgeConfig:
     mcp_url: str = DEFAULT_MCP_URL
     mcp_token: str = ""
     task_topic: str = DEFAULT_TASK_TOPIC
+    emergency_topic: str = DEFAULT_EMERGENCY_TOPIC
+    reset_topic: str = DEFAULT_RESET_TOPIC
     events_topic: str = DEFAULT_EVENTS_TOPIC
     state_topic: str = DEFAULT_STATE_TOPIC
 
@@ -46,6 +50,8 @@ class BridgeConfig:
             commander_token=values.get("HORUS_COMMANDER_TOKEN", ""),
             mcp_url=values.get("HORUS_MCP_URL", DEFAULT_MCP_URL),
             mcp_token=values.get("HORUS_MCP_TOKEN", ""),
+            emergency_topic=values.get("HORUS_EMERGENCY_TOPIC", DEFAULT_EMERGENCY_TOPIC),
+            reset_topic=values.get("HORUS_RESET_TOPIC", DEFAULT_RESET_TOPIC),
         )
 
 
@@ -130,6 +136,32 @@ def format_commander_event(event: SSEEvent) -> str | None:
         return f"▶ Task: {_clip(value.get('text', ''))}"
     if kind == "claude_code_started":
         return "Claude Code started"
+    if kind == "session_restarted":
+        return "↻ Claude session restarted"
+    if kind in {"session_reset", "session_reset_requested"}:
+        return "↻ New mission session"
+    if kind == "session_reset_error":
+        return f"✗ Could not reset mission: {_clip(value.get('error', ''))}"
+    if kind == "emergency":
+        data = value.get("data", {})
+        data = data if isinstance(data, Mapping) else {}
+        action = str(value.get("action", data.get("action", ""))).upper()
+        status = str(value.get("status", data.get("status", "")))
+        detail = value.get("error") or value.get("result") or value.get("summary") or ""
+        suffix = f": {_clip(detail, 240)}" if detail else ""
+        return f"!! Emergency {action} {status}{suffix}".strip()
+    if kind in {
+        "task_finished",
+        "target_lost",
+        "target_reacquired",
+        "link_lost",
+        "link_restored",
+        "auto_rth",
+        "landed",
+        "object_detected",
+        "precision_landing_stalled",
+    }:
+        return f"• {_clip(kind.replace('_', ' '))}: {_clip(value.get('summary', ''))}"
     if kind == "assistant_text":
         return f"Claude: {_clip(value.get('text', ''))}"
     if kind == "tool_use":
@@ -195,6 +227,24 @@ async def submit_task(client: Any, config: BridgeConfig, text: str) -> None:
         f"{config.commander_url.rstrip('/')}/task",
         headers={"Authorization": f"Bearer {config.commander_token}"},
         json={"text": text},
+    )
+    response.raise_for_status()
+
+async def submit_emergency(client: Any, config: BridgeConfig, action: str) -> None:
+    """Forward an emergency action to the authenticated host endpoint."""
+    response = await client.post(
+        f"{config.commander_url.rstrip('/')}/emergency",
+        headers={"Authorization": f"Bearer {config.commander_token}"},
+        json={"action": action},
+    )
+    response.raise_for_status()
+
+
+async def reset_mission(client: Any, config: BridgeConfig) -> None:
+    """Reset the current commander mission through its authenticated endpoint."""
+    response = await client.post(
+        f"{config.commander_url.rstrip('/')}/reset",
+        headers={"Authorization": f"Bearer {config.commander_token}"},
     )
     response.raise_for_status()
 
@@ -304,15 +354,37 @@ class GazeboBridge:
         self.state_publisher = node.advertise(config.state_topic, message_type)
         if self.events_publisher is None or self.state_publisher is None:
             raise RuntimeError("Gazebo Transport could not advertise commander bridge topics")
-        subscribed = node.subscribe(message_type, config.task_topic, self._on_task)
-        if not subscribed:
-            raise RuntimeError(f"Gazebo Transport rejected task topic {config.task_topic!r}")
+        subscriptions = (
+            (config.task_topic, self._on_task),
+            (config.emergency_topic, self._on_emergency),
+            (config.reset_topic, self._on_reset),
+        )
+        for topic, callback in subscriptions:
+            if not node.subscribe(message_type, topic, callback):
+                raise RuntimeError(f"Gazebo Transport rejected commander topic {topic!r}")
         self._task_requests: set[asyncio.Task[None]] = set()
 
     def _on_task(self, message: Any) -> None:
         """Schedule HTTP work safely even if Gazebo invokes us off-loop."""
         text = message.data
         self.loop.call_soon_threadsafe(self._schedule_task, text)
+
+    def _on_emergency(self, message: Any) -> None:
+        action = message.data
+        self.loop.call_soon_threadsafe(self._schedule_emergency, action)
+
+    def _on_reset(self, _message: Any) -> None:
+        self.loop.call_soon_threadsafe(self._schedule_reset)
+
+    def _schedule_emergency(self, action: str) -> None:
+        task = self.loop.create_task(self._submit_emergency(action))
+        self._task_requests.add(task)
+        task.add_done_callback(self._task_requests.discard)
+
+    def _schedule_reset(self) -> None:
+        task = self.loop.create_task(self._reset_mission())
+        self._task_requests.add(task)
+        task.add_done_callback(self._task_requests.discard)
 
     def _schedule_task(self, text: str) -> None:
         task = self.loop.create_task(self._submit_task(text))
@@ -324,6 +396,18 @@ class GazeboBridge:
             await submit_task(self.http_client, self.config, text)
         except Exception:
             LOGGER.exception("Could not submit task to commander service")
+
+    async def _submit_emergency(self, action: str) -> None:
+        try:
+            await submit_emergency(self.http_client, self.config, action)
+        except Exception:
+            LOGGER.exception("Could not submit emergency action to commander service")
+
+    async def _reset_mission(self) -> None:
+        try:
+            await reset_mission(self.http_client, self.config)
+        except Exception:
+            LOGGER.exception("Could not reset commander mission")
 
 
 def _load_gazebo_bindings() -> tuple[Any, Any]:

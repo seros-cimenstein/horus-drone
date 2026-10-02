@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import math
+import threading
 import time
 from types import SimpleNamespace
 
@@ -8,6 +10,7 @@ import numpy as np
 import pytest
 
 from horus.config import ExecutorSettings
+from horus.events import EventBus
 from horus.executor import HorusExecutor
 from horus.executor.precision_landing import (
     AprilTag36h11Detector,
@@ -88,6 +91,7 @@ class _FakeTelemetry:
         self.pose = pose
         self.pose_updated_monotonic = time.monotonic()
         self.heading_deg = 0.0
+        self.heading_updated_monotonic = self.pose_updated_monotonic
         self.armed = True
 
 
@@ -126,20 +130,22 @@ class _FakePerception:
         return self.frame
 
 
-def _executor_settings():
-    return ExecutorSettings(
-        control_hz=15.0,
-        command_ttl_s=1.0,
-        max_speed_m_s=1.0,
-        max_vertical_speed_m_s=0.5,
-        max_distance_m=5.0,
-        min_altitude_m=0.5,
-        max_altitude_m=4.0,
-        geofence_radius_m=3.0,
-        arrival_tolerance_m=0.25,
-        follow_distance_m=2.0,
-        target_width_m=None,
-    )
+def _executor_settings(**overrides):
+    values = {
+        "control_hz": 15.0,
+        "command_ttl_s": 1.0,
+        "max_speed_m_s": 1.0,
+        "max_vertical_speed_m_s": 0.5,
+        "max_distance_m": 5.0,
+        "min_altitude_m": 0.5,
+        "max_altitude_m": 4.0,
+        "geofence_radius_m": 3.0,
+        "arrival_tolerance_m": 0.25,
+        "follow_distance_m": 2.0,
+        "target_width_m": None,
+    }
+    values.update(overrides)
+    return ExecutorSettings(**values)
 
 
 @pytest.mark.parametrize(("action", "fallback"), [("rth", ("rth",)), ("land", ("land",))])
@@ -166,8 +172,44 @@ def test_emergency_landing_keeps_autopilot_until_near_home_and_tag_acquisition(a
         assert flight.commands[-1][2] > 0.0
         assert flight.commands[-1][3] == 0.0
 
+        # A sustained tag loss (past the setpoint grace) returns to the zero-velocity hold.
         perception.frame.image = np.full((480, 640), 255, dtype=np.uint8)
-        perception.frame.timestamp = time.monotonic()
+        time.sleep(executor.settings.precision_landing_target_grace_s + 0.02)
+        _refresh_precision_inputs(flight, perception)
+        executor.tick()
+        assert flight.commands[-1] == ("velocity", 0.0, 0.0, 0.0)
+    finally:
+        executor.close()
+
+
+def test_precision_landing_coasts_the_tag_setpoint_between_detections():
+    # Regression for the campaign stall: the detector only sees the tag on a fraction of frames,
+    # and re-deriving the setpoint every tick dropped the descent to zero on every miss, which
+    # the autopilot averaged into a near-hover (0.017-0.03 m/s instead of 0.15 m/s).
+    flight = _FakeFlight(Pose(0.0, 0.0, 1.5))
+    perception = _FakePerception(_centered_tag_image())
+    executor = HorusExecutor(
+        flight, _executor_settings(precision_landing_target_grace_s=0.2), perception, autostart=False
+    )
+    try:
+        _settle_on_visible_tag(executor, flight, perception)
+        executor.tick()  # acquire the tag and command the centring descent
+        assert flight.commands[-1][0] == "velocity"
+        assert flight.commands[-1][3] == pytest.approx(0.15)
+
+        # Frames without a detection keep the last validated setpoint inside the grace: the
+        # descent is not pulsed to zero every time the detector misses the tag.
+        perception.frame.image = np.full((480, 640), 255, dtype=np.uint8)
+        _refresh_precision_inputs(flight, perception)
+        executor.tick()
+        assert flight.commands[-1][0] == "velocity"
+        assert flight.commands[-1][3] == pytest.approx(0.15)
+        executor.tick()
+        assert flight.commands[-1][3] == pytest.approx(0.15)
+
+        # Past the grace the vehicle holds instead of descending blind.
+        time.sleep(executor.settings.precision_landing_target_grace_s + 0.02)
+        _refresh_precision_inputs(flight, perception)
         executor.tick()
         assert flight.commands[-1] == ("velocity", 0.0, 0.0, 0.0)
     finally:
@@ -252,5 +294,237 @@ def test_rth_does_not_start_precision_control_without_required_inputs():
         flight._telemetry = None
         executor.tick()
         assert flight.commands == [("rth",)]
+    finally:
+        executor.close()
+
+
+class _BlockingGuidedFlight(_FakeFlight):
+    """Blocks the controller thread while it sends GUIDED to start precision control."""
+
+    def __init__(self, pose: Pose):
+        super().__init__(pose)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def set_guided(self):
+        if threading.current_thread().name == "tick":
+            self.entered.set()
+            assert self.release.wait(5.0)
+        super().set_guided()
+
+
+def _settle_on_visible_tag(executor, flight, perception):
+    executor.rth()
+    executor.tick()  # gimbal down
+    time.sleep(executor.PRECISION_GIMBAL_SETTLE_S + 0.02)
+    now = time.monotonic()
+    perception.frame.timestamp = now
+    flight._telemetry.pose_updated_monotonic = now
+    flight._telemetry.heading_updated_monotonic = now
+
+
+def test_operator_hold_during_precision_tag_acquisition_is_not_overridden():
+    flight = _BlockingGuidedFlight(Pose(0.0, 0.0, 2.0))
+    perception = _FakePerception(_tag_image())
+    executor = HorusExecutor(flight, _executor_settings(), perception, autostart=False)
+    try:
+        _settle_on_visible_tag(executor, flight, perception)
+        worker = threading.Thread(target=executor.tick, name="tick")
+        worker.start()
+        assert flight.entered.wait(2.0)
+        operator = threading.Thread(target=executor.hold, name="operator")
+        operator.start()
+        flight.release.set()
+        worker.join(2.0)
+        operator.join(2.0)
+        assert not worker.is_alive() and not operator.is_alive()
+
+        flight_commands = [c for c in flight.commands if c[0] != "gimbal"]
+        assert flight_commands[-1] == ("hold",)
+        mark = len(flight.commands)
+        for _ in range(3):
+            perception.frame.timestamp = time.monotonic()
+            executor.tick()
+        assert all(c == ("velocity", 0.0, 0.0, 0.0) for c in flight.commands[mark:])
+        state = executor.get_state()
+        assert state["state"] == "HOLDING"
+        assert state["precision_landing"]["active"] is False
+    finally:
+        executor.close()
+
+
+def test_precision_landing_does_not_steer_on_a_stale_heading():
+    flight = _FakeFlight(Pose(0.0, 0.0, 2.0))
+    perception = _FakePerception(_tag_image())
+    executor = HorusExecutor(flight, _executor_settings(), perception, autostart=False)
+    try:
+        _settle_on_visible_tag(executor, flight, perception)
+        flight._telemetry.heading_updated_monotonic = time.monotonic() - 2.0
+        executor.tick()
+        assert flight.commands == [("rth",), ("gimbal", -90.0, 0.0)]
+
+        flight._telemetry.heading_updated_monotonic = time.monotonic()
+        executor.tick()
+        assert flight.commands[-2] == ("guided",)
+        assert flight.commands[-1][0] == "velocity"
+    finally:
+        executor.close()
+
+
+def _centered_tag_image():
+    # Within the 0.05 deadband and 0.15 descent cone of a 640x480 frame: the controller commands
+    # a pure descent, as it does while it has the tag and the autopilot is supposed to follow.
+    return _tag_image(center_x=328, center_y=232)
+
+
+def _refresh_precision_inputs(flight, perception):
+    now = time.monotonic()
+    perception.frame.timestamp = now
+    flight._telemetry.pose_updated_monotonic = now
+    flight._telemetry.heading_updated_monotonic = now
+
+
+def test_precision_control_failure_hands_off_to_land_instead_of_hovering():
+    # The campaign's forest pre-follow RTH: the pose sample went 1.9 s stale while precision
+    # control owned the vehicle. The old failure path left state HOLDING in GUIDED, armed, 11 m
+    # above the pad, with no automatic way out (the harness saw no disarm in 240 sim seconds).
+    flight = _FakeFlight(Pose(0.0, 0.0, 1.5))
+    perception = _FakePerception(_centered_tag_image())
+    executor = HorusExecutor(flight, _executor_settings(), perception, autostart=False)
+    try:
+        _settle_on_visible_tag(executor, flight, perception)
+        executor.tick()
+        assert executor.get_state()["precision_landing"]["active"] is True
+
+        flight._telemetry.pose_updated_monotonic = time.monotonic() - 5.0  # stale pose sample
+        perception.frame.timestamp = time.monotonic()
+        flight._telemetry.heading_updated_monotonic = time.monotonic()
+        executor.tick()
+
+        assert flight.commands[-2] == ("velocity", 0.0, 0.0, 0.0)
+        assert flight.commands[-1] == ("land",)
+        state = executor.get_state()
+        assert state["precision_landing"]["active"] is False
+        assert state["state"] == "IDLE"
+        assert "controller failed" in state["precision_landing"]["last_fallback"]
+    finally:
+        executor.close()
+
+
+def test_precision_watchdog_scales_the_descent_rate_to_autopilot_time():
+    # A low sim RTF shrinks a legitimate descent in wall time: 0.05 s of autopilot time in 0.25 s
+    # of wall time (RTF 0.2) with 0.005 m of descent is 0.1 m/s on the autopilot clock but only
+    # 0.02 m/s of wall time, which the old wall-time rate check misread as a stall.
+    executor, flight, perception = _watchdog_executor(12.0)
+    try:
+        time.sleep(0.25)
+        flight._telemetry.time_boot_ms += 50  # +0.05 s autopilot
+        flight._telemetry.pose = Pose(0.0, 0.0, 11.995)
+        _refresh_precision_inputs(flight, perception)
+        flight._telemetry.time_boot_updated_monotonic = time.monotonic()
+        executor.tick()
+
+        assert ("land",) not in flight.commands
+        assert executor.get_state()["precision_landing"]["active"] is True
+    finally:
+        executor.close()
+
+
+def test_precision_watchdog_fires_on_a_stall_at_low_autopilot_rates():
+    executor, flight, perception = _watchdog_executor(12.0)
+    try:
+        time.sleep(0.25)
+        flight._telemetry.time_boot_ms += 50
+        _refresh_precision_inputs(flight, perception)  # altitude unchanged: a real stall
+        flight._telemetry.time_boot_updated_monotonic = time.monotonic()
+        executor.tick()
+
+        assert flight.commands[-1] == ("land",)
+        state = executor.get_state()
+        assert state["precision_landing"]["active"] is False
+        assert "no descent progress" in state["precision_landing"]["last_fallback"]
+    finally:
+        executor.close()
+
+
+def _watchdog_executor(up_m: float):
+    flight = _FakeFlight(Pose(0.0, 0.0, up_m))
+    flight._telemetry.time_boot_ms = 1_000_000
+    flight._telemetry.time_boot_updated_monotonic = time.monotonic()
+    perception = _FakePerception(_centered_tag_image())
+    executor = HorusExecutor(
+        flight,
+        _executor_settings(precision_landing_stall_s=0.25, precision_landing_min_descent_m_s=0.05),
+        perception,
+        autostart=False,
+    )
+    _settle_on_visible_tag(executor, flight, perception)
+    executor.tick()  # acquire the tag
+    executor.tick()  # start the descent-progress window
+    return executor, flight, perception
+
+
+def test_precision_landing_stall_falls_back_to_land_and_reports():
+    flight = _FakeFlight(Pose(0.0, 0.0, 1.5))
+    perception = _FakePerception(_centered_tag_image())
+    event_bus = EventBus()
+    executor = HorusExecutor(
+        flight,
+        _executor_settings(precision_landing_stall_s=0.05, precision_landing_min_descent_m_s=0.05),
+        perception,
+        event_bus=event_bus,
+        autostart=False,
+    )
+    try:
+        _settle_on_visible_tag(executor, flight, perception)
+        executor.tick()  # acquire the tag; the controller commands a 0.15 m/s descent
+        assert any(
+            command[0] == "velocity" and command[3] == pytest.approx(0.15)
+            for command in flight.commands
+        )
+        executor.tick()  # start the descent-progress window
+        assert executor.get_state()["precision_landing"]["active"] is True
+
+        time.sleep(0.08)  # the vehicle never descends (e.g. a masked autopilot failsafe)
+        _refresh_precision_inputs(flight, perception)
+        executor.tick()
+
+        assert flight.commands[-1] == ("land",)
+        state = executor.get_state()
+        assert state["precision_landing"]["active"] is False
+        assert "no descent progress" in state["precision_landing"]["last_fallback"]
+        assert state["state"] == "IDLE"
+        events = asyncio.run(event_bus.wait(after_id=0, timeout_s=0.0))
+        stalled = [event for event in events if event["kind"] == "precision_landing_stalled"]
+        assert len(stalled) == 1
+        assert stalled[0]["data"]["descent_rate_m_s"] == pytest.approx(0.0)
+        assert stalled[0]["data"]["elapsed_s"] >= 0.05
+    finally:
+        executor.close()
+
+
+def test_precision_landing_keeps_control_while_altitude_progresses():
+    flight = _FakeFlight(Pose(0.0, 0.0, 1.5))
+    perception = _FakePerception(_centered_tag_image())
+    executor = HorusExecutor(
+        flight,
+        _executor_settings(precision_landing_stall_s=0.05, precision_landing_min_descent_m_s=0.05),
+        perception,
+        autostart=False,
+    )
+    try:
+        _settle_on_visible_tag(executor, flight, perception)
+        executor.tick()
+        executor.tick()
+
+        time.sleep(0.08)
+        flight._telemetry.pose = Pose(0.0, 0.0, 1.4)  # 0.1 m descent over the window
+        _refresh_precision_inputs(flight, perception)
+        executor.tick()
+
+        assert not any(command == ("land",) for command in flight.commands)
+        state = executor.get_state()
+        assert state["precision_landing"]["active"] is True
+        assert state["precision_landing"]["last_fallback"] is None
     finally:
         executor.close()

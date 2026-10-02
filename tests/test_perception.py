@@ -135,6 +135,44 @@ class CameraBackendTests(unittest.TestCase):
 
 
 class TrackerPersistenceTests(unittest.TestCase):
+    def test_person_evidence_survives_frames_that_mislabel_the_track(self) -> None:
+        tracker = PersistentTracker(embedder=_VectorEmbedder())
+        image = _ImageVector((1.0, 0.0))
+        person = tracker.update(
+            [Detection((10, 10, 40, 60), class_name="person", class_id=0)],
+            image=image,
+            frame_id=1,
+            timestamp=10.0,
+        )[0]
+        # An inconclusive "object" frame may take over the label; a later "kite" mislabel must not
+        # strip the track's person evidence.
+        tracker.update(
+            [Detection((11, 10, 41, 60), class_name="object")],
+            image=image,
+            frame_id=2,
+            timestamp=10.1,
+        )
+        mislabeled = tracker.update(
+            [Detection((12, 10, 42, 60), class_name="kite")],
+            image=image,
+            frame_id=3,
+            timestamp=10.2,
+        )[0]
+
+        self.assertEqual(mislabeled.id, person.id)
+        self.assertEqual(mislabeled.class_name, "kite")
+        self.assertTrue(mislabeled.person_evidence)
+        self.assertTrue(mislabeled.to_dict()["person_evidence"])
+
+        fresh_kite = tracker.update(
+            [Detection((300, 10, 330, 60), class_name="kite")],
+            image=image,
+            frame_id=4,
+            timestamp=10.3,
+        )[0]
+        self.assertEqual(fresh_kite.class_name, "kite")
+        self.assertFalse(fresh_kite.person_evidence)
+
     def test_id_survives_short_occlusion_and_expires_after_retention(self) -> None:
         tracker = PersistentTracker(TrackerConfig(max_lost_seconds=2.5))
         first = tracker.update(
@@ -321,7 +359,7 @@ class TrackerReidentificationTests(unittest.TestCase):
             timestamp=10.2,
         )
 
-        with self.assertLogs("horus.perception.tracker", level="INFO") as captured:
+        with self.assertLogs("horus.perception.tracker", level="DEBUG") as captured:
             match = tracker.reidentify_candidate(reference.id)
 
         self.assertIsNotNone(match)
@@ -405,6 +443,107 @@ class IgnoreRegionTests(unittest.TestCase):
 
 
 class TrackerValidationTests(unittest.TestCase):
+    def test_revalidation_grace_keeps_a_track_through_a_marginal_dip(self) -> None:
+        clock = [100.0]
+        tracker = PersistentTracker(
+            TrackerConfig(revalidation_grace_s=1.0), embedder=_VectorEmbedder()
+        )
+        detection = Detection((10, 10, 40, 60), class_name="person")
+        # cos((1, 0), (0.70, 0.714)) = 0.70: inside the default 0.05 grace margin below the 0.72
+        # threshold, like the campaign's correct-target dip 0.7917 -> 0.7196.
+        marginal = _ImageVector((0.70, 0.714))
+        with patch("horus.perception.tracker.time.monotonic", lambda: clock[0]):
+            tracker.update(
+                [detection], image=_ImageVector((1.0, 0.0)), frame_id=1, timestamp=clock[0]
+            )
+            clock[0] += 0.05
+            current = tracker.update(
+                [detection], image=_ImageVector((1.0, 0.0)), frame_id=2, timestamp=clock[0]
+            )[0]
+            self.assertIsNotNone(tracker.validate_candidate(current.id))
+
+            clock[0] += 0.10
+            dip = tracker.update([detection], image=marginal, frame_id=3, timestamp=clock[0])[0]
+            self.assertEqual(dip.id, current.id)
+            self.assertIsNotNone(tracker.validate_candidate(dip.id))
+            self.assertIsNone(tracker.validate_candidate_failure(dip.id))
+
+            # A total appearance change (an identity swap) is never forgiven by the margin.
+            clock[0] += 0.10
+            swapped = tracker.update(
+                [detection], image=_ImageVector((0.0, 1.0)), frame_id=4, timestamp=clock[0]
+            )[0]
+            self.assertIsNone(tracker.validate_candidate(swapped.id))
+            self.assertEqual(
+                tracker.validate_candidate_failure(swapped.id), "appearance_mismatch"
+            )
+
+            # Even a marginal dip expires once the grace window has passed.
+            clock[0] += 2.0
+            late = tracker.update([detection], image=marginal, frame_id=5, timestamp=clock[0])[0]
+            self.assertIsNone(tracker.validate_candidate(late.id))
+            self.assertEqual(tracker.validate_candidate_failure(late.id), "appearance_mismatch")
+
+    def test_reid_similarity_logging_is_one_summary_per_second(self) -> None:
+        clock = [100.0]
+        tracker = PersistentTracker(embedder=_VectorEmbedder())
+        detection = Detection((10, 10, 40, 60), class_name="person")
+        with patch("horus.perception.tracker.time.monotonic", lambda: clock[0]):
+            tracker.update(
+                [detection], image=_ImageVector((1.0, 0.0)), frame_id=1, timestamp=clock[0]
+            )
+            clock[0] += 0.05
+            current = tracker.update(
+                [detection], image=_ImageVector((1.0, 0.0)), frame_id=2, timestamp=clock[0]
+            )[0]
+            with self.assertLogs("horus.perception.tracker", level="DEBUG") as captured:
+                for step in range(6):
+                    # Two validation ticks per frame, like the executor's control loop.
+                    self.assertIsNotNone(tracker.validate_candidate(current.id))
+                    self.assertIsNotNone(tracker.validate_candidate(current.id))
+                    clock[0] += 0.3
+                    tracker.update(
+                        [detection],
+                        image=_ImageVector((1.0, 0.0)),
+                        frame_id=10 + step,
+                        timestamp=clock[0],
+                    )
+
+        records = [json.loads(record.getMessage()) for record in captured.records]
+        summaries = [record for record in records if record["event"] == "perception_reid_summary"]
+        per_comparison = [
+            record for record in records if record["event"] == "perception_reid_similarity"
+        ]
+        # 12 comparisons (well over a second of ticks), one INFO window summary; every
+        # per-comparison record stays at DEBUG so a hold cannot flood the log.
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0]["mode"], "selected_validation")
+        self.assertEqual(summaries[0]["comparisons"], summaries[0]["total_comparisons"])
+        self.assertGreaterEqual(summaries[0]["comparisons"], 6)
+        self.assertTrue(summaries[0]["own_track_seen"])
+        self.assertEqual(summaries[0]["best_candidate_id"], current.id)
+        self.assertAlmostEqual(summaries[0]["best_similarity"], 1.0)
+        self.assertEqual(len(per_comparison), 12)
+
+    def test_validation_failure_reason_distinguishes_missing_stale_and_mismatch(self) -> None:
+        tracker = PersistentTracker(embedder=_VectorEmbedder())
+        detection = Detection((10, 10, 40, 60), class_name="person")
+        created = tracker.update(
+            [detection], image=_ImageVector((1.0, 0.0)), frame_id=1, timestamp=10.0
+        )[0]
+
+        self.assertEqual(tracker.validate_candidate_failure(999), "not_visible")
+        # A single-hit track is in the current frame but not fresh enough to validate.
+        self.assertEqual(tracker.validate_candidate_failure(created.id), "stale")
+
+        tracker.update([detection], image=_ImageVector((1.0, 0.0)), frame_id=2, timestamp=10.1)
+        self.assertIsNotNone(tracker.validate_candidate(created.id))
+        self.assertIsNone(tracker.validate_candidate_failure(created.id))
+
+        tracker.update([detection], image=_ImageVector((0.0, 1.0)), frame_id=3, timestamp=10.2)
+        self.assertEqual(tracker.validate_candidate_failure(created.id), "appearance_mismatch")
+        self.assertIsNone(tracker.validate_candidate(created.id))
+
     def test_validate_id_rejects_current_embedding_mismatch(self) -> None:
         detection = Detection((10, 10, 40, 60), class_name="person")
         system = PerceptionSystem(
@@ -436,7 +575,7 @@ class TrackerValidationTests(unittest.TestCase):
         )[0]
 
         self.assertEqual(len(embedder.calls), 1)
-        with self.assertLogs("horus.perception.tracker", level="INFO") as captured:
+        with self.assertLogs("horus.perception.tracker", level="DEBUG") as captured:
             validated = tracker.validate_candidate(current.id)
             repeated = tracker.validate_candidate(current.id)
 

@@ -68,11 +68,16 @@ class Candidate:
     pose: Any = None
     class_id: int | None = None
     attributes: Mapping[str, Any] = field(default_factory=dict)
+    source: str = "detector"
     embedding: Embedding | None = field(default=None, repr=False, compare=False)
+    # Track-level person evidence: a person label or person-only attribute was observed at some
+    # point in this track's history, so a frame that mislabels it (e.g. "kite") cannot retract it.
+    person_evidence: bool = False
 
     def to_dict(self, *, include_embedding: bool = False) -> dict[str, Any]:
         """Return a JSON-friendly candidate record, omitting private ReID data by default."""
         result: dict[str, Any] = {
+            "source": self.source,
             "id": self.id,
             "bbox": list(self.bbox),
             "box": list(self.bbox),
@@ -84,6 +89,7 @@ class Candidate:
             "pose": self.pose,
             "class_id": self.class_id,
             "attributes": dict(self.attributes),
+            "person_evidence": self.person_evidence,
         }
         for optional in ("distance_m", "bearing"):
             if optional in self.attributes:

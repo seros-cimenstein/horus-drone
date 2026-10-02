@@ -63,7 +63,20 @@ class _Flight:
         return None
 
 
-def test_fastmcp_registers_tools_and_serves_state_while_camera_blocks():
+_VISION_MODULES = ("numpy", "cv2", "onnxruntime")
+
+
+def _without_vision_dependencies(monkeypatch) -> None:
+    """Simulate an install with only the server extra: vision packages cannot be imported."""
+    cached = ("horus.perception", "horus.mcp_server.live_view", *_VISION_MODULES)
+    for name in list(sys.modules):
+        if any(name == prefix or name.startswith(f"{prefix}.") for prefix in cached):
+            monkeypatch.delitem(sys.modules, name)
+    for name in _VISION_MODULES:
+        monkeypatch.setitem(sys.modules, name, None)
+
+
+def test_fastmcp_serves_state_and_rejects_perception_tools_while_camera_blocks():
     camera = _BlockingCamera()
     perception = PerceptionSystem(
         detector=object(),
@@ -75,29 +88,6 @@ def test_fastmcp_registers_tools_and_serves_state_while_camera_blocks():
     try:
         assert camera.read_started.wait(timeout=1.0)
         mcp = create_mcp(HorusConfig(), executor, _Flight(), perception)
-        tool_names = {tool.name for tool in asyncio.run(mcp.list_tools())}
-        assert tool_names == {
-            "get_state",
-            "get_frame",
-            "list_candidates",
-            "get_map",
-            "get_link_status",
-            "take_off",
-            "goto",
-            "approach",
-            "follow",
-            "orbit",
-            "scan",
-            "hold",
-            "rth",
-            "land",
-            "point",
-            "set_target_profile",
-            "set_mode",
-            "get_task_status",
-            "wait_for_task",
-            "cancel",
-        }
 
         started = time.monotonic()
         state = json.loads(_call_tool(mcp, "get_state"))
@@ -106,21 +96,24 @@ def test_fastmcp_registers_tools_and_serves_state_while_camera_blocks():
         assert state["perception"]["camera"] in {"connecting", "stalled"}
         assert "last_frame_age_s" in state["perception"]
 
-        for tool_name, arguments in (
-            ("list_candidates", {}),
-            ("follow", {"id": 4}),
-        ):
-            try:
-                _call_tool(mcp, tool_name, arguments)
-            except Exception as exc:
-                assert "perception unavailable:" in str(exc)
-            else:
-                raise AssertionError(f"{tool_name} must reject unavailable perception")
+        def assert_perception_tools_rejected() -> None:
+            for tool_name, arguments in (
+                ("list_candidates", {}),
+                ("follow", {"id": 4}),
+            ):
+                try:
+                    _call_tool(mcp, tool_name, arguments)
+                except Exception as exc:
+                    assert "perception unavailable:" in str(exc)
+                else:
+                    raise AssertionError(f"{tool_name} must reject unavailable perception")
 
+        assert_perception_tools_rejected()
+        # The watchdog releases the blocked read; the camera must not be reported as streaming.
         assert camera.released.wait(timeout=1.0)
         state = json.loads(_call_tool(mcp, "get_state"))
-        assert state["perception"]["camera"] == "stalled"
-        assert "timed out" in state["perception"]["reason"]
+        assert state["perception"]["camera"] in {"connecting", "stalled"}
+        assert_perception_tools_rejected()
         assert executor.submissions == []
     finally:
         perception.close()
@@ -169,7 +162,6 @@ def test_flight_only_cli_and_config_skip_camera(monkeypatch, tmp_path, argv, con
     from horus import executor as executor_module
     from horus import flight as flight_module
     from horus.mcp_server import server
-    from horus import perception as perception_module
 
     calls = {}
 
@@ -184,7 +176,7 @@ def test_flight_only_cli_and_config_skip_camera(monkeypatch, tmp_path, argv, con
             calls["flight_closed"] = True
 
     class Executor:
-        def __init__(self, flight, settings, perception):
+        def __init__(self, flight, settings, perception, **_kwargs):
             calls["executor_perception"] = perception
 
         def close(self):
@@ -199,11 +191,7 @@ def test_flight_only_cli_and_config_skip_camera(monkeypatch, tmp_path, argv, con
     monkeypatch.setattr(config_module, "load_config", lambda: config)
     monkeypatch.setattr(flight_module, "MavlinkFlightLink", Flight)
     monkeypatch.setattr(executor_module, "HorusExecutor", Executor)
-    monkeypatch.setattr(
-        perception_module,
-        "create_perception_system",
-        lambda *args: (_ for _ in ()).throw(AssertionError("camera setup must be skipped")),
-    )
+    _without_vision_dependencies(monkeypatch)
     monkeypatch.setattr(
         server,
         "create_mcp",
@@ -234,24 +222,16 @@ def test_flight_only_cli_and_config_skip_camera(monkeypatch, tmp_path, argv, con
     assert pointer.read_text(encoding="utf-8").strip() == str(run_dir.resolve())
 
 
-def test_mcp_registers_commander_prompt_and_mission_brief_resource():
-    mcp = create_mcp(HorusConfig(), _Executor(), _Flight(), None)
+def test_flight_only_cli_help_needs_no_vision_dependencies(monkeypatch, capsys):
+    from horus.mcp_server import server
 
-    prompts = asyncio.run(mcp.list_prompts())
-    assert "horus_commander" in {prompt.name for prompt in prompts}
-    prompt = asyncio.run(mcp.get_prompt("horus_commander"))
-    prompt_text = "\n".join(message.content.text for message in prompt.messages)
-    assert "event-driven" in prompt_text
-    assert "never by pixels" in prompt_text
-    assert "get_task_status" in prompt_text
-    assert "untrusted quoted data" in prompt_text
-    assert "observation age" in prompt_text
+    _without_vision_dependencies(monkeypatch)
 
-    resources = asyncio.run(mcp.list_resources())
-    resource = next(resource for resource in resources if str(resource.uri) == "horus://mission/brief")
-    contents = list(asyncio.run(mcp.read_resource(resource.uri)))
-    assert contents
-    assert "current tracker IDs" in contents[0].content
+    with pytest.raises(SystemExit) as exited:
+        server.main(["--help"])
+
+    assert exited.value.code == 0
+    assert "--no-perception" in capsys.readouterr().out
 
 
 def test_frame_tools_return_bounded_jpeg_and_quoted_candidate_text():

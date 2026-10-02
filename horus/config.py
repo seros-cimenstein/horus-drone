@@ -6,7 +6,7 @@ import ipaddress
 import math
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -41,11 +41,25 @@ class ExecutorSettings:
     arrival_tolerance_m: float = 0.25
     follow_distance_m: float = 2.0
     target_width_m: float | None = None
-    # Known target height (m) for monocular range from the detection box height; people ~1.7 m.
+    # Known person height (m) for monocular range from the detection box height; applied only to
+    # person targets (person label, shirt-colour attribute, or remembered person label). People ~1.7 m.
     target_height_m: float | None = None
     target_match_threshold: float = 0.72
     camera_horizontal_fov_deg: float = 114.59155902616465
+    default_gimbal_pitch_deg: float = 0.0
     link_loss_rth_delay_s: float = 30.0
+    # Wall-clock freshness limit for pose, heading, forward-ToF and camera-frame samples driving
+    # motion. Real flight keeps the default; the flight link requests the control messages at
+    # 20 Hz (autopilot time) so the wall gap stays below it down to very low sim real-time factors.
+    telemetry_max_age_s: float = 1.5
+    # Precision landing (RTH/LAND): while precision control owns the descent, hand back to the
+    # autopilot LAND if altitude has not fallen at least precision_landing_min_descent_m_s for
+    # precision_landing_stall_s; an armed GUIDED hover would otherwise hang over the pad.
+    precision_landing_stall_s: float = 12.0
+    precision_landing_min_descent_m_s: float = 0.05
+    # Keep commanding the last validated tag setpoint (centring + descent) this long after the
+    # last fresh detection, so an intermittent detector does not pulse the setpoint to zero.
+    precision_landing_target_grace_s: float = 1.0
 
     def __post_init__(self) -> None:
         try:
@@ -55,6 +69,22 @@ class ExecutorSettings:
         if not math.isfinite(margin) or margin < 0.0:
             raise ValueError("geofence_margin_m must be a finite non-negative number")
         object.__setattr__(self, "geofence_margin_m", margin)
+        pitch_value = self.default_gimbal_pitch_deg
+        try:
+            pitch = float(pitch_value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "default_gimbal_pitch_deg must be between -90 and 45 degrees"
+            ) from exc
+        if (
+            isinstance(pitch_value, bool)
+            or not math.isfinite(pitch)
+            or not -90.0 <= pitch <= 45.0
+        ):
+            raise ValueError(
+                "default_gimbal_pitch_deg must be between -90 and 45 degrees"
+            )
+        object.__setattr__(self, "default_gimbal_pitch_deg", pitch)
 
         polygon = self.geofence_polygon_ned
         if polygon is None:
@@ -90,15 +120,38 @@ class PerceptionSettings:
     source: str = "udp://0.0.0.0:5600"
     detector_model: str = "models/yolov8n.onnx"
     embedding_model: str = "models/osnet_x0_25_msmt17.onnx"
-    grounding_model: str = "IDEA-Research/grounding-dino-tiny"
+    grounder_url: str | None = "http://127.0.0.1:8100"
     max_fps: float = 5.0
+    open_vocab_hz: float = 0.5
+    vocabulary: list[str] = field(default_factory=list)
     onnx_intra_op_num_threads: int = 2
     onnx_inter_op_num_threads: int = 1
     ring_buffer_s: float = 5.0
     render_width_px: int = 640
+    # Keep a live track's identity through a brief appearance-score dip (see TrackerConfig);
+    # 0 disables the grace and requires every validated frame to pass the threshold.
+    revalidation_grace_s: float = 1.0
     ignore_regions: tuple[tuple[float, float, float, float], ...] = ()
 
     def __post_init__(self) -> None:
+        if (
+            isinstance(self.open_vocab_hz, bool)
+            or not isinstance(self.open_vocab_hz, (int, float))
+            or not math.isfinite(self.open_vocab_hz)
+            or self.open_vocab_hz <= 0
+        ):
+            raise ValueError("perception.open_vocab_hz must be a finite positive number")
+        if (
+            isinstance(self.revalidation_grace_s, bool)
+            or not isinstance(self.revalidation_grace_s, (int, float))
+            or not math.isfinite(self.revalidation_grace_s)
+            or self.revalidation_grace_s < 0
+        ):
+            raise ValueError("perception.revalidation_grace_s must be a finite non-negative number")
+        if not isinstance(self.vocabulary, Sequence) or isinstance(self.vocabulary, (str, bytes)):
+            raise ValueError("perception.vocabulary must be a list of terms")
+        object.__setattr__(self, "vocabulary", list(self.vocabulary))
+
         for name in ("onnx_intra_op_num_threads", "onnx_inter_op_num_threads"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -148,7 +201,7 @@ class CommanderSettings:
     api_key_env: str = "ANTHROPIC_API_KEY"
     max_tokens: int = 800
     timeout_s: float = 180.0
-    max_turns: int = 8
+    max_turns: int = 40
     claude_command: str = "claude"
     # Claude Code backend: model alias or full name ('opus' tracks the newest Opus available to the
     # account) and reasoning effort (low, medium, high, xhigh, max). None keeps the CLI's own default.

@@ -21,6 +21,10 @@ from horus.config import HorusConfig, load_config
 
 DEFAULT_SERVER_URL = "http://127.0.0.1:8000/mcp"
 EMERGENCY_TOOLS = {"hold", "rth", "land"}
+# Detector-confidence floor for select_candidate: the largest exact-attribute match below this is
+# a detector artifact (a 0.27-confidence "fire hydrant"), not a target worth flying to. Mission
+# steps override it per selection with select_candidate.min_confidence.
+DEFAULT_SELECTION_MIN_CONFIDENCE = 0.5
 
 
 async def _tool_call(session: Any, name: str, arguments: Mapping[str, Any] | None = None) -> Any:
@@ -74,6 +78,13 @@ async def run_mission(
         driver_path = (mission_path.parent / driver_name).resolve()
         if not driver_path.is_file():
             raise FileNotFoundError(f"mission driver does not exist: {driver_path}")
+    driver_args = mission.get("driver_args", [])
+    if not isinstance(driver_args, list):
+        raise ValueError("mission driver_args must be a list of strings")
+    if any(not isinstance(argument, str) for argument in driver_args):
+        raise ValueError("mission driver_args items must be strings")
+    if "driver_args" in mission and driver_path is None:
+        raise ValueError("mission driver_args requires a driver")
     driver_min_duration = mission.get("driver_min_duration_s")
     if driver_min_duration is not None:
         if driver_path is None:
@@ -99,7 +110,9 @@ async def run_mission(
     try:
         if driver_path is not None and not driver_step:
             driver_started_at = time.monotonic()
-            driver_process = await asyncio.create_subprocess_exec(sys.executable, str(driver_path))
+            driver_process = await asyncio.create_subprocess_exec(
+                sys.executable, str(driver_path), *driver_args
+            )
         for run_index in range(repeats):
             variables: dict[str, Any] = {}
             run_started_at = datetime.now(timezone.utc)
@@ -117,7 +130,7 @@ async def run_mission(
                     if driver_process is None:
                         driver_started_at = time.monotonic()
                         driver_process = await asyncio.create_subprocess_exec(
-                            sys.executable, str(driver_path)
+                            sys.executable, str(driver_path), *driver_args
                         )
                     print(f"  {number}. start_driver: {driver_path.name}")
                     continue
@@ -127,27 +140,112 @@ async def run_mission(
                     ):
                         raise ValueError(f"mission select_candidate step {number} is malformed")
                     selection = step["select_candidate"]
-                    if set(selection) != {"attribute", "equals", "choose", "store_as"}:
+                    required = {"attribute", "equals", "choose", "store_as"}
+                    if (
+                        not required.issubset(selection)
+                        or not set(selection).issubset(required | {"timeout_s", "min_confidence"})
+                    ):
                         raise ValueError(
-                            f"mission select_candidate step {number} needs attribute, equals, choose, and store_as"
+                            f"mission select_candidate step {number} needs attribute, equals, "
+                            "choose, and store_as; timeout_s and min_confidence are optional"
                         )
                     store_as = _variable_name(selection["store_as"])
-                    response = await _tool_call(session, "list_candidates")
-                    candidates = (
-                        response.get("candidate_table")
-                        if isinstance(response, Mapping)
-                        else None
-                    )
-                    if not isinstance(candidates, list):
-                        raise RuntimeError("list_candidates returned an invalid response")
-                    selected = _select_candidate(
-                        candidates,
-                        attribute=selection["attribute"],
-                        equals=selection["equals"],
-                        choose=selection["choose"],
-                    )
+                    min_confidence = DEFAULT_SELECTION_MIN_CONFIDENCE
+                    if "min_confidence" in selection:
+                        raw_confidence = selection["min_confidence"]
+                        if isinstance(raw_confidence, bool) or not isinstance(
+                            raw_confidence, (int, float)
+                        ):
+                            raise ValueError(
+                                "select_candidate min_confidence must be a finite number in [0, 1]"
+                            )
+                        try:
+                            min_confidence = float(raw_confidence)
+                        except OverflowError as exc:
+                            raise ValueError(
+                                "select_candidate min_confidence must be a finite number in [0, 1]"
+                            ) from exc
+                        if not math.isfinite(min_confidence) or not 0.0 <= min_confidence <= 1.0:
+                            raise ValueError(
+                                "select_candidate min_confidence must be a finite number in [0, 1]"
+                            )
+                    timeout_s = None
+                    if "timeout_s" in selection:
+                        raw_timeout = selection["timeout_s"]
+                        if isinstance(raw_timeout, bool) or not isinstance(
+                            raw_timeout, (int, float)
+                        ):
+                            raise ValueError(
+                                "select_candidate timeout_s must be a finite positive number"
+                            )
+                        try:
+                            timeout_s = float(raw_timeout)
+                        except OverflowError as exc:
+                            raise ValueError(
+                                "select_candidate timeout_s must be a finite positive number"
+                            ) from exc
+                        if not math.isfinite(timeout_s) or timeout_s <= 0.0:
+                            raise ValueError(
+                                "select_candidate timeout_s must be a finite positive number"
+                            )
+
+                    if timeout_s is None:
+                        candidates = await _list_candidate_table(session)
+                        selected = _select_candidate(
+                            candidates,
+                            attribute=selection["attribute"],
+                            equals=selection["equals"],
+                            choose=selection["choose"],
+                            min_confidence=min_confidence,
+                        )
+                    else:
+                        deadline = time.monotonic() + timeout_s
+                        candidates: list[Any] = []
+                        while True:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0.0:
+                                raise _candidate_selection_timeout(
+                                    selection, timeout_s, candidates
+                                )
+                            try:
+                                candidates = await asyncio.wait_for(
+                                    _list_candidate_table(session), timeout=remaining
+                                )
+                            except asyncio.TimeoutError as exc:
+                                raise _candidate_selection_timeout(
+                                    selection, timeout_s, candidates
+                                ) from exc
+                            selected = _find_candidate(
+                                candidates,
+                                attribute=selection["attribute"],
+                                equals=selection["equals"],
+                                choose=selection["choose"],
+                                min_confidence=min_confidence,
+                            )
+                            remaining = deadline - time.monotonic()
+                            if selected is not None and remaining > 0.0:
+                                break
+                            if remaining <= 0.0:
+                                raise _candidate_selection_timeout(
+                                    selection, timeout_s, candidates
+                                )
+                            await asyncio.sleep(min(0.5, remaining))
                     variables[store_as] = selected
                     print(f"  {number}. select_candidate: {json.dumps(selected, ensure_ascii=False)}")
+                    continue
+                if "resolve_candidate" in step:
+                    if set(step) != {"resolve_candidate"} or not isinstance(step["resolve_candidate"], Mapping):
+                        raise ValueError(f"mission resolve_candidate step {number} is malformed")
+                    resolution = _resolution_spec(step["resolve_candidate"])
+                    outcome = await _resolve_candidate(session, resolution)
+                    variables[resolution["store_as"]] = (
+                        outcome["candidate"] if outcome["outcome"] == "resolved" else outcome
+                    )
+                    print(f"  {number}. resolve_candidate: {json.dumps(outcome, ensure_ascii=False)}")
+                    if outcome["outcome"] == "abstain":
+                        # Abstaining is a valid answer: the remaining steps need an identity.
+                        print(f"  run {run_index + 1} abstained; remaining steps skipped")
+                        break
                     continue
                 if "assert_reacquired" in step:
                     if set(step) != {"assert_reacquired"} or not isinstance(
@@ -184,7 +282,7 @@ async def run_mission(
                 args = _resolve_mission_value(step.get("arguments", {}), variables)
                 if not name or not isinstance(args, Mapping):
                     raise ValueError(f"mission step {number} needs tool and arguments mapping")
-                if name not in {"take_off", "goto", "approach", "follow", "orbit", "scan", *EMERGENCY_TOOLS}:
+                if name not in {"take_off", "goto", "approach", "follow", "orbit", "scan", "search", *EMERGENCY_TOOLS}:
                     raise ValueError(f"mission step {number} uses unsupported skill {name!r}")
                 result = await _tool_call(session, name, args)
                 print(f"  {number}. {name}: {json.dumps(result, ensure_ascii=False)}")
@@ -259,9 +357,60 @@ def _resolve_mission_value(value: Any, variables: Mapping[str, Any]) -> Any:
     return value
 
 
-def _select_candidate(
-    candidates: list[Any], *, attribute: Any, equals: Any, choose: Any
-) -> dict[str, Any]:
+async def _list_candidate_table(session: Any) -> list[Any]:
+    response = await _tool_call(session, "list_candidates")
+    candidates = response.get("candidate_table") if isinstance(response, Mapping) else None
+    if not isinstance(candidates, list):
+        raise RuntimeError("list_candidates returned an invalid response")
+    return candidates
+
+
+def _candidate_selection_timeout(
+    selection: Mapping[str, Any], timeout_s: float, candidates: list[Any]
+) -> TimeoutError:
+    return TimeoutError(
+        f"select_candidate timed out after {timeout_s:g}s waiting for "
+        f"attribute {selection['attribute']!r} == {selection['equals']!r}; "
+        f"last candidate table summary: {_candidate_table_summary(candidates)}"
+    )
+
+
+def _candidate_table_summary(candidates: list[Any]) -> str:
+    rows: list[Any] = []
+    for candidate in candidates[:10]:
+        if isinstance(candidate, Mapping):
+            attributes = candidate.get("attributes")
+            rows.append(
+                {
+                    "id": candidate.get("id"),
+                    "class_name": candidate.get("class_name"),
+                    "attributes": (
+                        dict(attributes) if isinstance(attributes, Mapping) else attributes
+                    ),
+                }
+            )
+        else:
+            rows.append(candidate)
+    summary: dict[str, Any] = {"count": len(candidates), "candidates": rows}
+    if len(candidates) > len(rows):
+        summary["omitted"] = len(candidates) - len(rows)
+    return json.dumps(summary, ensure_ascii=False, default=str)
+
+
+def _find_candidate(
+    candidates: list[Any],
+    *,
+    attribute: Any,
+    equals: Any,
+    choose: Any,
+    min_confidence: float = DEFAULT_SELECTION_MIN_CONFIDENCE,
+) -> dict[str, Any] | None:
+    """Largest exact-attribute match whose detector confidence passes the floor.
+
+    A row that carries no confidence value at all is not gated: MCP candidate tables always
+    carry the detector confidence, so only synthetic/partial tables omit it. A confidence that
+    is present but not a finite number can never pass a numeric floor.
+    """
     if not isinstance(attribute, str) or not attribute:
         raise ValueError("select_candidate attribute must be a non-empty string")
     if choose != "largest":
@@ -276,6 +425,13 @@ def _select_candidate(
         raw_id = candidate.get("id")
         if isinstance(raw_id, bool) or not isinstance(raw_id, int) or raw_id < 1:
             raise ValueError("matching candidates must have positive integer IDs")
+        if "confidence" in candidate:
+            try:
+                confidence = float(candidate["confidence"])
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not math.isfinite(confidence) or confidence < min_confidence:
+                continue
         bbox = candidate.get("bbox", candidate.get("box"))
         if isinstance(bbox, Mapping):
             coordinates = (
@@ -296,8 +452,202 @@ def _select_candidate(
             raise ValueError(f"candidate {raw_id} has an invalid bounding box")
         matches.append(((x2 - x1) * (y2 - y1), raw_id, dict(candidate)))
     if not matches:
-        raise RuntimeError(f"no candidate matched attribute {attribute!r} == {equals!r}")
+        return None
     return max(matches, key=lambda item: (item[0], -item[1]))[2]
+
+
+def _select_candidate(
+    candidates: list[Any],
+    *,
+    attribute: Any,
+    equals: Any,
+    choose: Any,
+    min_confidence: float = DEFAULT_SELECTION_MIN_CONFIDENCE,
+) -> dict[str, Any]:
+    selected = _find_candidate(
+        candidates,
+        attribute=attribute,
+        equals=equals,
+        choose=choose,
+        min_confidence=min_confidence,
+    )
+    if selected is None:
+        raise _candidate_selection_error(
+            candidates, attribute=attribute, equals=equals, min_confidence=min_confidence
+        )
+    return selected
+
+
+def _candidate_selection_error(
+    candidates: list[Any], *, attribute: Any, equals: Any, min_confidence: float
+) -> RuntimeError:
+    """Report whether nothing matched the attribute, or every match failed the confidence floor."""
+    rejected: list[tuple[float, Any]] = []
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        attributes = candidate.get("attributes")
+        if not isinstance(attributes, Mapping) or attributes.get(attribute) != equals:
+            continue
+        try:
+            confidence = float(candidate.get("confidence"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(confidence):
+            rejected.append((confidence, candidate.get("id")))
+    if rejected:
+        best_confidence, best_id = max(rejected)
+        return RuntimeError(
+            f"no candidate matched attribute {attribute!r} == {equals!r} with confidence "
+            f">= {min_confidence:g}; the best match was {best_confidence:.2f} (id {best_id})"
+        )
+    return RuntimeError(f"no candidate matched attribute {attribute!r} == {equals!r}")
+
+
+def _resolution_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate a resolve_candidate step: one identity from a public cue, or abstain."""
+    allowed = {"class_name", "attribute", "equals", "store_as", "timeout_s", "settle_s"}
+    if not {"class_name", "store_as"}.issubset(spec) or not set(spec).issubset(allowed):
+        raise ValueError(
+            "resolve_candidate needs class_name and store_as; attribute/equals, timeout_s and "
+            "settle_s are optional"
+        )
+    if ("attribute" in spec) != ("equals" in spec):
+        raise ValueError("resolve_candidate attribute and equals must be given together")
+    class_name = spec["class_name"]
+    if not isinstance(class_name, str) or not class_name.strip():
+        raise ValueError("resolve_candidate class_name must be a non-empty label")
+    if "attribute" in spec and (not isinstance(spec["attribute"], str) or not spec["attribute"]):
+        raise ValueError("resolve_candidate attribute must be a non-empty string")
+
+    def seconds(name: str, default: float, *, positive: bool) -> float:
+        raw = spec.get(name, default)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
+            raise ValueError(f"resolve_candidate {name} must be a finite number of seconds")
+        if raw < 0 or (positive and raw == 0):
+            raise ValueError(f"resolve_candidate {name} must be {'positive' if positive else 'non-negative'}")
+        return float(raw)
+
+    return {
+        "class_name": class_name.strip(),
+        "attribute": spec.get("attribute"),
+        "equals": spec.get("equals"),
+        "store_as": _variable_name(spec["store_as"]),
+        "timeout_s": seconds("timeout_s", 10.0, positive=True),
+        "settle_s": seconds("settle_s", 1.0, positive=True),
+    }
+
+
+def _candidate_label(candidate: Mapping[str, Any]) -> str | None:
+    """Tracker label of a candidate-table row; MCP rows carry it JSON-quoted as untrusted data."""
+    if isinstance(candidate.get("class_name"), str):
+        return candidate["class_name"]
+    labels = candidate.get("untrusted_detector_labels")
+    if isinstance(labels, list) and labels:
+        try:
+            label = json.loads(labels[0])
+        except (TypeError, ValueError):
+            return None
+        return label if isinstance(label, str) else None
+    return None
+
+
+def _cue_matches(candidates: list[Any], resolution: Mapping[str, Any]) -> list[dict[str, Any]]:
+    wanted = resolution["class_name"].casefold()
+    matches = []
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        label = _candidate_label(candidate)
+        if label is None or label.casefold() != wanted:
+            continue
+        if resolution["attribute"] is not None:
+            attributes = candidate.get("attributes")
+            if not isinstance(attributes, Mapping) or attributes.get(resolution["attribute"]) != resolution["equals"]:
+                continue
+        matches.append(dict(candidate))
+    return matches
+
+
+# Same freshness limit as PerceptionSystem.validate_candidate's default max_age_seconds.
+_RESOLVE_MAX_OBSERVATION_AGE_S = 0.75
+
+
+def _observation_record(response: Mapping[str, Any], matches: list[dict[str, Any]]) -> dict[str, Any]:
+    pose = response.get("pose") if isinstance(response.get("pose"), Mapping) else {}
+    return {
+        "frame_id": response.get("frame_id"),
+        "observation_age_s": response.get("observation_age_s"),
+        # Autopilot clock at frame capture, for joining the observation to simulator/flight logs.
+        "frame_time_boot_ms": pose.get("time_boot_ms"),
+        "frame_time_boot_age_s": pose.get("time_boot_age_s"),
+        "matches": [{"id": match["id"], "bbox": match.get("bbox")} for match in matches],
+    }
+
+
+async def _resolve_candidate(session: Any, resolution: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve a public cue to exactly one current tracker ID, or abstain.
+
+    Only fresh (≤0.75 s), newly processed frames count. A first match must appear before
+    ``timeout_s``; the step then observes ``settle_s`` more; every call is bounded by the
+    remaining time, so ``timeout_s + settle_s`` caps the whole step. Two or more matching IDs in
+    one fresh frame is ``ambiguous`` (never a pick); a single match must persist under the same
+    ID into the decision frame and appear in at least two fresh frames, like candidate validation.
+    """
+    deadline = time.monotonic() + resolution["timeout_s"]
+    settle_end: float | None = None
+    last_frame: Any = None
+    fresh_frames = 0
+    sightings: dict[int, int] = {}
+    ambiguous: dict[str, Any] | None = None
+    decision: dict[str, Any] | None = None
+    matches: list[dict[str, Any]] = []
+    while True:
+        remaining = (settle_end if settle_end is not None else deadline) - time.monotonic()
+        if remaining <= 0.0:
+            break
+        try:
+            response = await asyncio.wait_for(_tool_call(session, "list_candidates"), timeout=remaining)
+        except asyncio.TimeoutError:
+            break
+        table = response.get("candidate_table") if isinstance(response, Mapping) else None
+        if not isinstance(table, list):
+            raise RuntimeError("list_candidates returned an invalid response")
+        age = response.get("observation_age_s")
+        frame_id = response.get("frame_id")
+        fresh = isinstance(age, (int, float)) and age <= _RESOLVE_MAX_OBSERVATION_AGE_S
+        if fresh and frame_id != last_frame:
+            last_frame = frame_id
+            fresh_frames += 1
+            matches = _cue_matches(table, resolution)
+            decision = _observation_record(response, matches)
+            for match in matches:
+                sightings[int(match["id"])] = sightings.get(int(match["id"]), 0) + 1
+            if len(matches) > 1 and ambiguous is None:
+                ambiguous = decision
+            if matches and settle_end is None and time.monotonic() < deadline:
+                settle_end = time.monotonic() + resolution["settle_s"]
+        remaining = (settle_end if settle_end is not None else deadline) - time.monotonic()
+        if remaining <= 0.0:
+            break
+        await asyncio.sleep(min(0.25, remaining))
+    common = {"cue": {key: resolution[key] for key in ("class_name", "attribute", "equals")}}
+    if ambiguous is not None:
+        return {
+            "outcome": "abstain", "reason": "ambiguous",
+            "candidate_ids": sorted(match["id"] for match in ambiguous["matches"]),
+            "observation": ambiguous, **common,
+        }
+    if fresh_frames == 0:
+        return {"outcome": "abstain", "reason": "no_fresh_observation", "candidate_ids": [], **common}
+    if settle_end is None:
+        return {"outcome": "abstain", "reason": "no_match", "candidate_ids": [], "observation": decision, **common}
+    if len(matches) != 1 or sightings[int(matches[0]["id"])] < 2:
+        return {
+            "outcome": "abstain", "reason": "unstable",
+            "candidate_ids": sorted(sightings), "observation": decision, **common,
+        }
+    return {"outcome": "resolved", "candidate": matches[0], "observation": decision, **common}
 
 
 def _write_reacquisition_result(
@@ -420,6 +770,12 @@ async def _stop_mission_driver(process: asyncio.subprocess.Process) -> None:
 
 
 def _interactive_arguments(line: str) -> tuple[str, dict[str, Any]] | None:
+    words = line.split()
+    if words and not words[0].startswith("/"):
+        # Only a bare single-word emergency is a command; any other plain text (including
+        # apostrophes that shlex would reject) goes to the commander unchanged.
+        word = words[0].lower()
+        return (word, {}) if len(words) == 1 and word in EMERGENCY_TOOLS else None
     try:
         parts = shlex.split(line)
     except ValueError as exc:
@@ -431,8 +787,10 @@ def _interactive_arguments(line: str) -> tuple[str, dict[str, Any]] | None:
         return "__quit__", {}
     if command == "/state":
         return "get_state", {}
-    if command in EMERGENCY_TOOLS:
-        return command, {}
+    if len(parts) == 1 and command.removeprefix("/") in EMERGENCY_TOOLS:
+        # /hold /rth /land are documented; the bare words stay accepted. A longer line such as
+        # "land next to the hiker" is operator free text for the commander, not an emergency.
+        return command.removeprefix("/"), {}
     if command == "/goto":
         if len(parts) != 4:
             raise ValueError("usage: /goto NORTH_M EAST_M ALTITUDE_M")
@@ -458,6 +816,31 @@ def _interactive_arguments(line: str) -> tuple[str, dict[str, Any]] | None:
     return None
 
 
+async def _commander_turns(commander: HorusCommander, lines: asyncio.Queue[str]) -> None:
+    """Send free text one request at a time, off the input loop, so emergencies stay typeable."""
+    while True:
+        line = await lines.get()
+        try:
+            print(await commander.submit_task(line))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+        finally:
+            lines.task_done()
+
+
+def _discard_queued(lines: asyncio.Queue[str]) -> int:
+    discarded = 0
+    while True:
+        try:
+            lines.get_nowait()
+        except asyncio.QueueEmpty:
+            return discarded
+        lines.task_done()
+        discarded += 1
+
+
 async def interactive(server_url: str, token: str, config: HorusConfig) -> None:
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
@@ -465,11 +848,14 @@ async def interactive(server_url: str, token: str, config: HorusConfig) -> None:
     headers = {"Authorization": f"Bearer {token}"}
     commander: HorusCommander | None = None
     commander_task: asyncio.Task | None = None
+    turns_task: asyncio.Task | None = None
+    lines: asyncio.Queue[str] = asyncio.Queue()
     print("HORUS REPL. /state /goto N E ALT /hold /rth /land /take_off [ALT]; free text goes to commander.")
     try:
         async with streamablehttp_client(server_url, headers=headers) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
+                quit_requested = False
                 while True:
                     try:
                         line = await asyncio.to_thread(input, "horus> ")
@@ -483,16 +869,38 @@ async def interactive(server_url: str, token: str, config: HorusConfig) -> None:
                             if commander is None:
                                 commander = HorusCommander(server_url, token, config.commander)
                                 commander_task = asyncio.create_task(commander.run())
-                            response = await commander.submit_task(line)
-                            print(response)
+                                turns_task = asyncio.create_task(_commander_turns(commander, lines))
+                            lines.put_nowait(line)
                         elif parsed[0] == "__quit__":
+                            quit_requested = True
                             break
+                        elif parsed[0] in EMERGENCY_TOOLS:
+                            # Free text typed before the emergency must not reach the model after it.
+                            discarded = _discard_queued(lines)
+                            if commander is None:
+                                result = await _tool_call(session, parsed[0])
+                                print(json.dumps(result, ensure_ascii=False, indent=2))
+                            else:
+                                # Interrupts the active model turn; uses this session until the
+                                # commander's own MCP session is connected.
+                                print(await commander.emergency(parsed[0], session=session))
+                            if discarded:
+                                print(f"discarded {discarded} queued commander request(s)", file=sys.stderr)
                         else:
                             result = await _tool_call(session, parsed[0], parsed[1])
                             print(json.dumps(result, ensure_ascii=False, indent=2))
                     except Exception as exc:
                         print(f"error: {exc}", file=sys.stderr)
+                if turns_task is not None and commander_task is not None and not quit_requested:
+                    # End of input: let requests already typed finish, unless the commander died.
+                    drained = asyncio.create_task(lines.join())
+                    await asyncio.wait({drained, commander_task}, return_when=asyncio.FIRST_COMPLETED)
+                    drained.cancel()
+                    await asyncio.gather(drained, return_exceptions=True)
     finally:
+        if turns_task is not None:
+            turns_task.cancel()
+            await asyncio.gather(turns_task, return_exceptions=True)
         if commander is not None:
             await commander.stop()
         if commander_task is not None:
