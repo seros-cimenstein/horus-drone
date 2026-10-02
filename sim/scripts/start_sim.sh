@@ -34,7 +34,25 @@ if ! command -v gz >/dev/null || ! command -v sim_vehicle.py >/dev/null; then
   printf 'Required tools gz and sim_vehicle.py must be present in the image.\n' >&2
   exit 1
 fi
+world_stem="${world_file##*/}"
+world_stem="${world_stem%.sdf}"
+world_dir="${world_file%/*}"
+# Canonical scenarios live in sim/scenarios; procedural worlds keep theirs beside the SDF.
+scenario_file="/horus/sim/scenarios/${world_stem}.yaml"
+[[ -f "${scenario_file}" ]] || scenario_file="${world_dir}/${world_stem}.yaml"
+# Worlds that carry the ToF payload (sim/models/horus_sensor_payload) also bridge it to
+# MAVLink so ArduPilot proximity avoidance has range data; the payload sits deeper in the
+# outdoor airframe, so the scoped topic chain differs per world.
+payload_chain=""
+if [[ "${world_stem}" == "horus_indoor" ]]; then
+  payload_chain="horus_iris/horus_sensor_payload"
+elif [[ "${world_stem}" == horus_forest* || "${world_stem}" == horus_urban* ]]; then
+  payload_chain="horus_iris/iris_with_gimbal/horus_sensor_payload"
+fi
 param_file="${HORUS_SITL_PARAM_FILE:-}"
+if [[ -z "${param_file}" && ( "${world_stem}" == horus_forest* || "${world_stem}" == horus_urban* ) ]]; then
+  param_file=/horus/config/ardupilot/horus_sitl_outdoor.parm
+fi
 if [[ -n "${param_file}" && ! -r "${param_file}" ]]; then
   printf 'SITL parameter file is not readable: %s\n' "${param_file}" >&2
   exit 1
@@ -72,46 +90,84 @@ export XDG_CONFIG_HOME="${run_dir}/.config"
 export XDG_DATA_HOME="${run_dir}/.local/share"
 export GZ_SIM_SYSTEM_PLUGIN_PATH="${plugin_root}/build"
 export GZ_SIM_RESOURCE_PATH="${plugin_root}/models:${plugin_root}/worlds:/horus/sim/models:/horus/sim/worlds"
+if [[ -d "${world_dir}/models" ]]; then
+  GZ_SIM_RESOURCE_PATH="${world_dir}/models:${GZ_SIM_RESOURCE_PATH}"
+fi
 
 # Job control gives Gazebo and SITL separate process groups so stop_sim.sh can
 # terminate each command and its children without touching unrelated processes.
 set -m
 rm -f "${log_dir}/gazebo.pid" "${log_dir}/sitl.pid" \
-  "${log_dir}/tof_bridge.pid" "${log_dir}/gui.pid"
+  "${log_dir}/tof_bridge.pid" "${log_dir}/civilian_life.pid" "${log_dir}/gui.pid"
+
+civilian_life_pid_matches() {
+  local pid="$1" command
+  [[ "${pid}" =~ ^[1-9][0-9]*$ && -r "/proc/${pid}/cmdline" ]] || return 1
+  command="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+  [[ "${command}" == *"/horus/sim/scripts/civilian_life.py"* ]]
+}
+
+terminate_pid_file() {
+  local pid_file="$1" pid
+  [[ -f "${pid_file}" ]] || return 0
+  read -r pid < "${pid_file}" || true
+  [[ "${pid:-}" =~ ^[1-9][0-9]*$ ]] || return 0
+  if [[ "${pid_file}" == "${log_dir}/civilian_life.pid" ]]; then
+    kill -0 "${pid}" 2>/dev/null || return 0
+    if ! civilian_life_pid_matches "${pid}"; then
+      printf 'Refusing to signal civilian PID %s: it is not civilian_life.py.\n' "${pid}" >&2
+      return 0
+    fi
+    kill -TERM -- "${pid}" 2>/dev/null || true
+  else
+    kill -TERM -- "-${pid}" 2>/dev/null || true
+  fi
+}
+bash /horus/scripts/start_grounder.sh
 
 cleanup() {
   local pid_file pid alive attempt
-  for pid_file in "${log_dir}/tof_bridge.pid" "${log_dir}/sitl.pid" \
-    "${log_dir}/gui.pid" "${log_dir}/gazebo.pid"; do
+  for pid_file in "${log_dir}/civilian_life.pid" "${log_dir}/tof_bridge.pid" \
+    "${log_dir}/sitl.pid" "${log_dir}/gui.pid" "${log_dir}/gazebo.pid"; do
     [[ -f "${pid_file}" ]] || continue
     read -r pid < "${pid_file}" || true
     [[ "${pid:-}" =~ ^[1-9][0-9]*$ ]] || continue
-    kill -TERM -- "-${pid}" 2>/dev/null || true
+    terminate_pid_file "${pid_file}"
   done
   for ((attempt = 0; attempt < 10; attempt++)); do
     alive=0
-    for pid_file in "${log_dir}/tof_bridge.pid" "${log_dir}/sitl.pid" \
-      "${log_dir}/gui.pid" "${log_dir}/gazebo.pid"; do
+    for pid_file in "${log_dir}/civilian_life.pid" "${log_dir}/tof_bridge.pid" \
+      "${log_dir}/sitl.pid" "${log_dir}/gui.pid" "${log_dir}/gazebo.pid"; do
       [[ -f "${pid_file}" ]] || continue
       read -r pid < "${pid_file}" || true
       [[ "${pid:-}" =~ ^[1-9][0-9]*$ ]] || continue
-      if kill -0 -- "-${pid}" 2>/dev/null; then
+      if [[ "${pid_file}" == "${log_dir}/civilian_life.pid" ]]; then
+        if civilian_life_pid_matches "${pid}" && kill -0 "${pid}" 2>/dev/null; then
+          alive=1
+        fi
+      elif kill -0 -- "-${pid}" 2>/dev/null; then
         alive=1
       fi
     done
     (( alive == 0 )) && break
     sleep 1
   done
-  for pid_file in "${log_dir}/tof_bridge.pid" "${log_dir}/sitl.pid" \
-    "${log_dir}/gui.pid" "${log_dir}/gazebo.pid"; do
+  for pid_file in "${log_dir}/civilian_life.pid" "${log_dir}/tof_bridge.pid" \
+    "${log_dir}/sitl.pid" "${log_dir}/gui.pid" "${log_dir}/gazebo.pid"; do
     [[ -f "${pid_file}" ]] || continue
     read -r pid < "${pid_file}" || true
     [[ "${pid:-}" =~ ^[1-9][0-9]*$ ]] || continue
-    kill -KILL -- "-${pid}" 2>/dev/null || true
+    if [[ "${pid_file}" == "${log_dir}/civilian_life.pid" ]]; then
+      if civilian_life_pid_matches "${pid}"; then
+        kill -KILL -- "${pid}" 2>/dev/null || true
+      fi
+    else
+      kill -KILL -- "-${pid}" 2>/dev/null || true
+    fi
   done
   wait 2>/dev/null || true
   rm -f "${log_dir}/gazebo.pid" "${log_dir}/sitl.pid" \
-    "${log_dir}/tof_bridge.pid" "${log_dir}/gui.pid"
+    "${log_dir}/tof_bridge.pid" "${log_dir}/civilian_life.pid" "${log_dir}/gui.pid"
 }
 trap 'exit 0' INT TERM
 trap cleanup EXIT
@@ -135,6 +191,63 @@ wait_for_tcp_port() {
   return 1
 }
 
+wait_for_world_stats() {
+  local world="$1"
+  local topic="/world/${world}/stats"
+  local deadline=$((SECONDS + 120))
+  while (( SECONDS < deadline )); do
+    if ! kill -0 "${gazebo_pid}" 2>/dev/null; then
+      printf 'Gazebo exited while waiting for statistics on %s; inspect %s/gazebo.log.\n' \
+        "${topic}" "${log_dir}" >&2
+      return 1
+    fi
+    if timeout 2s gz topic -e -t "${topic}" -n 1 >/dev/null 2>&1; then
+      printf 'Gazebo is publishing world statistics on %s.\n' "${topic}"
+      return 0
+    fi
+    sleep 0.25
+  done
+  printf 'Timed out waiting for world statistics on %s; inspect %s/gazebo.log.\n' \
+    "${topic}" "${log_dir}" >&2
+  return 1
+}
+
+
+
+keeper_pid=""
+
+stop_mavlink_keeper() {
+  if [[ -n "${keeper_pid}" ]] && kill -0 "${keeper_pid}" 2>/dev/null; then
+    kill -TERM "${keeper_pid}" 2>/dev/null || true
+    wait "${keeper_pid}" 2>/dev/null || true
+  fi
+  keeper_pid=""
+}
+
+start_mavlink_keeper() {
+  # SITL's lockstep world only iterates while a MAVLink client holds serial0, so the world
+  # statistics the civilian driver and this script wait for would race the bootstrap client's
+  # disconnect. Hold 5760 for the duration of that wait, then release it for the flight client.
+  /opt/horus-venv/bin/python -c '
+import time
+
+from pymavlink import mavutil
+
+link = None
+for _attempt in range(60):
+    try:
+        link = mavutil.mavlink_connection("tcp:127.0.0.1:5760")
+        break
+    except OSError:
+        time.sleep(0.5)
+if link is None:
+    raise SystemExit("mavlink keeper could not connect to SITL on 5760")
+while True:
+    link.recv_match(blocking=True, timeout=1)
+' > "${log_dir}/mavlink_keeper.log" 2>&1 &
+  keeper_pid=$!
+  printf '%s\n' "${keeper_pid}" > "${log_dir}/mavlink_keeper.pid"
+}
 
 cd -- "${run_dir}"
 gz sim -v4 -s -r --headless-rendering "${world_file}" \
@@ -151,14 +264,14 @@ sitl_args=(
   -v ArduCopter -f gazebo-iris --model JSON
   --add-param-file "${run_dir}/sitl-overrides.parm" --no-rebuild --no-mavproxy
 )
-if [[ "${world_file##*/}" == "horus_indoor.sdf" ]]; then
+if [[ -n "${payload_chain}" ]]; then
   # sim_vehicle.py forwards this to the SITL binary via its instance arguments.
   sitl_args+=(--sitl-instance-args=--serial2=tcp:5763)
 fi
 sim_vehicle.py "${sitl_args[@]}" > "${log_dir}/sitl.log" 2>&1 &
 sitl_pid=$!
 printf '%s\n' "${sitl_pid}" > "${log_dir}/sitl.pid"
-if [[ "${world_file##*/}" == "horus_indoor.sdf" ]]; then
+if [[ -n "${payload_chain}" ]]; then
   # A brief serial0 client makes ArduCopter open serial1/serial2 before the ToF bridge waits.
   if ! wait_for_tcp_port 5760; then
     exit 1
@@ -166,20 +279,53 @@ if [[ "${world_file##*/}" == "horus_indoor.sdf" ]]; then
   printf 'SITL serial0 TCP port 5760 accepted a bootstrap client; serial2 can now start.\n'
 fi
 bridge_pid=""
-if [[ "${world_file##*/}" == "horus_indoor.sdf" ]]; then
+if [[ -n "${payload_chain}" ]]; then
   (
     if ! wait_for_tcp_port 5763; then
       printf 'Timed out waiting for SITL TCP port 5763; inspect %s/sitl.log.\n' "${log_dir}" >&2
       exit 1
     fi
-    printf 'SITL serial2 TCP port 5763 is listening; starting the indoor ToF bridge.\n'
+    printf 'SITL serial2 TCP port 5763 is listening; starting the ToF bridge for %s.\n' "${world_stem}"
     export HORUS_PYTHON=/opt/horus-venv/bin/python
     export HORUS_MAVLINK_ENDPOINT=tcp:127.0.0.1:5763
     export HORUS_TOF_RATE_HZ=20
-    exec /horus/scripts/tof_bridges_indoor.sh
+    exec /horus/scripts/tof_bridges.sh --world "${world_stem}" --model-chain "${payload_chain}"
   ) > "${log_dir}/tof_bridge.log" 2>&1 &
   bridge_pid=$!
   printf '%s\n' "${bridge_pid}" > "${log_dir}/tof_bridge.pid"
+fi
+scenario_pid=""
+if [[ -f "${scenario_file}" ]]; then
+  civilian_driver=/horus/sim/scripts/civilian_life.py
+  if [[ ! -r "${civilian_driver}" ]]; then
+    printf 'Warning: civilian scenario %s exists but driver is missing; continuing without civilian motion.\n' \
+      "${scenario_file}" >&2
+  else
+    start_mavlink_keeper
+    if ! wait_for_world_stats "${world_stem}"; then
+      stop_mavlink_keeper
+      exit 1
+    fi
+    stop_mavlink_keeper
+    (
+      exec /opt/horus-venv/bin/python "${civilian_driver}" \
+        --scenario "${scenario_file}" --group ambient \
+        --trace "${log_dir}/civilians.jsonl"
+    ) > "${log_dir}/civilian_life.log" 2>&1 &
+    scenario_pid="$!"
+    for ((attempt = 0; attempt < 50; attempt++)); do
+      civilian_life_pid_matches "${scenario_pid}" && break
+      kill -0 "${scenario_pid}" 2>/dev/null || break
+      sleep 0.02
+    done
+    if ! civilian_life_pid_matches "${scenario_pid}"; then
+      printf 'Civilian motion PID %s is not civilian_life.py; inspect %s/civilian_life.log.\n' \
+        "${scenario_pid}" "${log_dir}" >&2
+      kill -TERM "${scenario_pid}" 2>/dev/null || true
+      exit 1
+    fi
+    printf '%s\n' "${scenario_pid}" > "${log_dir}/civilian_life.pid"
+  fi
 fi
 
 gui_pid=""
@@ -189,10 +335,19 @@ if [[ "${gui_enabled}" == 1 ]]; then
     printf 'Gazebo GUI config is not readable: %s\n' "${gui_config}" >&2
     exit 1
   fi
+  # The demo config binds a few panels to indoor world topics; retarget them for any other world.
+  if [[ "${world_stem}" != horus_indoor ]]; then
+    gui_config="${run_dir}/horus_demo-${world_stem}.config"
+    sed "s#/world/horus_indoor/#/world/${world_stem}/#g" \
+      /horus/sim/gui/horus_demo.config > "${gui_config}"
+    printf 'GUI panels bound to /world/%s/ topics.\n' "${world_stem}"
+  fi
   gz sim -g --gui-config "${gui_config}" > "${log_dir}/gui.log" 2>&1 &
   gui_pid=$!
   printf '%s\n' "${gui_pid}" > "${log_dir}/gui.pid"
-  if [[ "${world_file##*/}" == "horus_indoor.sdf" ]] \
+  # Procedural stems (horus_forest_p*, horus_urban_p*) use the same horus_iris airframe and
+  # camera topics as the canonical worlds, so they need the same camera-follow check.
+  if [[ "${world_stem}" == horus_indoor || "${world_stem}" == horus_forest* || "${world_stem}" == horus_urban* ]] \
     && ! wait_for_gui_follow "${gui_pid}" "${log_dir}" horus_iris; then
     exit 1
   fi
@@ -215,7 +370,14 @@ while true; do
     exit 1
   fi
   if [[ -n "${bridge_pid}" ]] && ! kill -0 "${bridge_pid}" 2>/dev/null; then
-    printf 'Indoor ToF bridge exited; inspect %s/tof_bridge.log.\n' "${log_dir}" >&2
+    # The bridge waits for its first scan without a timeout, so any exit is a real failure
+    # (bad arguments, topic resolution, MAVLink connect). Silently continuing would drop the
+    # proximity data that PRX1_TYPE/AVOID_ENABLE depend on in these worlds.
+    printf 'ToF bridge exited; inspect %s/tof_bridge.log.\n' "${log_dir}" >&2
+    exit 1
+  fi
+  if [[ -n "${scenario_pid}" ]] && ! civilian_life_pid_matches "${scenario_pid}"; then
+    printf 'Civilian motion driver exited; inspect %s/civilian_life.log.\n' "${log_dir}" >&2
     exit 1
   fi
   if (( SECONDS >= disk_check_deadline )); then

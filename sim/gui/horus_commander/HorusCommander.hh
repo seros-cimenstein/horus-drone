@@ -22,6 +22,12 @@ class HorusCommander : public gz::gui::Plugin
   /// \return True when a non-empty task was published successfully.
   public: Q_INVOKABLE bool SendTask(const QString &_text);
 
+  /// \brief Publish one emergency action to the authenticated host bridge.
+  public: Q_INVOKABLE bool SendEmergency(const QString &_action);
+
+  /// \brief Start a fresh commander mission.
+  public: Q_INVOKABLE bool ResetMission();
+
   /// \brief Get the event log for display in QML.
   public: QString EventLog() const;
 
@@ -40,6 +46,8 @@ class HorusCommander : public gz::gui::Plugin
 
   private: gz::transport::Node node_;
   private: gz::transport::Node::Publisher taskPublisher_;
+  private: gz::transport::Node::Publisher emergencyPublisher_;
+  private: gz::transport::Node::Publisher resetPublisher_;
   private: QStringList eventLines_;
   private: QString eventLog_{QStringLiteral("Waiting for commander events...")};
   private: QString status_{QStringLiteral("Waiting for commander state...")};

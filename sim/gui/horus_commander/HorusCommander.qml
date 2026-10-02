@@ -42,6 +42,32 @@ Rectangle {
       }
     }
 
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 6
+
+      Button {
+        objectName: "holdButton"
+        text: qsTr("HOLD")
+        onClicked: HorusCommander.SendEmergency("hold")
+      }
+      Button {
+        objectName: "landButton"
+        text: qsTr("LAND")
+        onClicked: HorusCommander.SendEmergency("land")
+      }
+      Button {
+        objectName: "rthButton"
+        text: qsTr("RTH")
+        onClicked: HorusCommander.SendEmergency("rth")
+      }
+      Button {
+        objectName: "newMissionButton"
+        text: qsTr("NEW MISSION")
+        onClicked: HorusCommander.ResetMission()
+      }
+    }
+
     Label {
       text: qsTr("Events")
       font.bold: true

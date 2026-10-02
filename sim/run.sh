@@ -20,13 +20,20 @@ if [[ "${command}" == "gui-client" ]]; then
   RUN_ROOT="${SIM_DIR}/run/gui-client"
 fi
 DOCKERFILE="${SIM_DIR}/docker/Dockerfile"
+source "${SIM_DIR}/scripts/procedural_world.sh"
 
 usage() {
   cat <<'EOF'
-Usage: ./sim/run.sh <build|start [--gui] [--gui-client] [world]|gui-client|stop [--purge]|status|s0|frame|logs>
+Usage: ./sim/run.sh <build|start [--procedural [--seed N] [--kind forest|urban] [--stratum baseline|chaotic]] [--gui] [--gui-client] [world]|gui-client|stop [--purge]|status|s0|frame|logs>
 
   build             Build the Ubuntu 22.04 + Gazebo Harmonic + ArduPilot image
   start [--gui] [--gui-client] [world]
+  --procedural      Generate a randomized world (sim/generated) and start it; without
+                    --seed a random 5-digit seed is chosen and printed for reproduction
+  --seed N          Procedural seed (implies --procedural)
+  --kind KIND       Procedural world kind: forest (default) or urban (implies --procedural)
+  --stratum NAME    Force a dressing stratum: baseline or chaotic (implies --procedural;
+                    default: sampled from the seed)
   --gui             Run Gazebo GUI beside the local server and SITL
   gui-client        Run only the local Gazebo GUI and commander bridge for a remote server
   HORUS_SIM_GPU=auto|amd|mesa|on|off selects NVIDIA/Mesa rendering or CPU fallback
@@ -57,8 +64,45 @@ case "${command}" in
     world_set=0
     gui_enabled=0
     gui_client_enabled=0
+    procedural=0
+    seed=""
+    kind=""
+    stratum=""
     while (( $# > 0 )); do
       case "$1" in
+        --procedural)
+          procedural=1
+          ;;
+        --seed)
+          if (( $# < 2 )) || [[ ! "$2" =~ ^[1-9][0-9]*$ ]]; then
+            printf -- '--seed requires a positive integer (got %s).\n' "${2:-<missing>}" >&2
+            usage >&2
+            exit 2
+          fi
+          seed="$2"
+          procedural=1
+          shift
+          ;;
+        --kind)
+          if (( $# < 2 )) || [[ ! "$2" =~ ^(forest|urban)$ ]]; then
+            printf -- '--kind must be forest or urban (got %s).\n' "${2:-<missing>}" >&2
+            usage >&2
+            exit 2
+          fi
+          kind="$2"
+          procedural=1
+          shift
+          ;;
+        --stratum)
+          if (( $# < 2 )) || [[ ! "$2" =~ ^(baseline|chaotic)$ ]]; then
+            printf -- '--stratum must be baseline or chaotic (got %s).\n' "${2:-<missing>}" >&2
+            usage >&2
+            exit 2
+          fi
+          stratum="$2"
+          procedural=1
+          shift
+          ;;
         --gui)
           gui_enabled=1
           ;;
@@ -87,6 +131,25 @@ case "${command}" in
       esac
       shift
     done
+    if (( procedural == 1 )); then
+      if (( gui_client_enabled == 1 )); then
+        printf 'gui-client observes a remote world and cannot start a procedural world.\n' >&2
+        exit 2
+      fi
+      if (( world_set == 1 )); then
+        printf -- '--procedural generates its own world; drop the world argument (%s).\n' "${world}" >&2
+        usage >&2
+        exit 2
+      fi
+      kind="${kind:-forest}"
+      if [[ -z "${seed}" ]]; then
+        seed="$(( (RANDOM << 15 | RANDOM) % 90000 + 10000 ))"
+        printf 'Random procedural seed for this run: %s\n' "${seed}"
+      fi
+      if ! world="$(generate_procedural_world "${kind}" "${seed}" "${stratum}")"; then
+        exit 1
+      fi
+    fi
     run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
     if (( gui_client_enabled == 1 )); then
       if (( world_set == 1 )); then
@@ -278,7 +341,17 @@ case "${command}" in
         --env HORUS_COMMANDER_TOKEN
         --env "HORUS_MCP_URL=${HORUS_MCP_URL}"
         --env "HORUS_COMMANDER_URL=${HORUS_COMMANDER_URL}"
+        --env "HORUS_GUI_WORLD=${HORUS_GUI_WORLD:-horus_indoor}"
       )
+    fi
+    resource_args=()
+    if (( gui_client_enabled == 0 )); then
+      if [[ -n "${HORUS_SIM_MEMORY_LIMIT:-}" ]]; then
+        resource_args+=(--memory "${HORUS_SIM_MEMORY_LIMIT}")
+      fi
+      if [[ -n "${HORUS_SIM_MEMORY_SWAP_LIMIT:-}" ]]; then
+        resource_args+=(--memory-swap "${HORUS_SIM_MEMORY_SWAP_LIMIT}")
+      fi
     fi
     run_dir="${RUN_ROOT}/${run_id}"
     docker run --detach --init \
@@ -287,6 +360,7 @@ case "${command}" in
       "${gpu_args[@]}" \
       "${gui_args[@]}" \
       "${gz_args[@]}" \
+      "${resource_args[@]}" \
       "${gui_client_env_args[@]}" \
       --env "HORUS_SITL_PARAM_FILE=${HORUS_SITL_PARAM_FILE:-}" \
       --env HORUS_SIM_CONTAINER=1 \
@@ -333,7 +407,9 @@ case "${command}" in
       printf 'Started %s. Runtime files: %s/run/%s/ (Gazebo and SITL logs are in logs/).\n' \
         "${CONTAINER}" "${SIM_DIR}" "${run_id}"
       printf 'MAVLink flight endpoint (single TCP client): tcp:127.0.0.1:5760\n'
-      printf 'Indoor ToF bridge endpoint: tcp:127.0.0.1:5763\n'
+      if [[ "${world}" == "horus_indoor.sdf" ]]; then
+        printf 'Indoor ToF bridge endpoint: tcp:127.0.0.1:5763\n'
+      fi
     fi
     ;;
   stop)

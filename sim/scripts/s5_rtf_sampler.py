@@ -23,10 +23,12 @@ def _stop(_signum: int, _frame: object) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) != 3:
-        raise SystemExit("usage: s5_rtf_sampler.py OUTPUT_JSONL STOP_FILE")
+    if len(sys.argv) not in (3, 4):
+        raise SystemExit("usage: s5_rtf_sampler.py OUTPUT_JSONL STOP_FILE [WORLD]")
     output_path = Path(sys.argv[1])
     stop_path = Path(sys.argv[2])
+    world = sys.argv[3] if len(sys.argv) == 4 else "horus_indoor"
+    topic = f"/world/{world}/stats"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
@@ -48,12 +50,12 @@ def main() -> None:
         node = Node()
         subscribed = node.subscribe(
             WorldStatistics,
-            "/world/horus_indoor/stats",
+            topic,
             record,
         )
         if not subscribed:
-            raise RuntimeError("could not subscribe to /world/horus_indoor/stats")
-        print(f"sampling Gazebo RTF into {output_path}", flush=True)
+            raise RuntimeError(f"could not subscribe to {topic}")
+        print(f"sampling Gazebo RTF from {topic} into {output_path}", flush=True)
         while not _STOP.wait(0.1):
             if stop_path.exists():
                 break

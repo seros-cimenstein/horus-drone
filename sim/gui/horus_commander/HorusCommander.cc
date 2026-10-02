@@ -21,6 +21,17 @@ HorusCommander::HorusCommander()
   if (!this->taskPublisher_)
     gzerr << "Unable to publish HORUS tasks on [/horus/task]." << std::endl;
 
+  this->emergencyPublisher_ = this->node_.Advertise<gz::msgs::StringMsg>(
+      "/horus/emergency");
+  if (!this->emergencyPublisher_)
+    gzerr << "Unable to publish HORUS emergencies on [/horus/emergency]."
+          << std::endl;
+
+  this->resetPublisher_ = this->node_.Advertise<gz::msgs::StringMsg>(
+      "/horus/reset");
+  if (!this->resetPublisher_)
+    gzerr << "Unable to publish HORUS resets on [/horus/reset]." << std::endl;
+
   if (!this->node_.Subscribe("/horus/events",
       &HorusCommander::OnEventMsg, this))
   {
@@ -53,6 +64,33 @@ bool HorusCommander::SendTask(const QString &_text)
   gz::msgs::StringMsg msg;
   msg.set_data(_text.toStdString());
   return this->taskPublisher_.Publish(msg);
+}
+
+/////////////////////////////////////////////////
+bool HorusCommander::SendEmergency(const QString &_action)
+{
+  if (!this->emergencyPublisher_ ||
+      (_action != QStringLiteral("hold") &&
+       _action != QStringLiteral("land") &&
+       _action != QStringLiteral("rth")))
+  {
+    return false;
+  }
+
+  gz::msgs::StringMsg msg;
+  msg.set_data(_action.toStdString());
+  return this->emergencyPublisher_.Publish(msg);
+}
+
+/////////////////////////////////////////////////
+bool HorusCommander::ResetMission()
+{
+  if (!this->resetPublisher_)
+    return false;
+
+  gz::msgs::StringMsg msg;
+  msg.set_data("reset");
+  return this->resetPublisher_.Publish(msg);
 }
 
 /////////////////////////////////////////////////

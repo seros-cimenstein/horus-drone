@@ -48,6 +48,22 @@ if [[ ! -r "${gui_config}" ]]; then
   printf 'Gazebo GUI config is not readable: %s\n' "${gui_config}" >&2
   exit 1
 fi
+# The demo config binds a few panels to world-scoped topics; retarget them when the remote
+# world is not the indoor demo (procedural worlds are named horus_<kind>_p<seed>).
+gui_world="${HORUS_GUI_WORLD:-horus_indoor}"
+if [[ ! "${gui_world}" =~ ^[A-Za-z0-9_]+$ ]]; then
+  printf 'HORUS_GUI_WORLD must be a plain world name (got %s).\n' "${gui_world}" >&2
+  exit 2
+fi
+if [[ "${gui_world}" != horus_indoor ]]; then
+  gui_config="${run_dir}/horus_demo-${gui_world}.config"
+  if ! sed "s#/world/horus_indoor/#/world/${gui_world}/#g" \
+    /horus/sim/gui/horus_demo.config > "${gui_config}"; then
+    printf 'Could not retarget the GUI config for world %s.\n' "${gui_world}" >&2
+    exit 1
+  fi
+  printf 'GUI panels bound to /world/%s/ topics.\n' "${gui_world}"
+fi
 
 set -m
 gz sim -g --gui-config "${gui_config}" > "${log_dir}/gui.log" 2>&1 &
