@@ -288,3 +288,37 @@ def test_urban_red_shirt_is_unique_in_its_crowd(worlds, kind, seed):
     near = [p["model"] for p in people if reads_red(p)
             and math.dist(p["position"], red["position"]) <= 15.0]
     assert near == [red["model"]], f"{w.label}: red clothing near the target: {near}"
+
+
+@_all([("forest", seed) for seed in [None] + list(SEEDS)])
+def test_forest_posture_targets_are_observable(worlds, kind, seed):
+    """Every posture the campaign targets needs a person the detector can actually see.
+
+    The approach/orbit tests pick a lying or sitting person; the canopy-hidden missing hiker
+    stays for the search mission, so a second prone casualty must sit in the open with a
+    good-slant vantage (recall is poor beyond ~12 m).
+    """
+    import random as _random
+
+    from sim.worldgen.plan import Camera, column_clearance, person_point, plan_vantage
+
+    w = worlds(kind, seed)
+    camera = Camera()
+    transit = w.manifest["transit_altitude_m"]
+    for posture in ("lying", "sitting"):
+        people = [person for person in w.manifest["people"] if person["posture"] == posture]
+        assert people, f"{w.label}: no {posture} person"
+        observable = []
+        for person in people:
+            point = person_point(person, w.ground, posture)
+            if column_clearance(w.world, point[0], point[1], point[2] + 0.5, transit, 0.6) < 2.0:
+                continue
+            vantage = plan_vantage(w.world, w.ground, camera, person["model"], point,
+                                   _random.Random(seed or 0), transit_alt=transit)
+            if vantage is not None and vantage.slant_m <= 12.0:
+                observable.append(person["model"])
+        assert observable, f"{w.label}: no observable {posture} person (open sky + <= 12 m slant)"
+
+    # The search mission keeps its canopy-hidden hiker alongside the open casualty.
+    roles = {person["role"] for person in w.manifest["people"]}
+    assert {"missing_hiker", "casualty"} <= roles, f"{w.label}: {sorted(roles)}"

@@ -463,6 +463,34 @@
       ],
       "route_mode": "once",
       "speed_m_s": 1.25
+    },
+    {
+      "model": "civ_casualty_01",
+      "role": "casualty",
+      "asset": "person_laying_kinematic",
+      "group": "ambient",
+      "behavior": "idle",
+      "position": [
+        -9.5,
+        33.5
+      ],
+      "yaw_deg": 137.50987083139756,
+      "posture": "lying",
+      "clothing": "orange",
+      "shirt_colour_attribute": "red",
+      "shirt_colour_source": "measured_legacy_asset",
+      "possible_shirt_colours": [
+        "red"
+      ],
+      "envelope": {
+        "x_min_m": -0.27,
+        "x_max_m": 0.27,
+        "y_min_m": -0.963,
+        "y_max_m": 0.963,
+        "top_z_m": 0.323,
+        "torso_z_m": 0.25,
+        "height_m": 1.926
+      }
     }
   ],
   "vehicles": [],
