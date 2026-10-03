@@ -89,6 +89,27 @@ def _replace_once(text: str, old: str, new: str) -> str:
     return text.replace(old, new)
 
 
+# Generated worlds render camera and ToF at 5 Hz instead of 10: measured live on Koko (1.2 km
+# forest, civilians moving) the drone's render sensors bound the world at RTF 0.14 at 10 Hz and
+# 0.28 at 5 Hz. Perception already processes at most 5 fps (perception.max_fps), ArduPilot's
+# proximity timeout is 500 ms of sim time, and HORUS's 1.5 s telemetry age holds above RTF 0.14.
+SENSOR_RATE_HZ = 5
+
+
+def _sensor_rate(text: str, rate_hz: int) -> str:
+    """Set ``<update_rate>`` of every ``<sensor>`` in ``text``; plugin/model rates are untouched."""
+    def one(match: re.Match[str]) -> str:
+        block, count = re.subn(r"<update_rate>[^<]*</update_rate>",
+                               f"<update_rate>{rate_hz}</update_rate>", match.group(0))
+        if count != 1:
+            raise ValueError("every sensor must declare exactly one update_rate")
+        return block
+    text, sensors = re.subn(r"<sensor\b.*?</sensor>", one, text, flags=re.S)
+    if sensors == 0:
+        raise ValueError("no <sensor> found")
+    return text
+
+
 _PROXIMITY_SENSOR = re.compile(
     r'\n      <sensor name="proximity_[^"]+" type="gpu_lidar">.*?</sensor>', re.S)
 # -pi (dead astern) through 3*pi/4 with eight samples: beams every 45 degrees at
@@ -153,10 +174,12 @@ def main() -> int:
     for collision, mesh in (("yaw_collision", "yaw_arm"), ("roll_collision", "roll_arm"),
                             ("pitch_collision", "camera_enclosure")):
         gimbal = _boxify(gimbal, collision, _dae_points(meshes / f"{mesh}.dae"))
+    gimbal = _sensor_rate(gimbal, SENSOR_RATE_HZ)
     _write("horus_gimbal_small_3d_procedural", gimbal,
            "Outdoor 84 degree gimbal camera with box arm collisions.",
            "Derived by sim/scripts/derive_procedural_airframe.py from horus_gimbal_small_3d_outdoor.\n"
-           "Change: yaw/roll/pitch arm mesh collisions replaced by their mesh-bound boxes.\n")
+           "Change: yaw/roll/pitch arm mesh collisions replaced by their mesh-bound boxes; camera\n"
+           f"update rate {SENSOR_RATE_HZ} Hz (generated-world render budget).\n")
 
     airframe = (MODELS / "horus_iris_with_gimbal_outdoor" / "model.sdf").read_text(encoding="utf-8")
     for old, new in (("model://iris_with_standoffs<", "model://horus_iris_standoffs_procedural<"),
@@ -172,12 +195,13 @@ def main() -> int:
            "Change: includes the box-collision Iris body and gimbal copies, and the single-ring\n"
            "horus_sensor_payload_procedural under the include name horus_sensor_payload.\n")
 
-    _write("horus_sensor_payload_procedural", _ring_payload(),
+    _write("horus_sensor_payload_procedural", _sensor_rate(_ring_payload(), SENSOR_RATE_HZ),
            "Generated-world ToF payload: one 8-beam proximity ring and the downward rangefinder.",
            "Derived by sim/scripts/derive_procedural_airframe.py from horus_sensor_payload.\n"
            "Change: the six single-beam proximity_* ToF sensors are replaced by one 8-beam\n"
            "proximity_ring gpu_lidar at the payload origin (beams every 45 degrees from -180 to\n"
-           "135, same 10 Hz and 0.05-4.0 m range); range_down, links and inertial are unchanged.\n")
+           f"135, 0.05-4.0 m range); ring and range_down run at {SENSOR_RATE_HZ} Hz (generated-world\n"
+           "render budget); links and inertial are unchanged.\n")
 
     _write("horus_iris_procedural",
            '<?xml version="1.0"?>\n<sdf version="1.9"><model name="horus_iris_procedural"><include>'

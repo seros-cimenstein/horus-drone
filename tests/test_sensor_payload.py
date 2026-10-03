@@ -5,6 +5,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from horus.tof_bridge.cli import PAYLOAD_SENSORS
+from sim.scripts.derive_procedural_airframe import SENSOR_RATE_HZ
 
 ROOT = Path(__file__).parents[1]
 
@@ -55,7 +56,8 @@ def test_procedural_payload_carries_exactly_the_ring_and_the_down_rangefinder():
     ring = sensors["proximity_ring"]
     assert ring.get("type") == "gpu_lidar"
     assert [float(value) for value in ring.findtext("pose").split()] == [0.0, 0.0, 0.08, 0.0, 0.0, 0.0]
-    assert ring.findtext("update_rate") == "10"
+    assert ring.findtext("update_rate") == str(SENSOR_RATE_HZ)
+    assert sensors["range_down"].findtext("update_rate") == str(SENSOR_RATE_HZ)
     assert ring.findtext("always_on") == "true"
     assert ring.findtext("visualize") == "false"
     assert [float(ring.findtext(f"lidar/range/{tag}"))

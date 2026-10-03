@@ -17,7 +17,7 @@
       </inertial>
       <sensor name="proximity_ring" type="gpu_lidar">
         <pose>0 0 0.08 0 0 0</pose>
-        <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
+        <update_rate>5</update_rate><always_on>true</always_on><visualize>false</visualize>
         <lidar>
           <scan>
             <horizontal><samples>8</samples><resolution>1</resolution><min_angle>-3.1415926536</min_angle><max_angle>2.3561944902</max_angle></horizontal>
@@ -28,7 +28,7 @@
       </sensor>
       <sensor name="range_down" type="gpu_lidar">
         <pose>-0.20 0 0.04 0 1.5707963268 0</pose>
-        <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
+        <update_rate>5</update_rate><always_on>true</always_on><visualize>false</visualize>
         <lidar>
           <scan>
             <horizontal><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></horizontal>
