@@ -57,6 +57,18 @@ class _FailingGrounder:
         raise RuntimeError("service offline")
 
 
+class _PromptRecordingGrounder:
+    """Returns fixed boxes for any vocabulary (used by the person-pass label tests)."""
+
+    def __init__(self, boxes):
+        self.boxes = boxes
+        self.called = threading.Event()
+
+    def detect(self, image, prompts, *, box_threshold=0.30, text_threshold=0.25):
+        self.called.set()
+        return self.boxes
+
+
 def _moving_square(x: int) -> np.ndarray:
     image = np.full((480, 640, 3), 25, dtype=np.uint8)
     cv2.rectangle(image, (x, 170), (x + 59, 229), (235, 235, 235), -1)
@@ -148,6 +160,123 @@ def test_open_vocabulary_seeds_new_boxes_and_deduplicates_detector_tracks():
         assert len(detected) == 1
         assert detected[0]["data"]["label"] == "red mug"
         assert detected[0]["data"]["score"] == 0.88
+    finally:
+        system.close()
+
+
+def test_person_prompt_maps_a_repeated_span_onto_the_vocabulary_term():
+    # The grounder returns the matched text span; a repeat ("person person person") is normalised
+    # to the configured term, and the raw span stays visible on the candidate row.
+    grounder = _PromptRecordingGrounder([GroundingBox((100, 170, 160, 230), 0.44, "person person person")])
+    system = PerceptionSystem(
+        _EmptyDetector(),
+        PersistentTracker(),
+        grounder=grounder,
+        open_vocab_hz=20.0,
+    )
+    try:
+        system.process_frame(_moving_square(100), timestamp=50.0)
+        system.set_vocabulary(["person", "person lying on the ground"])
+        assert grounder.called.wait(2.0)
+        assert _wait_for(lambda: any(row["source"] == "open_vocab" for row in system.list_candidates()))
+
+        seeded = [row for row in system.list_candidates() if row["source"] == "open_vocab"]
+
+        assert [row["class_name"] for row in seeded] == ["person"]
+        assert seeded[0]["attributes"]["grounder_span"] == "person person person"
+        # The row carries the provenance and no person evidence: the executor must not range it
+        # from the person height without target_size_m.
+        assert seeded[0]["source"] == "open_vocab"
+        assert seeded[0]["person_evidence"] is False
+    finally:
+        system.close()
+
+
+def test_person_prompt_maps_a_fragment_span_onto_its_vocabulary_term():
+    # "ground" is a fragment of the lying phrase: it names that term, never a bare person label.
+    grounder = _PromptRecordingGrounder([GroundingBox((100, 170, 160, 230), 0.44, "ground ground")])
+    system = PerceptionSystem(
+        _EmptyDetector(),
+        PersistentTracker(),
+        grounder=grounder,
+        open_vocab_hz=20.0,
+    )
+    try:
+        system.process_frame(_moving_square(100), timestamp=55.0)
+        system.set_vocabulary(["person", "person lying on the ground"])
+        assert grounder.called.wait(2.0)
+        assert _wait_for(lambda: any(row["source"] == "open_vocab" for row in system.list_candidates()))
+
+        seeded = [row for row in system.list_candidates() if row["source"] == "open_vocab"]
+
+        assert [row["class_name"] for row in seeded] == ["person lying on the ground"]
+    finally:
+        system.close()
+
+
+def test_object_prompt_keeps_its_own_label_next_to_a_person_prompt():
+    grounder = _PromptRecordingGrounder([GroundingBox((100, 170, 160, 230), 0.51, "red mug")])
+    system = PerceptionSystem(
+        _EmptyDetector(),
+        PersistentTracker(),
+        grounder=grounder,
+        open_vocab_hz=20.0,
+    )
+    try:
+        system.process_frame(_moving_square(100), timestamp=60.0)
+        system.set_vocabulary(["person", "red mug"])
+        assert grounder.called.wait(2.0)
+        assert _wait_for(lambda: any(row["source"] == "open_vocab" for row in system.list_candidates()))
+
+        seeded = [row for row in system.list_candidates() if row["source"] == "open_vocab"]
+
+        assert [row["class_name"] for row in seeded] == ["red mug"]
+    finally:
+        system.close()
+
+
+def test_open_vocabulary_seed_never_gains_a_shirt_colour_without_a_detector_person():
+    # _with_shirt_colour classifies only detector person detections. A grounder seed must not
+    # acquire a colour attribute: the executor reads shirt_colour as person evidence, so a colour
+    # on an open-vocabulary-only track would bypass the person-evidence gate.
+    grounder = _PromptRecordingGrounder([GroundingBox((100, 170, 160, 230), 0.44, "person")])
+    system = PerceptionSystem(
+        _EmptyDetector(),
+        PersistentTracker(),
+        grounder=grounder,
+        open_vocab_hz=20.0,
+    )
+    try:
+        for step in range(4):
+            system.process_frame(_moving_square(100), timestamp=80.0 + 0.2 * step)
+        system.set_vocabulary(["person"])
+        assert grounder.called.wait(2.0)
+        assert _wait_for(lambda: any(row["source"] == "open_vocab" for row in system.list_candidates()))
+
+        seeded = [row for row in system.list_candidates() if row["source"] == "open_vocab"]
+
+        assert seeded
+        assert all("shirt_colour" not in row["attributes"] for row in seeded)
+        assert all(row["person_evidence"] is False for row in seeded)
+    finally:
+        system.close()
+
+
+def test_person_vocabulary_without_a_grounder_stays_detector_only():
+    # Outdoor profiles carry a prone-pass vocabulary; with grounder_url unset the pass must be
+    # inert (no worker, no error) rather than a startup failure.
+    system = PerceptionSystem(
+        _FixedDetector(Detection((100, 170, 160, 230), class_name="person")),
+        PersistentTracker(),
+        open_vocab_hz=20.0,
+        vocabulary=["person", "person lying on the ground"],
+    )
+    try:
+        observations = [system.process_frame(_moving_square(100 + index), timestamp=70.0 + index)
+                        for index in range(2)]
+        assert [item.frame_id for item in observations] == [1, 2]
+        assert system._open_vocab_thread is None
+        assert {row["source"] for row in system.list_candidates()} == {"detector"}
     finally:
         system.close()
 
