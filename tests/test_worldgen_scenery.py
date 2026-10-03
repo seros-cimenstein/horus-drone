@@ -150,32 +150,33 @@ def test_map_spec_grid_math_for_canonical_and_procedural():
         MapSpec(75.0, 0.0)
 
 
-def test_proxies_land_in_the_tile_containing_their_center():
-    # A proxy belongs to the tile containing its centre: y = -0.5 falls in tile row -1 and
+def test_tiles_hold_visuals_and_one_merged_collision_carries_every_proxy():
+    # Visuals go to the tile containing the instance: y = -0.5 falls in tile row -1 and
     # x = 100.0 (exactly on the boundary) in tile column 1 because tiles are [k*100, (k+1)*100).
     bundle = emit_scenery(WORLD, [
         SceneryInstance("tree_test", 10.0, 20.0),
         SceneryInstance("tree_test", 99.0, -0.5),
         SceneryInstance("tree_test", 100.0, 0.0, yaw=math.pi / 2),
     ], [], assets=REGISTRY)
-    # Tiles are emitted in (ix, iy) order: (0, -1), (0, 0), (1, 0).
-    models = [primitive.model for primitive in bundle.proxies]
-    assert models == (["scenery_0_-1/scenery_collision"] * 2 + ["scenery_0_0/scenery_collision"] * 2
-                      + ["scenery_1_0/scenery_collision"] * 2)
-    # Proxy names embed the owner (asset key or mesh name) between the collision model and the
-    # per-tile index, so clearance/hazard oracles can still recognise what a hull stands for.
-    names = [primitive.name for primitive in bundle.proxies]
-    assert names == [*[f"scenery_0_-1/scenery_collision/tree_test_{n}" for n in range(2)],
-                     *[f"scenery_0_0/scenery_collision/tree_test_{n}" for n in range(2)],
-                     *[f"scenery_1_0/scenery_collision/tree_test_{n}" for n in range(2)]]
+    # All proxies belong to the single merged collision; tile order (0,-1), (0,0), (1,0) is kept
+    # and the owner label (asset key or mesh name) stays in each oracle name for hazard tokens.
+    assert {primitive.model for primitive in bundle.proxies} == {"scenery_collision/scenery_collision"}
+    assert [primitive.name for primitive in bundle.proxies] == [
+        f"scenery_collision/scenery_collision/tree_test_{n}" for n in range(6)]
+    assert [primitive.transform[:2] for primitive in bundle.proxies][::2] == [
+        (99.0, -0.5), (10.0, 20.0), (100.0, 0.0)]
     # The tile model's pose is its 100 m corner; the instance visual sits at the local offset.
     assert '<model name="scenery_1_0"><static>true</static><pose>100 0 0 0 0 0</pose>' in bundle.sdf
     assert '<model name="scenery_0_-1"><static>true</static><pose>0 -100 0 0 0 0</pose>' in bundle.sdf
     assert '<visual name="tree_test_0"><pose>0 0 0 0 0 1.5708</pose>' in bundle.sdf
     assert '<visual name="tree_test_0"><pose>99 99.5 0 0 0 0</pose>' in bundle.sdf
-    # Every tile with proxies carries exactly one scenery_collision trimesh.
-    assert bundle.sdf.count('collision name="scenery_collision"') == 3
-    assert sum(name.endswith("_collision.obj") for name in bundle.files) == 3
+    # Tiles are visual-only; one world-space trimesh on the scenery bit covers every proxy.
+    assert bundle.sdf.count('collision name="scenery_collision"') == 1
+    assert ('<model name="scenery_collision"><static>true</static><link name="scenery">'
+            '<collision name="scenery_collision">') in bundle.sdf
+    assert "<collide_bitmask>0x0010</collide_bitmask>" in bundle.sdf
+    assert [name for name in bundle.files if name.endswith(".obj")] == [
+        f"models/{WORLD}_scenery/meshes/scenery_collision.obj"]
 
 
 def test_instance_visuals_apply_registry_scale_material_and_submesh():
@@ -216,7 +217,7 @@ def test_tiles_without_proxies_emit_no_collision():
 def test_collision_obj_has_per_vertex_normals_and_closed_hulls():
     bundle = emit_scenery(WORLD, [SceneryInstance("tree_test", 10.0, 20.0),
                                   SceneryInstance("rock_test", 30.0, 40.0)], [], assets=REGISTRY)
-    obj = bundle.files[f"models/{WORLD}_scenery/meshes/scenery_0_0_collision.obj"]
+    obj = bundle.files[f"models/{WORLD}_scenery/meshes/scenery_collision.obj"]
     vertices, normals, refs = _parse_obj(obj)
     faces = _indices(refs)
     assert len(vertices) == len(normals) > 0
@@ -309,14 +310,13 @@ def test_load_collisions_reads_sidecar_and_collision_world_sees_proxies(tmp_path
     primitives = load_collisions(world_path)
     assert [primitive.name for primitive in primitives] == [p.name for p in bundle.proxies]
     assert all(primitive.static for primitive in primitives)
-    assert {primitive.model for primitive in primitives} == {"scenery_0_0/scenery_collision",
-                                                             "scenery_1_0/scenery_collision"}
+    assert {primitive.model for primitive in primitives} == {"scenery_collision/scenery_collision"}
     world = CollisionWorld(primitives)
     clearance, nearest = world.clearance((10.0, 20.0, 2.0))
-    assert clearance < 0.0 and nearest.name.startswith("scenery_0_0/scenery_collision")
+    assert clearance < 0.0 and nearest.name.startswith("scenery_collision/scenery_collision/tree_test")
     assert world.segment_clearance((10.0, 20.0, 12.0), (10.0, 20.0, 2.0))[0] < 0.0
     blocker = world.blocking((10.0, 20.0, 12.0), (10.0, 20.0, 1.0))
-    assert blocker is not None and blocker.name.startswith("scenery_0_0/scenery_collision")
+    assert blocker is not None and blocker.name.startswith("scenery_collision/scenery_collision/tree_test")
     assert world.max_top(10.0, 20.0, 0.5) == pytest.approx(9.0)  # canopy sphere centre 7 + radius 2
     assert world.max_top(60.0, 60.0, 1.0) == -math.inf
     # Without the sidecar the mesh collision has no primitive proxy: reject, not silently ignore.

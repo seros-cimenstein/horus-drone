@@ -1,26 +1,29 @@
-"""Scenery for city-scale generated worlds: instanced asset visuals + per-tile trimesh collision.
+"""Scenery for city-scale generated worlds: instanced asset visuals + one merged trimesh collision.
 
 A procedural world's cheap surroundings (trees, rocks, lamps, buildings, roads, trail strips)
-are emitted as one ``static`` model per 100 m tile. Each tile model carries
+are drawn by one ``static`` visual-only model per 100 m tile. Each tile model carries
 
 * one ``<visual>`` per placed asset instance, referencing the shared asset mesh from the asset
   registry (Ogre-Next auto-instances repeated mesh URIs) with the instance pose, yaw and scale
   composed with the registry visual's canonical ``scale``, submesh and PBR material;
-* one ``<visual>`` per merged, textured :class:`SceneryMesh` (OBJ + MTL with ``map_Kd``);
-* exactly one ``<collision name="scenery_collision">`` OBJ trimesh built by triangulating every
-  :class:`~sim.worldgen.proxy.ProxyShape` whose centre falls in that tile. Tiles with no
-  proxies emit no collision.
+* one ``<visual>`` per merged, textured :class:`SceneryMesh` (OBJ + MTL with ``map_Kd``).
+
+Every :class:`~sim.worldgen.proxy.ProxyShape` of the world is triangulated into a single
+``<collision name="scenery_collision">`` OBJ trimesh in one static ``scenery_collision`` model.
+One merged mesh rather than one per tile: on Koko, 144 overlapping per-tile collision meshes
+stalled the world at RTF ~0 as soon as rendering sensors ran (9 tiles: 0.44, 72: 0.27), while
+the single merged mesh measured RTF 0.41, the same as no scenery collision at all.
 
 Collision OBJs carry per-vertex normals (``vn`` + ``f a//a``) because dartsim silently drops
 normal-less submeshes and then segfaults. The same proxies are written to
 ``<stem>.scenery.json`` next to the world SDF, where
 :func:`sim.worldgen.geometry.load_collisions` turns them into static
 :class:`~sim.worldgen.geometry.Primitive` entries named
-``<tile model>/scenery_collision/<n>`` so clearance, line-of-sight and max-top queries keep
-working on procedural worlds.
+``scenery_collision/scenery_collision/<label>_<n>`` so clearance, line-of-sight and max-top
+queries keep working on procedural worlds.
 
 Everything in this module is deterministic: tiles are emitted in ``(ix, iy)`` order and keep
-the caller's instance/mesh order within a tile.
+the caller's instance/mesh order within a tile; proxies follow the same tile order.
 """
 
 from __future__ import annotations
@@ -32,7 +35,9 @@ from typing import Mapping, Sequence
 
 from sim.worldgen.geometry import Primitive, scenery_sidecar_text
 from sim.worldgen.proxy import ProxyShape
-from sim.worldgen.sdf import f, scenery_collide_bitmask
+from sim.worldgen.sdf import SCENERY_COLLIDE_BITMASK, f
+
+SCENERY_COLLISION_MODEL = "scenery_collision"
 
 DEFAULT_TILE_M = 100.0
 CYLINDER_SIDES = 8  # octagonal prisms for cylinder proxies; cheap and hull-conservative
@@ -364,37 +369,35 @@ def emit_scenery(world_name: str, instances: Sequence[SceneryInstance],
 
     models: list[str] = []
     proxies: list[Primitive] = []
+    collision_model = SCENERY_COLLISION_MODEL
     for tile in sorted(set(tile_instances) | set(tile_meshes) | set(tile_proxies)):
         ix, iy = tile
         ox, oy = ix * tile_m, iy * tile_m
-        model_name = f"scenery_{ix}_{iy}"
         parts: list[str] = []
         for index, (instance, asset) in enumerate(tile_instances.get(tile, ())):
             parts.append(_instance_visuals(instance, asset, index, ox, oy))
         for mesh in tile_meshes.get(tile, ()):
             parts.append(_mesh_visual(mesh, world_name, ox, oy))
-        placements = tile_proxies.get(tile, ())
-        if placements:
-            local = [ProxyShape(proxy.shape,
-                                (proxy.pose[0] - ox, proxy.pose[1] - oy) + proxy.pose[2:],
-                                proxy.size) for _label, proxy in placements]
-            files[f"models/{world_name}_scenery/meshes/{model_name}_collision.obj"] = \
-                collision_obj(local)
-            # The proxy label (asset key or mesh name) stays in the oracle name so obstacle
-            # classification (campaign hazard tokens: tree/canopy/...) keeps working on tiles.
-            for number, (label, proxy) in enumerate(placements):
-                proxies.append(Primitive(name=f"{model_name}/scenery_collision/{label}_{number}",
-                                         model=f"{model_name}/scenery_collision",
-                                         shape=proxy.shape, transform=proxy.pose,
-                                         size=proxy.size, static=True))
-            uri = f"model://{world_name}_scenery/meshes/{model_name}_collision.obj"
-            parts.append(f'<collision name="scenery_collision"><geometry><mesh><uri>{uri}'
-                         "</uri></mesh></geometry><surface><contact><collide_bitmask>"
-                         f"{scenery_collide_bitmask(ix, iy):#06x}</collide_bitmask></contact></surface>"
-                         "</collision>")
-        models.append(f'<model name="{model_name}"><static>true</static>'
-                      f"<pose>{_coord(ox)} {_coord(oy)} 0 0 0 0</pose>"
-                      f'<link name="scenery">{"".join(parts)}</link></model>')
+        # The proxy label (asset key or mesh name) stays in the oracle name so obstacle
+        # classification (campaign hazard tokens: tree/canopy/...) keeps working.
+        for label, proxy in tile_proxies.get(tile, ()):
+            proxies.append(Primitive(name=f"{collision_model}/scenery_collision/{label}_{len(proxies)}",
+                                     model=f"{collision_model}/scenery_collision",
+                                     shape=proxy.shape, transform=proxy.pose,
+                                     size=proxy.size, static=True))
+        if parts:
+            models.append(f'<model name="scenery_{ix}_{iy}"><static>true</static>'
+                          f"<pose>{_coord(ox)} {_coord(oy)} 0 0 0 0</pose>"
+                          f'<link name="scenery">{"".join(parts)}</link></model>')
+    if proxies:
+        files[f"models/{world_name}_scenery/meshes/{collision_model}.obj"] = collision_obj(
+            [ProxyShape(primitive.shape, primitive.transform, primitive.size) for primitive in proxies])
+        uri = f"model://{world_name}_scenery/meshes/{collision_model}.obj"
+        models.append(f'<model name="{collision_model}"><static>true</static>'
+                      '<link name="scenery"><collision name="scenery_collision"><geometry><mesh>'
+                      f"<uri>{uri}</uri></mesh></geometry><surface><contact><collide_bitmask>"
+                      f"{SCENERY_COLLIDE_BITMASK:#06x}</collide_bitmask></contact></surface>"
+                      "</collision></link></model>")
 
     files[f"{stem}.scenery.json"] = scenery_sidecar_text(proxies)
     return SceneryBundle("\n".join(models) + ("\n" if models else ""), files, tuple(proxies))

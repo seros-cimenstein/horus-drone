@@ -3,15 +3,9 @@
   <model name="horus_tree_pine">
     <static>true</static>
     <link name="link">
-      <visual name="branches">
+      <visual name="tree">
         <pose>0 0 0 0 0 0</pose>
-        <geometry><mesh><uri>model://horus_tree_pine/meshes/pine_tree.dae</uri><scale>2.3632 2.3632 2.3632</scale><submesh><name>Branch</name></submesh></mesh></geometry>
-        <material><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://horus_tree_pine/materials/textures/branch_2_diffuse.png</albedo_map><metalness>0</metalness><roughness>0.8</roughness></metal></pbr><double_sided>true</double_sided></material>
-      </visual>
-      <visual name="trunk">
-        <pose>0 0 0 0 0 0</pose>
-        <geometry><mesh><uri>model://horus_tree_pine/meshes/pine_tree.dae</uri><scale>2.3632 2.3632 2.3632</scale><submesh><name>Bark</name></submesh></mesh></geometry>
-        <material><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://horus_tree_pine/materials/textures/bark_diffuse.png</albedo_map><metalness>0</metalness><roughness>0.8</roughness></metal></pbr></material>
+        <geometry><mesh><uri>model://horus_tree_pine/meshes/pine_tree.dae</uri><scale>2.3632 2.3632 2.3632</scale></mesh></geometry>
       </visual>
       <collision name="proxy_0_cylinder">
         <pose>0 0 5.9435 0 0 0</pose>

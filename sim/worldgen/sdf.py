@@ -12,21 +12,17 @@ ELEVATION = 584.0
 
 # Collision bitmasks (two collisions are tested only when their masks share a bit). Kinematic
 # actors must not generate contacts with the terrain they walk on; the drone keeps the default
-# mask and collides with everything. Generated 1.2 km worlds additionally keep every static
-# collision on a bit no overlapping static neighbour shares: once a dynamic body exists, dartsim
-# tests every overlapping static pair each 1 ms step (terrain vs tiles, tile vs adjacent tile,
-# pad vs terrain), which measured RTF 0.00 on Koko instead of ~0.47.
+# mask and collides with everything. Generated 1.2 km worlds keep each static collision (terrain,
+# merged scenery mesh, home pad) on its own bit: once a dynamic body exists, dartsim tests every
+# overlapping static pair each 1 ms step, which measured RTF 0.00 on Koko instead of ~0.47.
 TERRAIN_COLLIDE_BITMASK = 0x0001
 ACTOR_COLLIDE_BITMASK = 0x0002
 PAD_COLLIDE_BITMASK = 0x0008
+SCENERY_COLLIDE_BITMASK = 0x0010
 # Generated worlds include this primitive-collision airframe (sim/scripts/derive_procedural_airframe.py):
 # the outdoor airframe's mesh collisions against a 1.2 km terrain mesh also stall dartsim.
 PROCEDURAL_DRONE_MODEL = "horus_iris_procedural"
 
-
-def scenery_collide_bitmask(ix: int, iy: int) -> int:
-    """Scenery tile bit by tile parity: all eight neighbours of a tile get a different bit."""
-    return 0x0010 << ((ix % 2) + 2 * (iy % 2))
 
 SURFACE_COLOURS = {
     "asphalt": (0.24, 0.25, 0.26),
