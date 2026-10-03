@@ -161,7 +161,9 @@ if (( procedural == 1 )); then
   procedural_kind="${procedural_kind:-forest}"
   # Generated outdoor worlds carry the procedural fence/cruise-speed parameters and profile.
   export HORUS_SITL_PARAM_FILE="${HORUS_SITL_PARAM_FILE:-/horus/config/ardupilot/horus_sitl_procedural.parm}"
-  export HORUS_CONFIG="${HORUS_CONFIG:-/horus/config/horus_procedural_${procedural_kind}.yaml}"
+  # Container path for the MCP; the host commander gets the same profile at its host path.
+  mcp_config="${HORUS_CONFIG:-/horus/config/horus_procedural_${procedural_kind}.yaml}"
+  commander_config="${PROJECT_DIR}/config/horus_procedural_${procedural_kind}.yaml"
 else
   export HORUS_SITL_PARAM_FILE="${HORUS_SITL_PARAM_FILE:-/horus/config/ardupilot/horus_sitl.parm}"
 fi
@@ -351,8 +353,8 @@ else
   fi
   "${SIM_DIR}/run.sh" "${run_args[@]}"
   mcp_env_args=(--env "HORUS_MCP_TOKEN=${HORUS_MCP_TOKEN}")
-  if [[ -n "${HORUS_CONFIG:-}" ]]; then
-    mcp_env_args+=(--env "HORUS_CONFIG=${HORUS_CONFIG}")
+  if [[ -n "${mcp_config:-}" ]]; then
+    mcp_env_args+=(--env "HORUS_CONFIG=${mcp_config}")
   fi
   docker exec --workdir /horus "${mcp_env_args[@]}" \
     "${CONTAINER}" /opt/horus-venv/bin/horus-mcp &
@@ -362,7 +364,11 @@ else
   bash "${SIM_DIR}/scripts/enable_camera_stream.sh" "${CONTAINER}"
 fi
 
-"${commander_bin}" --port "${COMMANDER_PORT}" &
+if [[ -n "${commander_config:-}" ]]; then
+  HORUS_CONFIG="${commander_config}" "${commander_bin}" --port "${COMMANDER_PORT}" &
+else
+  "${commander_bin}" --port "${COMMANDER_PORT}" &
+fi
 commander_pid=$!
 wait_for_port "${COMMANDER_PORT}" 'host horus-commander-serve' "${commander_pid}"
 

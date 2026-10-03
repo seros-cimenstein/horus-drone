@@ -3,8 +3,8 @@ URL: https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine%20Tree/6/Pine%20Tre
 Archive SHA-256: d436a44229321314e79e4c2ba709dc926e833a5b5d90d16c5d085c2a74576e25 (byte-equal to the exact-version Fuel endpoint)
 Author (model.config): Louise Poubel
 Licence: Creative Commons Zero v1.0 Universal (CC0 1.0) (Fuel model-level publisher metadata at import time; the archive itself embeds no licence text)
-Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used. COLLADA <image> references were rewritten to the copied meshes/ and materials/textures/ layout.
-Notes: Upstream materials/scripts (Ogre alpha rejection) are not copied; the branch texture keeps its alpha channel and the HORUS model.sdf uses it as a PBR albedo map so gz-sim alpha-tests the foliage.
+Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used. COLLADA <image> references were rewritten to the copied meshes/ and materials/textures/ layout. COLLADA effects Bark_001-effect, Branch_2-effect were given diffuse and A_ONE alpha textures from the copied files.
+Notes: Upstream materials/scripts (Ogre alpha rejection) are not copied; the COLLADA effects reference the copied branch (with alpha) and bark textures directly.
 Files: materials/textures/bark_diffuse.png, materials/textures/branch_2_diffuse.png, meshes/pine_tree.dae
 
 Upstream model.config (verbatim):

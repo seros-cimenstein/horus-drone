@@ -402,13 +402,10 @@ CC_BY = "CC BY 4.0"
 ASSETS: dict[str, Asset] = {
     "tree_pine": Asset(
         key="tree_pine", kind="tree", model_dir="horus_tree_pine",
-        visuals=(
-            AssetVisual("branches", _mesh("horus_tree_pine", "pine_tree.dae"), submesh="Branch",
-                        scale=2.3632, albedo_map=_texture("horus_tree_pine", "branch_2_diffuse.png"),
-                        double_sided=True),
-            AssetVisual("trunk", _mesh("horus_tree_pine", "pine_tree.dae"), submesh="Bark",
-                        scale=2.3632, albedo_map=_texture("horus_tree_pine", "bark_diffuse.png")),
-        ),
+        # One material-free visual: the importer embeds the branch (alpha) and bark textures in
+        # the COLLADA effects, so every instance shares the mesh materials. Per-visual SDF
+        # materials on ~15k branch/bark visuals exhausted Koko's iGPU (RTF 0.008 -> 0.44).
+        visuals=(AssetVisual("tree", _mesh("horus_tree_pine", "pine_tree.dae"), scale=2.3632),),
         native_height_m=11.9999, footprint_radius_m=3.7499,
         # Bark cylinder over the full trunk + a canopy cylinder covering the branch sub-mesh
         # bounds (radius = the x/y half extent so the cylinder stays inside them).
@@ -420,20 +417,13 @@ ASSETS: dict[str, Asset] = {
     ),
     "tree_oak": Asset(
         key="tree_oak", kind="tree", model_dir="horus_tree_oak",
-        visuals=(
-            AssetVisual("branches", _mesh("horus_tree_oak", "oak_tree.dae"),
-                        pose=(0.0, 0.0, 0.10655, 0.0, 0.0, 0.0), submesh="Branch",
-                        scale=1.5156, albedo_map=_texture("horus_tree_oak", "branch_diffuse.png"),
-                        double_sided=True),
-            AssetVisual("trunk", _mesh("horus_tree_oak", "oak_tree.dae"),
-                        pose=(0.0, 0.0, 0.10655, 0.0, 0.0, 0.0), submesh="Bark",
-                        scale=1.5156, albedo_map=_texture("horus_tree_oak", "bark_diffuse.png")),
-        ),
+        visuals=(AssetVisual("tree", _mesh("horus_tree_oak", "oak_tree.dae"),
+                             pose=(0.0, 0.0, 0.10655, 0.0, 0.0, 0.0), scale=1.5156),),
         native_height_m=10.0003, footprint_radius_m=9.0199,
         # Trunk cylinder up to the crown + a crown cylinder inscribed in the foliage bounds (the
         # mesh's widest leaves are outside it by <= 1.5 m). The basal root flare (r <= 2.0 m,
         # below 0.6 m) is deliberately not modelled: it is ground-level decoration covered by the
-        # tile collision.
+        # merged scenery collision.
         proxies=(
             ProxyShape("cylinder", (0.0, 0.0, 0.98911, 0.0, 0.0, 0.0), (1.24016, 1.97822)),
             ProxyShape("cylinder", (-0.93317, 0.08945, 5.98926, 0.0, 0.0, 0.0), (6.43360, 8.02209)),

@@ -134,38 +134,39 @@ ARCHIVES = [
         "textures": {"TruckDelivery_Diffuse.png": "TruckDelivery_Diffuse.png"},
     },
     # -- Trees, boulders, street furniture and a seated person for procedural scenery. The tree
-    # meshes carry no image references; their Ogre material scripts (alpha rejection) are not
-    # copied, so the HORUS model.sdf applies the branch/bark textures with alpha from the albedo
-    # texture (gz-sim calls Material::SetAlphaFromTexture for PBR albedo maps).
+    # meshes carry no image references and their Ogre material scripts (alpha rejection) are not
+    # copied, so the importer embeds the branch/bark textures into the COLLADA effects (diffuse
+    # + alpha). Generated worlds then place each tree as one material-free visual whose instances
+    # share the mesh materials: thousands of per-visual SDF materials exhausted Koko's iGPU.
     {
         "fuel": "OpenRobotics/Pine Tree", "version": 6,
         "sha256": "d436a44229321314e79e4c2ba709dc926e833a5b5d90d16c5d085c2a74576e25",
         "license": CC0, "author": "Louise Poubel", "target": "horus_tree_pine",
         "description": "conifer pine tree (branch and bark sub-meshes)", "standalone_sdf": True,
-        "notes": "Upstream materials/scripts (Ogre alpha rejection) are not copied; the branch "
-                 "texture keeps its alpha channel and the HORUS model.sdf uses it as a PBR albedo "
-                 "map so gz-sim alpha-tests the foliage.",
+        "notes": "Upstream materials/scripts (Ogre alpha rejection) are not copied; the COLLADA "
+                 "effects reference the copied branch (with alpha) and bark textures directly.",
         "members": {
             "meshes/pine_tree.dae": "meshes/pine_tree.dae",
             "materials/textures/bark_diffuse.png": "materials/textures/bark_diffuse.png",
             "materials/textures/branch_2_diffuse.png": "materials/textures/branch_2_diffuse.png",
         },
         "textures": {"bark_diffuse.png": "bark_diffuse.png", "branch_2_diffuse.png": "branch_2_diffuse.png"},
+        "embed_textures": {"Branch_2-effect": "branch_2_diffuse.png", "Bark_001-effect": "bark_diffuse.png"},
     },
     {
         "fuel": "OpenRobotics/Oak tree", "version": 7,
         "sha256": "ae128176f707b571d2a2a47a1ab6b80596e81d96402501a64f4f28a49543daa5",
         "license": CC0, "author": "Louise Poubel", "target": "horus_tree_oak",
         "description": "broad-crowned oak tree (branch and bark sub-meshes)", "standalone_sdf": True,
-        "notes": "Upstream materials/scripts (Ogre alpha rejection) are not copied; the branch "
-                 "texture keeps its alpha channel and the HORUS model.sdf uses it as a PBR albedo "
-                 "map so gz-sim alpha-tests the foliage.",
+        "notes": "Upstream materials/scripts (Ogre alpha rejection) are not copied; the COLLADA "
+                 "effects reference the copied branch (with alpha) and bark textures directly.",
         "members": {
             "meshes/oak_tree.dae": "meshes/oak_tree.dae",
             "materials/textures/bark_diffuse.png": "materials/textures/bark_diffuse.png",
             "materials/textures/branch_diffuse.png": "materials/textures/branch_diffuse.png",
         },
         "textures": {"bark_diffuse.png": "bark_diffuse.png", "branch_diffuse.png": "branch_diffuse.png"},
+        "embed_textures": {"Branch_1-effect": "branch_diffuse.png", "Bark-effect": "bark_diffuse.png"},
     },
     {
         "fuel": "OpenRobotics/Falling Rock 1", "version": 6,
@@ -322,6 +323,40 @@ def _rewrite_dae(text: str, textures: dict[str, str]) -> str:
     return re.sub(r"<image\b[^>]*>.*?</image>", replace_image, text, flags=re.DOTALL)
 
 
+def _embed_dae_textures(text: str, effects: dict[str, str]) -> str:
+    """Reference a copied texture from each named COLLADA effect (diffuse and A_ONE alpha).
+
+    gz-common's COLLADA loader turns a textured ``<diffuse>`` into the mesh material's texture
+    and a textured ``<transparent opaque="A_ONE">`` into alpha-from-texture, so foliage renders
+    alpha-tested without any SDF ``<material>``.
+    """
+    if "<library_images>" in text:
+        raise RuntimeError("COLLADA file already has <library_images>; embedding expects none")
+    images = "".join(f'<image id="{effect}-image" name="{effect}-image">'
+                     f"<init_from>../materials/textures/{texture}</init_from></image>"
+                     for effect, texture in effects.items())
+    text = text.replace("<library_effects>", f"<library_images>{images}</library_images>\n  <library_effects>", 1)
+    for effect in effects:
+        match = re.search(rf'<effect id="{re.escape(effect)}">.*?</effect>', text, re.DOTALL)
+        if match is None:
+            raise RuntimeError(f"COLLADA effect {effect!r} not found")
+        reference = f'<texture texture="{effect}-sampler" texcoord="UVMap"/>'
+        body = match.group(0).replace(
+            "<profile_COMMON>",
+            f'<profile_COMMON><newparam sid="{effect}-surface"><surface type="2D">'
+            f"<init_from>{effect}-image</init_from></surface></newparam>"
+            f'<newparam sid="{effect}-sampler"><sampler2D><source>{effect}-surface</source>'
+            "</sampler2D></newparam>", 1)
+        body, diffuse = re.subn(r"<diffuse>\s*<color[^>]*>[^<]*</color>\s*</diffuse>",
+                                f"<diffuse>{reference}</diffuse>", body)
+        body, alpha = re.subn(r'(<transparent opaque="A_ONE">)\s*<color>[^<]*</color>',
+                              rf"\1{reference}", body)
+        if diffuse != 1 or alpha != 1:
+            raise RuntimeError(f"COLLADA effect {effect!r}: expected one diffuse and one A_ONE colour")
+        text = text.replace(match.group(0), body)
+    return text
+
+
 def _validate_dae_images(path: Path, target: Path) -> None:
     """Every COLLADA image reference must resolve to a copied file inside the model."""
     for block in re.findall(r"<image\b[^>]*>.*?</image>", path.read_text(encoding="utf-8"), re.DOTALL):
@@ -343,7 +378,10 @@ def _provenance(entry: dict, archive: zipfile.ZipFile) -> str:
         f"{MAX_TEXTURE_PX} px were downscaled; OBJ material texture paths were rewritten; the upstream "
         "model.sdf and any plugins/scripts were not used."
         + (" COLLADA <image> references were rewritten to the copied meshes/ and materials/textures/ layout."
-           if entry.get("textures") and any(rel.endswith(".dae") for rel in entry["members"].values()) else ""),
+           if entry.get("textures") and any(rel.endswith(".dae") for rel in entry["members"].values()) else "")
+        + (" COLLADA effects " + ", ".join(sorted(entry["embed_textures"]))
+           + " were given diffuse and A_ONE alpha textures from the copied files."
+           if entry.get("embed_textures") else ""),
     ]
     if entry.get("attribution"):
         lines.append(f"Attribution: \"{name}\" by {entry['author']} (Open Robotics), Gazebo Fuel, "
@@ -399,7 +437,10 @@ def import_archive(entry: dict, cache: Path) -> dict:
         if destination.suffix.lower() in (".png", ".jpg"):
             _save_texture(payload, destination)
         elif destination.suffix.lower() == ".dae" and entry.get("textures"):
-            destination.write_text(_rewrite_dae(payload.decode("utf-8"), entry["textures"]), encoding="utf-8")
+            dae = _rewrite_dae(payload.decode("utf-8"), entry["textures"])
+            if entry.get("embed_textures"):
+                dae = _embed_dae_textures(dae, entry["embed_textures"])
+            destination.write_text(dae, encoding="utf-8")
         else:
             destination.write_bytes(payload)
     for relative in entry["members"].values():

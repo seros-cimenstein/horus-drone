@@ -11,9 +11,10 @@
     <up_axis>Z_UP</up_axis>
   </asset>
   <library_images/>
+  <library_images><image id="Branch_1-effect-image" name="Branch_1-effect-image"><init_from>../materials/textures/branch_diffuse.png</init_from></image><image id="Bark-effect-image" name="Bark-effect-image"><init_from>../materials/textures/bark_diffuse.png</init_from></image></library_images>
   <library_effects>
     <effect id="Branch_1-effect">
-      <profile_COMMON>
+      <profile_COMMON><newparam sid="Branch_1-effect-surface"><surface type="2D"><init_from>Branch_1-effect-image</init_from></surface></newparam><newparam sid="Branch_1-effect-sampler"><sampler2D><source>Branch_1-effect-surface</source></sampler2D></newparam>
         <technique sid="common">
           <phong>
             <emission>
@@ -22,17 +23,14 @@
             <ambient>
               <color sid="ambient">0 0 0 1</color>
             </ambient>
-            <diffuse>
-              <color sid="diffuse">0.64 0.64 0.64 1</color>
-            </diffuse>
+            <diffuse><texture texture="Branch_1-effect-sampler" texcoord="UVMap"/></diffuse>
             <specular>
               <color sid="specular">0.225 0.225 0.225 1</color>
             </specular>
             <shininess>
               <float sid="shininess">9</float>
             </shininess>
-            <transparent opaque="A_ONE">
-              <color>1 1 1 1</color>
+            <transparent opaque="A_ONE"><texture texture="Branch_1-effect-sampler" texcoord="UVMap"/>
             </transparent>
             <index_of_refraction>
               <float sid="index_of_refraction">1</float>
@@ -42,7 +40,7 @@
       </profile_COMMON>
     </effect>
     <effect id="Bark-effect">
-      <profile_COMMON>
+      <profile_COMMON><newparam sid="Bark-effect-surface"><surface type="2D"><init_from>Bark-effect-image</init_from></surface></newparam><newparam sid="Bark-effect-sampler"><sampler2D><source>Bark-effect-surface</source></sampler2D></newparam>
         <technique sid="common">
           <phong>
             <emission>
@@ -51,17 +49,14 @@
             <ambient>
               <color sid="ambient">0 0 0 1</color>
             </ambient>
-            <diffuse>
-              <color sid="diffuse">0.64 0.64 0.64 1</color>
-            </diffuse>
+            <diffuse><texture texture="Bark-effect-sampler" texcoord="UVMap"/></diffuse>
             <specular>
               <color sid="specular">0.225 0.225 0.225 1</color>
             </specular>
             <shininess>
               <float sid="shininess">10</float>
             </shininess>
-            <transparent opaque="A_ONE">
-              <color>1 1 1 1</color>
+            <transparent opaque="A_ONE"><texture texture="Bark-effect-sampler" texcoord="UVMap"/>
             </transparent>
             <index_of_refraction>
               <float sid="index_of_refraction">1</float>
