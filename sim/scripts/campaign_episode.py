@@ -24,6 +24,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 import shutil
+from collections.abc import Sequence
 from typing import Any, Iterable, Mapping
 
 ROOT = Path("/horus")
@@ -57,7 +58,39 @@ HAZARD_OBSTACLE_TOKENS = ("tree", "building", "roof", "canopy", "shelter", "vehi
 HAZARD_APPROACH_DISTANCE_M = 8.0
 HAZARD_APPROACH_HEADINGS_DEG = tuple(range(0, 360, 45))
 
+
+def _hazard_trial_summary(trial: Mapping[str, Any]) -> dict[str, Any]:
+    """The fields worth keeping when a hazard trial is considered but not flown."""
+    return {key: trial.get(key) for key in (
+        "obstacle", "obstacle_model", "direct_path_static_clearance_m", "approach_min_clearance_m",
+        "distance_m")}
+
 ORBIT_RADIUS_M = 6.0
+# Approach scoring: the task must succeed and actually close to the commanded standoff at some
+# point during the trial (a one-shot approach holds at the standoff; the final range is not a
+# criterion because the target can walk away or become undetectable after arrival).
+APPROACH_STANDOFF_M = 5.0
+APPROACH_ARRIVAL_TOLERANCE_M = 2.0
+
+
+def _orbit_outcome(*, status: str, validated: bool, reference_views: int,
+                   mean_radius_m: float | None) -> tuple[bool, str, str | None]:
+    """Pass/classification/reason for an orbit task.
+
+    A target that never left its creation view (the multi-view gallery admitted nothing) was
+    never appearance-validated, which is a different failure from an orbit that flew but missed
+    its geometry or behaviour.
+    """
+    passed = status in {"succeeded", "expired"} and mean_radius_m is not None and validated
+    if passed:
+        return True, "passed", None
+    if not validated:
+        return False, "never_validated", (
+            f"orbit target was never appearance-validated before the orbit started "
+            f"(reference_views {reference_views})")
+    if mean_radius_m is None:
+        return False, "orbit_behaviour", "orbit produced no ground-truth samples"
+    return False, "orbit_behaviour", f"orbit task ended {status}"
 # How many GT-matched people the orbit test may visit while looking for a clear circle.
 ORBIT_TARGET_ATTEMPTS = 4
 
@@ -867,7 +900,9 @@ class Episode:
         if not isinstance(response, Mapping) or not response.get("task_id"):
             return dict(response) if isinstance(response, Mapping) else {"result": response}
         task_id = str(response["task_id"])
-        deadline = time.monotonic() + (max_wall_s if max_wall_s is not None else 120.0)
+        budget_s = max_wall_s if max_wall_s is not None else 120.0
+        started = time.monotonic()
+        deadline = started + budget_s
         result: dict[str, Any] = {"task_id": task_id, "submitted": dict(response)}
         next_observation = time.monotonic()
         while time.monotonic() < deadline and not STOP.is_set():
@@ -886,7 +921,10 @@ class Episode:
             await self._tool("cancel", {"task_id": task_id})
         except Exception:
             pass
-        raise TimeoutError(f"task {task_id} did not reach a terminal status before wall deadline")
+        raise TimeoutError(
+            f"task {task_id} did not reach a terminal status before wall deadline "
+            f"(waited {time.monotonic() - started:.1f}s of a {budget_s:g}s budget, stop={STOP.is_set()})"
+        )
 
     def _scaled_ttl(self, ttl_s: float) -> float:
         """Scale a command TTL for hosts that run the sim below real time.
@@ -1591,8 +1629,15 @@ class Episode:
         arguments: dict[str, Any] = {"id": candidate["id"], "dist_m": 5.0, "ttl_s": 120.0}
         if target_size is not None:
             arguments["target_size_m"] = target_size
+        observed: list[float] = []
+
+        async def observe_range() -> None:
+            value = self._camera_to_torso_range(person, self._gt_latest())
+            if value is not None:
+                observed.append(value)
+
         try:
-            status = await self._skill("approach", arguments, timeout_s=240.0)
+            status = await self._skill("approach", arguments, timeout_s=240.0, observer=observe_range)
         except Exception as exc:
             return {"passed": False, "reason": f"approach action failed: {exc}", "arguments": arguments}
         self._record_gt()
@@ -1601,13 +1646,60 @@ class Episode:
         positions = self._people_gt(sample)
         target_pos = positions.get(str(person.get("model")))
         torso = self._torso(person, target_pos) if target_pos else None
-        range_error = None if drone is None or torso is None else math.dist(drone[:3], torso) - 5.0
         route_clearance = self._trajectory_clearance(start_index)
-        return {"label": label, "passed": status.get("status") == "succeeded", "arguments": arguments,
-                "task_status": status, "gt_final_camera_to_torso_m": None if drone is None or torso is None else math.dist(drone[:3], torso),
+        arrival = self._approach_arrival(person, start_index, observed)
+        final_range = None if drone is None or torso is None else math.dist(drone[:3], torso)
+        # The reported error is the closest approach (the approach is one-shot: the target can
+        # walk away after arrival, which says nothing about the executor's standoff control).
+        range_error = (None if arrival["gt_min_camera_to_torso_m"] is None
+                       else arrival["gt_min_camera_to_torso_m"] - APPROACH_STANDOFF_M)
+        succeeded = status.get("status") == "succeeded"
+        passed = succeeded and arrival["arrived"]
+        reason = None
+        if not succeeded:
+            reason = f"approach task ended {status.get('status')}"
+        elif not arrival["arrived"]:
+            reason = (f"approach never closed to the standoff (min camera-to-torso range "
+                      f"{arrival['gt_min_camera_to_torso_m']} m > {arrival['arrival_limit_m']:.1f} m)")
+        return {"label": label, "passed": passed, "reason": reason, "arguments": arguments,
+                "task_status": status, "gt_final_camera_to_torso_m": final_range,
+                "final_distance_error_vs_5m_m": None if final_range is None else final_range - APPROACH_STANDOFF_M,
                 "distance_error_vs_5m_m": range_error, "static_clearance_along_gt_path_m": route_clearance,
                 "target_model": person.get("model"), "target_posture": person.get("posture"),
-                "target_visible_size_m": target_size, "start_gt": started, "end_gt": sample}
+                "target_source": candidate.get("source"),
+                "target_visible_size_m": target_size, "start_gt": started, "end_gt": sample, **arrival}
+
+    def _camera_to_torso_range(self, person: Mapping[str, Any],
+                               sample: Mapping[str, Any] | None) -> float | None:
+        """Ground-truth camera-to-torso distance for one sample, or None without a pose."""
+        pose = self._camera_pose(sample)
+        positions = self._people_gt(sample)
+        target = positions.get(str(person.get("model")))
+        if pose is None or target is None:
+            return None
+        return math.dist(pose["position"], self._torso(person, target))
+
+    def _approach_arrival(self, person: Mapping[str, Any], start_index: int,
+                          observed: Sequence[float] = ()) -> dict[str, Any]:
+        """Minimum camera-to-torso range over the trial and whether it reached the standoff.
+
+        ``observed`` carries the ranges sampled by the trial's own observer; the recorded path
+        history is the fallback (it can lack a target that only the civilian trace knows).
+        """
+        ranges = [float(value) for value in observed if value is not None]
+        if not ranges:
+            samples = self.path_history[max(0, start_index):]
+            ranges = [value for value in (self._camera_to_torso_range(person, sample) for sample in samples)
+                      if value is not None]
+        minimum = min(ranges) if ranges else None
+        limit = APPROACH_STANDOFF_M + APPROACH_ARRIVAL_TOLERANCE_M
+        return {"gt_min_camera_to_torso_m": minimum, "arrival_limit_m": limit,
+                "samples": len(ranges), "arrived": minimum is not None and minimum <= limit}
+
+    @staticmethod
+    def _needs_declared_size(candidate: Mapping[str, Any]) -> bool:
+        """Grounder-only candidates carry no detector person evidence, so range needs a size."""
+        return str(candidate.get("source") or "") in {"open_vocab", "point"}
 
     def _trajectory_clearance(self, start_index: int = 0) -> float | None:
         points: list[tuple[float, float, float]] = []
@@ -1633,7 +1725,12 @@ class Episode:
         standing, visible, reason = await self._matched_target("standing")
         if standing is None or visible is None:
             return {"passed": False, "reason": reason, "trials": trials}
-        trials.append(await self._approach_one(standing, visible, target_size=None, label="standing-no-target-size"))
+        from sim.worldgen.plan import POSTURE_TOP_M
+
+        standing_size = (POSTURE_TOP_M["standing"]
+                         if self._needs_declared_size(visible) else None)
+        trials.append(await self._approach_one(standing, visible, target_size=standing_size,
+                                               label="standing-no-target-size"))
         posture = next((p for p in ("lying", "sitting") if any(item.get("posture") == p for item in self.people)), None)
         if posture is None:
             return {"passed": False, "reason": "manifest contains no lying or sitting target", "trials": trials}
@@ -1642,9 +1739,13 @@ class Episode:
             trials.extend([{"label": f"{posture}-no-target-size", "passed": False, "status": "unobservable", "reason": reason},
                            {"label": f"{posture}-with-target-size", "passed": False, "status": "unobservable", "reason": reason}])
             return {"passed": False, "reason": reason, "trials": trials}
-        trials.append(await self._approach_one(prone, candidate, target_size=None, label=f"{posture}-no-target-size"))
         from sim.worldgen.plan import POSTURE_TOP_M
         visible_size = POSTURE_TOP_M[posture]
+        # A grounder-seeded candidate has no detector person evidence, so the executor cannot
+        # range it from an assumed person height; declare the posture's visible size instead.
+        first_size = visible_size if self._needs_declared_size(candidate) else None
+        trials.append(await self._approach_one(prone, candidate, target_size=first_size,
+                                               label=f"{posture}-no-target-size"))
         # Approach may have moved away or the tracker ID may have expired; reacquire a live ID.
         reacquired, candidate2, reason = await self._matched_target(posture)
         if reacquired is not None and candidate2 is not None:
@@ -1662,24 +1763,35 @@ class Episode:
         if person is None or candidate is None:
             return {"passed": False, "reason": reason, "status": "skipped",
                     "target_attempts": attempts, "min_static_clearance_m": minimum}
+        # The multi-view gallery admits views only after the tracker validates the appearance;
+        # a target still on its creation view was never validated, which is a different failure
+        # from an orbit that flew but missed its geometry.
+        reference_views = int(candidate.get("reference_views") or 1)
+        validated = reference_views > 1
+        validation = {"target_reference_views": reference_views,
+                      "target_validated_before_orbit": validated}
         current = self._drone()
         target = self._people_gt().get(str(person.get("model")))
         if current is None or target is None:
-            return {"passed": False, "reason": "missing current GT pose", "target_attempts": attempts}
+            return {"passed": False, "reason": "missing current GT pose", "target_attempts": attempts,
+                    **validation}
         radius = ORBIT_RADIUS_M
         minimum = self._orbit_circle_clearance(target, altitude=current[2])
         if _clearance_below_threshold(minimum):
             # The circle was re-checked at the settled vantage altitude; trust the stricter value.
             return {"passed": False, "status": "skipped",
                     "reason": f"orbit circle clearance below {CLEARANCE_THRESHOLD_M:.1f} m",
-                    "min_static_clearance_m": minimum, "target_attempts": attempts}
+                    "min_static_clearance_m": minimum, "target_attempts": attempts,
+                    "classification": "orbit_geometry", **validation}
         start_index = len(self.path_history)
         try:
-            status = await self._skill("orbit", {"id": candidate["id"], "radius_m": radius, "ttl_s": 40.0},
-                                       timeout_s=220.0)
+            # The wall budget must outlast the submitted TTL (240 s), otherwise the harness
+            # cancels the task before the executor's own expiry can be observed.
+            status = await self._skill("orbit", {"id": candidate["id"], "radius_m": radius, "ttl_s": 240.0},
+                                       timeout_s=300.0)
         except Exception as exc:
             return {"passed": False, "reason": f"orbit failed: {exc}", "min_static_clearance_m": minimum,
-                    "target_attempts": attempts}
+                    "target_attempts": attempts, "classification": "orbit_behaviour", **validation}
         self._record_gt()
         samples = self.path_history[start_index:]
         distances: list[float] = []
@@ -1696,13 +1808,17 @@ class Episode:
                 visible += 1
         mean = statistics.mean(distances) if distances else None
         std = statistics.pstdev(distances) if len(distances) > 1 else (0.0 if distances else None)
-        return {"passed": status.get("status") in {"succeeded", "expired"} and mean is not None,
-                "task_status": status, "target_model": person.get("model"), "requested_radius_m": radius,
+        passed, classification, reason = _orbit_outcome(
+            status=str(status.get("status")), validated=validated, reference_views=reference_views,
+            mean_radius_m=mean)
+        return {"passed": passed, "reason": reason, "classification": classification,
+                "task_status": status, "target_model": person.get("model"),
+                "target_source": candidate.get("source"), "requested_radius_m": radius,
                 "gt_radius_mean_m": mean, "gt_radius_std_m": std,
                 "gt_radius_error_m": None if mean is None else mean - radius,
                 "target_in_frame_fraction": visible / len(distances) if distances else None,
                 "gt_samples": len(distances), "min_static_clearance_m": minimum,
-                "target_attempts": attempts}
+                "target_attempts": attempts, **validation}
 
     def _scan_rectangles(self) -> list[tuple[float, float, float, float, str]]:
         areas = self.manifest.get("areas", {})
@@ -1842,7 +1958,9 @@ class Episode:
         start_sim = self._sim_now()
         armed_seen = False
         latest_state: Any = None
-        wall_deadline = time.monotonic() + 900.0
+        # The disarm budget is simulation time (limit_sim_s); the wall cap only protects against
+        # a frozen clock and must scale with the host's real-time factor like every other wait.
+        wall_deadline = time.monotonic() + 900.0 * max(1.0, self.ttl_scale)
         while time.monotonic() < wall_deadline and not STOP.is_set():
             latest_state = await self._tool("get_state")
             vehicle = latest_state.get("vehicle", {}) if isinstance(latest_state, Mapping) else {}
@@ -2090,8 +2208,8 @@ class Episode:
     async def test_rth(self) -> dict[str, Any]:
         return await self._rth(require_airborne=True)
 
-    def _hazard_trial(self) -> dict[str, Any] | None:
-        """Closest obstacle/approach pair with a real collision course and a safe approach leg.
+    def _hazard_trials(self) -> list[dict[str, Any]]:
+        """Obstacle/approach pairs with a real collision course and a safe approach leg.
 
         The direct path must penetrate the obstacle by ``HAZARD_MIN_PATH_PENETRATION_M`` for the
         0.6 m hull, and the transit from the current position to the start point must clear the
@@ -2130,15 +2248,13 @@ class Episode:
                                "start": start, "destination_far_side": destination, "yaw_rad": yaw_rad,
                                "direct_path_static_clearance_m": clearance,
                                "approach_min_clearance_m": approach_clearance})
-        if not trials:
-            return None
-        return min(trials, key=lambda trial: trial["distance_m"])
+        return sorted(trials, key=lambda trial: trial["distance_m"])
 
     async def test_hazard(self) -> dict[str, Any]:
         if not await self._ensure_airborne():
             return {**self._takeoff_failure("vehicle could not take off"), "crashed": False}
-        trial = self._hazard_trial()
-        if trial is None:
+        candidates = self._hazard_trials()
+        if not candidates:
             return {"passed": False, "status": "skipped",
                     "reason": (f"no static obstacle offers a collision course "
                                f"(at most -{HAZARD_MIN_PATH_PENETRATION_M:.2f} m for the 0.6 m hull) "
@@ -2149,14 +2265,39 @@ class Episode:
                                                  token in f"{primitive.model} {primitive.name}".lower()
                                                  for token in HAZARD_OBSTACLE_TOKENS)],
                     "crashed": False}
-        from sim.worldgen.plan import ned_pose
+        from sim.worldgen.plan import cruise_legs, heading_deg, legs_clearance, ned_pose
+        trial: dict[str, Any] | None = None
+        approach_route: dict[str, Any] = {"passed": False, "reason": "no hazard trial was flown"}
+        considered: list[dict[str, Any]] = []
+        for candidate in candidates:
+            # The drone can drift between ranking and flight, so re-validate the transit from
+            # the live position and fall through to the next candidate instead of skipping.
+            live = self._drone()
+            if live is None:
+                break
+            legs = cruise_legs(live[:3], candidate["start"], heading_deg(candidate["yaw_rad"]),
+                               self.transit_alt)
+            live_clearance = legs_clearance(self.world, live[:3], legs, drone_radius_m=0.6)
+            entry = {**_hazard_trial_summary(candidate), "live_transit_clearance_m": live_clearance}
+            if _clearance_below_threshold(live_clearance):
+                considered.append({**entry, "outcome": "transit clearance below threshold"})
+                continue
+            route = await self._navigate(candidate["start"], candidate["yaw_rad"])
+            entry["outcome"] = "flown" if route.get("passed") else "navigation refused"
+            entry["route_reason"] = route.get("reason")
+            considered.append(entry)
+            approach_route = route
+            if route.get("passed"):
+                trial = candidate
+                break
+        if trial is None:
+            return {"passed": False, "status": "skipped",
+                    "reason": approach_route.get("reason") or "no hazard trial could be reached",
+                    "expected_safe_behavior": "blocked-or-avoided", "crashed": False,
+                    "hazard_trials_considered": considered}
         start = trial["start"]
         destination = trial["destination_far_side"]
         clearance = trial["direct_path_static_clearance_m"]
-        approach_route = await self._navigate(start, trial["yaw_rad"])
-        if not approach_route.get("passed"):
-            return {"passed": False, "status": "skipped", "reason": approach_route.get("reason"),
-                    "obstacle": trial["obstacle"], "crashed": False}
         start_index = len(self.path_history)
         submitted = None
         crash = False
@@ -2215,6 +2356,7 @@ class Episode:
                   "obstacle_model": trial["obstacle_model"], "obstacle_pose": trial["obstacle_pose"],
                   "start": start, "destination_far_side": destination,
                   "approach_min_clearance_m": trial["approach_min_clearance_m"],
+                  "hazard_trials_considered": considered,
                   "executor_result": status, "direct_path_static_clearance_m": clearance,
                   "gt_min_clearance_m": route_clearance, "crashed": crash, "watchdog_failure": failure,
                   "vehicle_proximity_sensors": len(proximity), "proximity_available": bool(proximity)}

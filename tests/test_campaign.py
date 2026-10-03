@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+
+import pytest
 from pathlib import Path
 
 from sim.scripts.procedural_campaign import (
@@ -1029,19 +1031,19 @@ def test_hazard_trial_searches_for_a_real_collision_course():
     low = box("tree_low", "forest_trees", 10.0, 0.0, 0.5, 0.5, 0.5, 0.5)
     crossing = box("building_crossing", "urban_buildings", 30.0, 0.0, 3.0, 0.5, 0.5, 3.0)
 
-    trial = episode_with(low, crossing)._hazard_trial()
-    assert trial is not None and trial["obstacle"] == "building_crossing"
-    assert trial["direct_path_static_clearance_m"] <= -0.3
-    assert trial["approach_min_clearance_m"] >= 1.5
+    trials = episode_with(low, crossing)._hazard_trials()
+    assert trials and trials[0]["obstacle"] == "building_crossing"
+    assert trials[0]["direct_path_static_clearance_m"] <= -0.3
+    assert trials[0]["approach_min_clearance_m"] >= 1.5
 
-    assert episode_with(low)._hazard_trial() is None
+    assert episode_with(low)._hazard_trials() == []
 
     # A wall across the approach (cruise altitude included) makes the only crossing obstacle
     # unrunnable, so the search must not fall back to it.
     # Primitive sizes are full extents, so this wall spans x 19-21 and z -20..60: the cruise
     # leg at 34 m cannot avoid it.
     wall = box("blocking_wall", "walls", 20.0, 0.0, 20.0, 2.0, 40.0, 80.0)
-    assert episode_with(crossing, wall)._hazard_trial() is None
+    assert episode_with(crossing, wall)._hazard_trials() == []
 
     episode = episode_with(low)
 
@@ -1054,6 +1056,144 @@ def test_hazard_trial_searches_for_a_real_collision_course():
     assert result["passed"] is False and result["status"] == "skipped"
     assert result["reason"].startswith("no static obstacle offers a collision course")
     assert result["obstacles_considered"] == ["tree_low"]
+
+    # Two reachable candidates whose navigation is refused: the test must try both (not skip on
+    # the first) and keep each trial's clearances and refusal reason in the skip payload.
+    far = box("building_far", "urban_buildings", 60.0, 0.0, 3.0, 0.5, 0.5, 3.0)
+    episode = episode_with(crossing, far)
+    episode._ensure_airborne = airborne
+    attempted: list[tuple[float, float, float]] = []
+
+    async def refuse(eye, yaw_rad):
+        attempted.append(eye)
+        return {"passed": False, "reason": f"planned transit legs clearance -0.405 m < 1.5 m"}
+
+    episode._navigate = refuse
+    result = asyncio.run(episode.test_hazard())
+
+    # Every obstacle/heading candidate is tried (8 headings per obstacle), nearest first.
+    assert len(attempted) == 16, attempted
+    assert result["status"] == "skipped" and result["reason"].startswith("planned transit legs clearance")
+    considered = result["hazard_trials_considered"]
+    assert {entry["obstacle"] for entry in considered} == {"building_crossing", "building_far"}
+    assert considered[0]["obstacle"] == "building_crossing"
+    assert all(entry["outcome"] == "navigation refused" for entry in considered)
+    assert all(entry["direct_path_static_clearance_m"] <= -0.3 for entry in considered)
+    assert all(entry["route_reason"].startswith("planned transit legs clearance") for entry in considered)
+
+
+def test_approach_passes_on_minimum_range_not_the_final_range():
+    # The approach is one-shot: it holds at the standoff and the target can walk away or become
+    # undetectable afterwards, so arrival is judged on the closest ground-truth range.
+    import asyncio
+
+    from sim.scripts.campaign_episode import Episode
+    from sim.worldgen.geometry import CollisionWorld
+    from sim.worldgen.plan import Camera
+
+    chain = {"horus_iris": [0.0, 0.0, 34.0, 0.0, 0.0, 0.0],
+             "iris_with_gimbal": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+             "gimbal": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+             "pitch_link": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+
+    def sample(person_x: float, sim_time: float, drone_z: float = 6.16) -> dict:
+        # A realistic low approach: the camera sits ~0.2 m above the drone at ~6 m altitude, so a
+        # torso 2.4 m away is a ~6 m camera-to-torso range.
+        models = dict(chain)
+        models["horus_iris"] = [0.0, 0.0, drone_z, 0.0, 0.0, 0.0]
+        models["civ_target"] = [person_x, 0.0, 0.0, 0.0, 0.0, 0.0]
+        return {"wall_time": sim_time, "sim_time": sim_time, "models": models}
+
+    class FakeReader:
+        def __init__(self, samples):
+            self._samples = samples
+
+        def latest(self):
+            return self._samples[-1]
+
+        def snapshot(self):
+            return list(self._samples)
+
+        def extend(self, samples):
+            self._samples.extend(samples)
+
+    person = {"model": "civ_target", "posture": "standing"}
+
+    def episode_with(trial_samples) -> Episode:
+        # path_history starts empty: the trial's own samples are what _approach_one scores.
+        episode = object.__new__(Episode)
+        episode._gt = FakeReader(list(trial_samples))
+        episode._person_models = {"civ_target"}
+        episode.path_history = []
+        episode.world = CollisionWorld([])
+        episode.camera = Camera()
+        episode.camera_info = None
+        episode.camera_sensor_pose = (0.0, 0.0, 0.0, -1.57, -1.57, 0.0)
+        episode.camera_chain_relative = {
+            "iris_with_gimbal": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            "gimbal": (0.0, -0.01, -0.124923, math.pi / 2, 0.0, math.pi / 2),
+        }
+        empty_trace = type("_Trace", (), {"positions_at": lambda self, t: {}})()
+        episode._civilian_trace = empty_trace
+        episode._follow_trace = empty_trace
+        episode.people = [person]
+        episode._static_gt_people = []
+        episode._person_models = {"civ_target"}
+
+        async def skill(name, arguments, timeout_s=None, observer=None):
+            # The real wait records a ground-truth sample on every poll.
+            episode.path_history.extend(trial_samples)
+            episode._gt.extend(trial_samples)
+            return {"task_id": "t1", "skill": name, "status": "succeeded"}
+
+        episode._skill = skill
+        return episode
+
+    # Closest approach ~6 m (<= 5 + 2), final range ~20 m: the trial must pass.
+    arrival = episode_with([sample(12.0, 1.0), sample(2.4, 2.0), sample(20.0, 3.0)])
+    result = asyncio.run(arrival._approach_one(person, {"id": 5, "source": "detector"},
+                                               target_size=None, label="standing"))
+    assert result["passed"] is True and result["reason"] is None
+    assert result["gt_min_camera_to_torso_m"] < 7.0 and result["gt_final_camera_to_torso_m"] > 7.0
+    # The reported signed error is the closest approach, not the (much larger) final range.
+    assert result["distance_error_vs_5m_m"] == pytest.approx(result["gt_min_camera_to_torso_m"] - 5.0)
+    assert result["final_distance_error_vs_5m_m"] == pytest.approx(result["gt_final_camera_to_torso_m"] - 5.0)
+    assert result["final_distance_error_vs_5m_m"] > result["distance_error_vs_5m_m"]
+
+    # Never closer than ~9.7 m: the task succeeded but the trial must fail with the arrival reason.
+    distant = episode_with([sample(12.0, 1.0), sample(8.0, 2.0)])
+    result = asyncio.run(distant._approach_one(person, {"id": 5, "source": "detector"},
+                                               target_size=None, label="standing"))
+    assert result["passed"] is False and result["reason"].startswith("approach never closed")
+    assert result["arrival_limit_m"] == 7.0
+
+    # Grounder-only candidates carry no detector person evidence and need a declared size.
+    assert Episode._needs_declared_size({"source": "open_vocab"}) is True
+    assert Episode._needs_declared_size({"source": "point"}) is True
+    assert Episode._needs_declared_size({"source": "detector"}) is False
+
+
+def test_orbit_outcome_separates_never_validated_from_geometry():
+    from sim.scripts.campaign_episode import _orbit_outcome
+
+    passed, classification, reason = _orbit_outcome(status="expired", validated=False,
+                                                    reference_views=1, mean_radius_m=None)
+    assert passed is False and classification == "never_validated"
+    assert "never appearance-validated" in reason and "reference_views 1" in reason
+
+    passed, classification, reason = _orbit_outcome(status="expired", validated=True,
+                                                    reference_views=3, mean_radius_m=None)
+    assert passed is False and classification == "orbit_behaviour"
+    assert reason == "orbit produced no ground-truth samples"
+
+    passed, classification, reason = _orbit_outcome(status="expired", validated=True,
+                                                    reference_views=2, mean_radius_m=6.4)
+    assert passed is True and classification == "passed" and reason is None
+
+    passed, classification, reason = _orbit_outcome(status="failed", validated=True,
+                                                    reference_views=2, mean_radius_m=6.4)
+    assert passed is False and classification == "orbit_behaviour"
+    assert reason == "orbit task ended failed"
 
 
 def test_grounder_status_counts_a_late_service_as_active():
