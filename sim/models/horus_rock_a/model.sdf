@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="horus_rock_a">
+    <static>true</static>
+    <link name="link">
+      <visual name="rock">
+        <pose>0 0 0.6961 0 0 0</pose>
+        <geometry><mesh><uri>model://horus_rock_a/meshes/FallingRock01.dae</uri></mesh></geometry>
+        <material><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://horus_rock_a/materials/textures/FallingRocks_Albedo.jpg</albedo_map><normal_map>model://horus_rock_a/materials/textures/FallingRocks_Normal.jpg</normal_map><metalness>0</metalness><roughness>0.8</roughness></metal></pbr></material>
+      </visual>
+      <collision name="proxy_0_box">
+        <pose>0 0 0.6961 0 0 0</pose>
+        <geometry><box><size>1.49 1.4816 1.3923</size></box></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>

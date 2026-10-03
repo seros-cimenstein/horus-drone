@@ -1,0 +1,33 @@
+Source: Gazebo Fuel OpenRobotics/FoodCourtBenchShort, version 2
+URL: https://fuel.gazebosim.org/1.0/OpenRobotics/models/FoodCourtBenchShort/2/FoodCourtBenchShort.zip
+Archive SHA-256: c3e9d82e0fb5c286c43494ab34e41a79940d9ff6afe2913b8a9e8f7d310216d1 (byte-equal to the exact-version Fuel endpoint)
+Author (model.config): Wan Yi Seow
+Licence: Creative Commons Zero v1.0 Universal (CC0 1.0) (Fuel model-level publisher metadata at import time; the archive itself embeds no licence text)
+Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used.
+Notes: The upstream collision mesh (_Col.obj) and the metal/roughness maps are not copied; the HORUS model.sdf uses a box proxy for standalone collision.
+Files: materials/textures/FoodCourtBenchShort_Diffuse.png, meshes/FoodCourtBenchShort.mtl, meshes/FoodCourtBenchShort.obj
+
+Upstream model.config (verbatim):
+<?xml version='1.0' encoding='utf-8'?>
+<model>
+  <name>FoodCourtBenchShort</name>
+  <version>1.0</version>
+  <sdf version="1.6">model.sdf</sdf>
+
+  <author>
+    <name>Wan Yi Seow</name>
+    <email>wanyi@openrobotics.org</email>
+  </author>
+
+  <description>
+    Uncomfortable 2-seater bench.
+  </description>
+</model>
+
+meshes/FoodCourtBenchShort.mtl header (verbatim):
+# Blender MTL File: 'FoodCourtFurnitures.blend'
+# Material Count: 1
+
+meshes/FoodCourtBenchShort.obj header (verbatim):
+# Blender v2.90.0 OBJ File: 'FoodCourtFurnitures.blend'
+# www.blender.org

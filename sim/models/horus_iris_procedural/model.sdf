@@ -1,0 +1,2 @@
+<?xml version="1.0"?>
+<sdf version="1.9"><model name="horus_iris_procedural"><include><uri>model://horus_iris_with_gimbal_procedural</uri><name>iris_with_gimbal</name></include></model></sdf>

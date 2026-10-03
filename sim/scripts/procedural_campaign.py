@@ -588,8 +588,9 @@ def _one_episode(args: argparse.Namespace, kind: str, seed: int | None) -> dict[
             raise FileNotFoundError(f"world generator did not create {manifest} and {sdf}")
         record["manifest"] = str(manifest.relative_to(ROOT))
         record["sdf"] = str(sdf.relative_to(ROOT))
+        # run.sh start returns once the world is running (up to 900 s for 1.2 km generated worlds).
         _run_before_deadline([str(RUNNER), "start", "/horus/" + str(sdf.relative_to(ROOT))],
-                             episode_deadline, cap=180.0)
+                             episode_deadline, cap=960.0)
         active_id = (ROOT / "sim" / "run" / ".active").read_text(encoding="utf-8").strip()
         active_run = ROOT / "sim" / "run" / active_id
         record["sim_run_id"] = active_id

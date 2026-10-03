@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="horus_animal_cat">
+    <static>true</static>
+    <link name="link">
+      <visual name="body">
+        <geometry><mesh><uri>model://horus_animal_cat/meshes/cat.obj</uri></mesh></geometry>
+        <material><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://horus_animal_cat/materials/textures/cat_fur.png</albedo_map><metalness>0.0</metalness><roughness>1.0</roughness></metal></pbr></material>
+      </visual>
+      <collision name="body_envelope"><pose>-0.1133 0 0.1398 0 0 0</pose><geometry><box><size>0.6966 0.1386 0.2804</size></box></geometry></collision>
+    </link>
+  </model>
+</sdf>

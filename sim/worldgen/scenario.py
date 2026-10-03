@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from sim.worldgen.layout import PersonPlacement
 from sim.worldgen.sdf import f
+from sim.worldgen.surface import CANONICAL_MAP, MapSpec
 
 
 def person_record(person: PersonPlacement) -> dict:
@@ -80,12 +81,14 @@ def yaml_agent(agent: dict) -> list[str]:
 
 def scenario_text(name: str, seed: int, agents: list[dict],
                   ground_file: str | None = None, *, events: list[dict] | None = None,
-                  interactions: bool = False) -> str:
+                  interactions: bool = False, ground_map: MapSpec = CANONICAL_MAP) -> str:
     lines = [f"world: {name}", "rate_hz: 10", f"seed: {seed}"]
     if interactions:
         lines.append("interactions: true")
     if ground_file is not None:
-        lines.extend(("ground:", "  origin_xy: [-75.0, -75.0]", "  cell_m: 2.0",
+        origin = repr(float(ground_map.min))
+        lines.extend(("ground:", f"  origin_xy: [{origin}, {origin}]",
+                      f"  cell_m: {repr(float(ground_map.cell_m))}",
                       f"  file: {ground_file}"))
     lines.append("agents:")
     for agent in agents:

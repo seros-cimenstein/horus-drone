@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="horus_animal_crow">
+    <static>true</static>
+    <link name="link">
+      <visual name="body">
+        <geometry><mesh><uri>model://horus_animal_crow/meshes/crow.obj</uri></mesh></geometry>
+        <material><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://horus_animal_crow/materials/textures/crow_feather.png</albedo_map><metalness>0.0</metalness><roughness>1.0</roughness></metal></pbr></material>
+      </visual>
+      <collision name="body_envelope"><pose>-0.0021 0 0.1503 0 0 0</pose><geometry><box><size>0.3933 0.1956 0.2994</size></box></geometry></collision>
+    </link>
+  </model>
+</sdf>

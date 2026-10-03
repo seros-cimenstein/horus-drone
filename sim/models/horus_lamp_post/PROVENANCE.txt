@@ -1,0 +1,41 @@
+Source: Gazebo Fuel OpenRobotics/Lamp Post, version 3
+URL: https://fuel.gazebosim.org/1.0/OpenRobotics/models/Lamp%20Post/3/Lamp%20Post.zip
+Archive SHA-256: b58e3b135fe981ee889426d7cc7c122c69aa416a4316386320443b431ce27165 (byte-equal to the exact-version Fuel endpoint)
+Author (model.config): Cole Biesemeyer, Nate Koenig
+Licence: Creative Commons Zero v1.0 Universal (CC0 1.0) (Fuel model-level publisher metadata at import time; the archive itself embeds no licence text)
+Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used. COLLADA <image> references were rewritten to the copied meshes/ and materials/textures/ layout.
+Notes: The upstream model.sdf scales the mesh by 3 (9.27 m tall); the HORUS registry applies the same canonical scale.
+Files: materials/textures/Lamp_Post_Diffuse.png, materials/textures/Lamp_Post_Emissive.png, materials/textures/Lamp_Post_Spec.png, meshes/lamp_post.dae
+
+Upstream model.config (verbatim):
+<?xml version="1.0"?>
+
+<model>
+  <name>Lamp Post</name>
+  <version>1.0</version>
+  <sdf version="1.3">model-1_3.sdf</sdf>
+  <sdf version="1.4">model-1_4.sdf</sdf>
+  <sdf version="1.5">model.sdf</sdf>
+
+  <author>
+    <name>Cole Biesemeyer</name>
+    <email>cole.bsmr@gmail.com</email>
+  </author>
+
+  <author>
+    <name>Nate Koenig</name>
+    <email>nate@osrfoundation.com</email>
+  </author>
+
+  <description>
+    A lamp post
+  </description>
+
+</model>
+
+meshes/lamp_post.dae COLLADA contributor (verbatim):
+<contributor>
+      <author>Cole</author>
+      <authoring_tool>OpenCOLLADA for 3ds Max;  Version: 1.3.1;  Revision: 847M;  Platform: x64;  Configuration: Release_Max2012_static</authoring_tool>
+      <source_data>file:///C:/Users/Cole/Desktop/OSRF_Models/Icons/Exports/Lamp_Post.max</source_data>
+    </contributor>

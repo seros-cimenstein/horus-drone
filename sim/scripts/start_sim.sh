@@ -49,9 +49,15 @@ if [[ "${world_stem}" == "horus_indoor" ]]; then
 elif [[ "${world_stem}" == horus_forest* || "${world_stem}" == horus_urban* ]]; then
   payload_chain="horus_iris/iris_with_gimbal/horus_sensor_payload"
 fi
+# The executor/SITL profile follows the world: generated worlds (horus_<kind>_p<seed>) get the
+# procedural fence/speed parameters, canonical horus_forest/horus_urban worlds the outdoor ones.
+# An explicit HORUS_SITL_PARAM_FILE always wins.
 param_file="${HORUS_SITL_PARAM_FILE:-}"
-if [[ -z "${param_file}" && ( "${world_stem}" == horus_forest* || "${world_stem}" == horus_urban* ) ]]; then
-  param_file=/horus/config/ardupilot/horus_sitl_outdoor.parm
+if [[ -z "${param_file}" ]]; then
+  case "${world_stem}" in
+    horus_forest_p*|horus_urban_p*) param_file=/horus/config/ardupilot/horus_sitl_procedural.parm ;;
+    horus_forest*|horus_urban*) param_file=/horus/config/ardupilot/horus_sitl_outdoor.parm ;;
+  esac
 fi
 if [[ -n "${param_file}" && ! -r "${param_file}" ]]; then
   printf 'SITL parameter file is not readable: %s\n' "${param_file}" >&2
@@ -174,7 +180,7 @@ trap cleanup EXIT
 
 wait_for_tcp_port() {
   local port="$1"
-  local deadline=$((SECONDS + 60))
+  local deadline=$((SECONDS + ${2:-60}))
   while (( SECONDS < deadline )); do
     if python3 -c 'import socket, sys; s = socket.socket(); s.settimeout(0.2); result = s.connect_ex(("127.0.0.1", int(sys.argv[1]))); s.close(); sys.exit(result)' "${port}"; then
       return 0
@@ -281,7 +287,9 @@ fi
 bridge_pid=""
 if [[ -n "${payload_chain}" ]]; then
   (
-    if ! wait_for_tcp_port 5763; then
+    # serial2 opens only after Gazebo has loaded the world and SITL received its first physics
+    # frames; generated 1.2 km worlds take 60-90 s to load, so this wait is longer than serial0's.
+    if ! wait_for_tcp_port 5763 300; then
       printf 'Timed out waiting for SITL TCP port 5763; inspect %s/sitl.log.\n' "${log_dir}" >&2
       exit 1
     fi
@@ -354,6 +362,9 @@ if [[ "${gui_enabled}" == 1 ]]; then
 fi
 printf 'Gazebo server PID %s; ArduCopter SITL PID %s. Run data: %s\n' \
   "${gazebo_pid}" "${sitl_pid}" "${run_dir}"
+# Setup is complete: the world publishes statistics and the bootstrap MAVLink keeper has released
+# serial0, so the single flight client may connect now. run.sh start waits for this marker.
+: > "${log_dir}/sim.ready"
 
 disk_check_deadline=$((SECONDS + 5))
 while true; do

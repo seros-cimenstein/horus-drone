@@ -6,9 +6,10 @@ and reads only the files this script writes under ``sim/models``.
 
 Every archive is pinned by Fuel owner/name/version and SHA-256. Only listed mesh and texture
 members are copied (upstream model.sdf files, plugins, actors and scripts are never used);
-archive member paths are checked before reading. OBJ material libraries are rewritten to point
-at the copied textures. Each imported model directory gets a PROVENANCE.txt with the source,
-version, archive hash, full author, licence and any required attribution or change notice.
+archive member paths are checked before reading. OBJ material libraries and COLLADA ``<image>``
+references are rewritten to point at the copied textures. Each imported model directory gets a
+PROVENANCE.txt with the source, version, archive hash, full author, licence and any required
+attribution or change notice.
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ ARCHIVES = [
         "fuel": "OpenRobotics/Hatchback", "version": 3,
         "sha256": "dcd34e68cf43863991768c3ddbdeb322d6ee8bddaa01aa7da8267bbacfdb60ed",
         "license": CC0, "author": "Nate Koenig", "target": "horus_vehicle_hatchback",
-        "description": "hatchback car", "mtl": "meshes/hatchback.mtl",
+        "description": "hatchback car", "mtl": "meshes/hatchback.mtl", "standalone_sdf": True,
         "members": {"meshes/hatchback.obj": "meshes/hatchback.obj",
                     "materials/textures/hatchback.png": "materials/textures/hatchback.png",
                     "materials/textures/wheels3.png": "materials/textures/wheels3.png"},
@@ -64,6 +65,7 @@ ARCHIVES = [
         "sha256": "a99e5e16fabdd15e0fb962ff5294493f45f7a29df8615128cecc082f9fc910cd",
         "license": CC0, "author": "Nate Koenig", "target": "horus_vehicle_hatchback_red",
         "description": "red hatchback car (mesh shared with Hatchback)", "mtl": "meshes/hatchback.mtl",
+        "standalone_sdf": True,
         "members": {"meshes/hatchback.obj": "meshes/hatchback.obj",
                     "materials/textures/hatchback.png": "materials/textures/hatchback_red.png"},
         "textures": {"hatchback.png": "hatchback_red.png", "wheels3.png": "wheels3.png"},
@@ -75,6 +77,7 @@ ARCHIVES = [
         "sha256": "1659265c26d026ae5dbb7edf9106acf2a479073ba213da04ca5699fb39b34892",
         "license": CC0, "author": "Nate Koenig", "target": "horus_vehicle_hatchback_blue",
         "description": "blue hatchback car (mesh shared with Hatchback)", "mtl": "meshes/hatchback.mtl",
+        "standalone_sdf": True,
         "members": {"meshes/hatchback.obj": "meshes/hatchback.obj",
                     "materials/textures/hatchback.png": "materials/textures/hatchback_blue.png"},
         "textures": {"hatchback.png": "hatchback_blue.png", "wheels3.png": "wheels3.png"},
@@ -84,7 +87,7 @@ ARCHIVES = [
         "fuel": "OpenRobotics/Prius Hybrid", "version": 3,
         "sha256": "ea5d10f1a2c4e89f8a0441f2c9e623575ecd9a7670c81c3f23bb9204ca32b1ab",
         "license": CC0, "author": "Ian Chen", "target": "horus_vehicle_sedan",
-        "description": "Toyota Prius hybrid sedan", "mtl": "meshes/Hybrid.mtl",
+        "description": "Toyota Prius hybrid sedan", "mtl": "meshes/Hybrid.mtl", "standalone_sdf": True,
         "members": {"meshes/Hybrid.obj": "meshes/Hybrid.obj",
                     "materials/textures/Hybrid.png": "materials/textures/Hybrid.png",
                     "materials/textures/Hybrid_Interior.png": "materials/textures/Hybrid_Interior.png",
@@ -96,7 +99,7 @@ ARCHIVES = [
         "fuel": "OpenRobotics/SUV", "version": 4,
         "sha256": "729c066a1a2c1ba75a4453050a3c5022f02ccdfa75a4d4db4bab56104e3a1d54",
         "license": CC0, "author": "Nate Koenig", "target": "horus_vehicle_suv",
-        "description": "sport utility vehicle", "mtl": "meshes/suv.mtl",
+        "description": "sport utility vehicle", "mtl": "meshes/suv.mtl", "standalone_sdf": True,
         "members": {"meshes/suv.obj": "meshes/suv.obj",
                     "materials/textures/suv.png": "materials/textures/suv.png",
                     "materials/textures/wheels_01.png": "materials/textures/wheels_01.png"},
@@ -106,7 +109,7 @@ ARCHIVES = [
         "fuel": "OpenRobotics/Pickup", "version": 4,
         "sha256": "fa4d6702828deaef54e50717ddc341e0b9b487eaaea9a0605c91419c1744ab9e",
         "license": CC0, "author": "Nate Koenig", "target": "horus_vehicle_pickup",
-        "description": "pickup truck",
+        "description": "pickup truck", "standalone_sdf": True,
         "notes": "The COLLADA file names its author 'Cole' (OSRF Vehicles.max export); model.config names Nate Koenig.",
         "members": {"meshes/pickup.dae": "meshes/pickup.dae",
                     "materials/textures/pickup_diffuse.jpg": "materials/textures/pickup_diffuse.jpg",
@@ -116,7 +119,7 @@ ARCHIVES = [
         "fuel": "OpenRobotics/TruckBox", "version": 2,
         "sha256": "0d43837bb6482a408941e0f137bc102bee6afa5c50570f79e20fca69e070da07",
         "license": CC_BY, "author": "Roselle Carmen", "target": "horus_vehicle_box_truck",
-        "description": "box truck", "mtl": "meshes/truck.mtl", "attribution": True,
+        "description": "box truck", "mtl": "meshes/truck.mtl", "attribution": True, "standalone_sdf": True,
         "members": {"meshes/truck.obj": "meshes/truck.obj",
                     "meshes/TruckBox_Diffuse.png": "materials/textures/TruckBox_Diffuse.png"},
         "textures": {"TruckBox_Diffuse.png": "TruckBox_Diffuse.png"},
@@ -125,10 +128,122 @@ ARCHIVES = [
         "fuel": "OpenRobotics/TruckDelivery", "version": 2,
         "sha256": "8bfbad7401d9f9d0d819e1ac068efc95ce0b2fd3ba32779c8ac6273a98fb39f0",
         "license": CC_BY, "author": "Roselle Carmen", "target": "horus_vehicle_delivery_truck",
-        "description": "delivery truck", "mtl": "meshes/truck.mtl", "attribution": True,
+        "description": "delivery truck", "mtl": "meshes/truck.mtl", "attribution": True, "standalone_sdf": True,
         "members": {"meshes/truck.obj": "meshes/truck.obj",
                     "meshes/TruckDelivery_Diffuse.png": "materials/textures/TruckDelivery_Diffuse.png"},
         "textures": {"TruckDelivery_Diffuse.png": "TruckDelivery_Diffuse.png"},
+    },
+    # -- Trees, boulders, street furniture and a seated person for procedural scenery. The tree
+    # meshes carry no image references; their Ogre material scripts (alpha rejection) are not
+    # copied, so the HORUS model.sdf applies the branch/bark textures with alpha from the albedo
+    # texture (gz-sim calls Material::SetAlphaFromTexture for PBR albedo maps).
+    {
+        "fuel": "OpenRobotics/Pine Tree", "version": 6,
+        "sha256": "d436a44229321314e79e4c2ba709dc926e833a5b5d90d16c5d085c2a74576e25",
+        "license": CC0, "author": "Louise Poubel", "target": "horus_tree_pine",
+        "description": "conifer pine tree (branch and bark sub-meshes)", "standalone_sdf": True,
+        "notes": "Upstream materials/scripts (Ogre alpha rejection) are not copied; the branch "
+                 "texture keeps its alpha channel and the HORUS model.sdf uses it as a PBR albedo "
+                 "map so gz-sim alpha-tests the foliage.",
+        "members": {
+            "meshes/pine_tree.dae": "meshes/pine_tree.dae",
+            "materials/textures/bark_diffuse.png": "materials/textures/bark_diffuse.png",
+            "materials/textures/branch_2_diffuse.png": "materials/textures/branch_2_diffuse.png",
+        },
+        "textures": {"bark_diffuse.png": "bark_diffuse.png", "branch_2_diffuse.png": "branch_2_diffuse.png"},
+    },
+    {
+        "fuel": "OpenRobotics/Oak tree", "version": 7,
+        "sha256": "ae128176f707b571d2a2a47a1ab6b80596e81d96402501a64f4f28a49543daa5",
+        "license": CC0, "author": "Louise Poubel", "target": "horus_tree_oak",
+        "description": "broad-crowned oak tree (branch and bark sub-meshes)", "standalone_sdf": True,
+        "notes": "Upstream materials/scripts (Ogre alpha rejection) are not copied; the branch "
+                 "texture keeps its alpha channel and the HORUS model.sdf uses it as a PBR albedo "
+                 "map so gz-sim alpha-tests the foliage.",
+        "members": {
+            "meshes/oak_tree.dae": "meshes/oak_tree.dae",
+            "materials/textures/bark_diffuse.png": "materials/textures/bark_diffuse.png",
+            "materials/textures/branch_diffuse.png": "materials/textures/branch_diffuse.png",
+        },
+        "textures": {"bark_diffuse.png": "bark_diffuse.png", "branch_diffuse.png": "branch_diffuse.png"},
+    },
+    {
+        "fuel": "OpenRobotics/Falling Rock 1", "version": 6,
+        "sha256": "88b38504a76db87266409d658006fe18eb3220937bb0de2d90e945cc0e1ee317",
+        "license": CC_BY, "author": "Addisu Taddese, Cole Biesemeyer", "target": "horus_rock_a",
+        "description": "boulder (albedo and normal map; decimated collider hull)",
+        "attribution": True, "standalone_sdf": True,
+        "notes": "The roughness map is not copied (not used); FallingRock01_Collider.dae (the "
+                 "upstream decimated collision hull) is kept for reference, the HORUS model.sdf "
+                 "uses a box proxy for standalone collision.",
+        "members": {
+            "meshes/FallingRock01.dae": "meshes/FallingRock01.dae",
+            "meshes/FallingRock01_Collider.dae": "meshes/FallingRock01_Collider.dae",
+            "materials/textures/FallingRocks_Albedo.jpg": "materials/textures/FallingRocks_Albedo.jpg",
+            "materials/textures/FallingRocks_Normal.jpg": "materials/textures/FallingRocks_Normal.jpg",
+        },
+        "textures": {"FallingRocks_Albedo.jpg": "FallingRocks_Albedo.jpg",
+                     "FallingRocks_Normal.jpg": "FallingRocks_Normal.jpg"},
+    },
+    {
+        "fuel": "OpenRobotics/Lamp Post", "version": 3,
+        "sha256": "b58e3b135fe981ee889426d7cc7c122c69aa416a4316386320443b431ce27165",
+        "license": CC0, "author": "Cole Biesemeyer, Nate Koenig", "target": "horus_lamp_post",
+        "description": "street lamp post (diffuse, emissive and specular maps)", "standalone_sdf": True,
+        "notes": "The upstream model.sdf scales the mesh by 3 (9.27 m tall); the HORUS registry "
+                 "applies the same canonical scale.",
+        "members": {
+            "meshes/lamp_post.dae": "meshes/lamp_post.dae",
+            "materials/textures/Lamp_Post_Diffuse.png": "materials/textures/Lamp_Post_Diffuse.png",
+            "materials/textures/Lamp_Post_Emissive.png": "materials/textures/Lamp_Post_Emissive.png",
+            "materials/textures/Lamp_Post_Spec.png": "materials/textures/Lamp_Post_Spec.png",
+        },
+        "textures": {"Lamp_Post_Diffuse.png": "Lamp_Post_Diffuse.png",
+                     "Lamp_Post_Emissive.png": "Lamp_Post_Emissive.png",
+                     "Lamp_Post_Spec.png": "Lamp_Post_Spec.png"},
+    },
+    {
+        "fuel": "OpenRobotics/Bus", "version": 3,
+        "sha256": "39027081c04751263076816193a48bad2927e061bfe6219bcca8f17289c4f1ab",
+        "license": CC0, "author": "Nate Koenig", "target": "horus_vehicle_bus",
+        "description": "coach bus", "mtl": "meshes/bus.mtl", "standalone_sdf": True,
+        "notes": "The upstream model.sdf scales the mesh by 0.01 (12.49 m long); the HORUS registry "
+                 "applies the same canonical scale."
+                 " The bus material library names the SUV's wheel texture, so it is copied from "
+                 "sim/models/horus_vehicle_suv (same author and licence).",
+        "members": {"meshes/bus.obj": "meshes/bus.obj", "meshes/bus.mtl": "meshes/bus.mtl",
+                    "materials/textures/bus.png": "materials/textures/bus.png"},
+        "textures": {"bus.png": "bus.png", "wheels_01.png": "wheels_01.png"},
+        "copy_from": {"horus_vehicle_suv/materials/textures/wheels_01.png": "materials/textures/wheels_01.png"},
+        "copy_from_note": "OpenRobotics/SUV v4 archive, CC0 1.0 (the Bus model depends on the SUV's wheel texture)",
+    },
+    {
+        "fuel": "OpenRobotics/Rescue Randy Sitting", "version": 8,
+        "sha256": "611ef9ddadfba16be25963f2b79967fec6493c638ca77d0652f18fbbc5202fb3",
+        "license": CC0, "author": "Ian Chen, Cole Biesemeyer", "target": "horus_person_sitting_a",
+        "description": "rescue dummy in a seated pose", "standalone_sdf": True,
+        "notes": "The thermal texture and the upstream model.sdf's Artifact Proximity Detector "
+                 "include are not copied; the upstream link pose (-0.624 m) that puts the mesh base "
+                 "on the ground is recorded in the HORUS registry instead.",
+        "members": {
+            "meshes/rescue_randy.dae": "meshes/rescue_randy.dae",
+            "materials/textures/RescueRandy_Diffuse.jpg": "materials/textures/RescueRandy_Diffuse.jpg",
+        },
+    },
+    {
+        "fuel": "OpenRobotics/FoodCourtBenchShort", "version": 2,
+        "sha256": "c3e9d82e0fb5c286c43494ab34e41a79940d9ff6afe2913b8a9e8f7d310216d1",
+        "license": CC0, "author": "Wan Yi Seow", "target": "horus_bench_a",
+        "description": "short park bench (outdoor-plausible two-seater)", "standalone_sdf": True,
+        "notes": "The upstream collision mesh (_Col.obj) and the metal/roughness maps are not "
+                 "copied; the HORUS model.sdf uses a box proxy for standalone collision.",
+        "mtl": "meshes/FoodCourtBenchShort.mtl",
+        "members": {
+            "meshes/FoodCourtBenchShort.obj": "meshes/FoodCourtBenchShort.obj",
+            "meshes/FoodCourtBenchShort.mtl": "meshes/FoodCourtBenchShort.mtl",
+            "meshes/FoodCourtBenchShort_Diffuse.png": "materials/textures/FoodCourtBenchShort_Diffuse.png",
+        },
+        "textures": {"FoodCourtBenchShort_Diffuse.png": "FoodCourtBenchShort_Diffuse.png"},
     },
 ]
 
@@ -186,6 +301,35 @@ def _rewrite_mtl(text: str, textures: dict[str, str]) -> str:
         return f"{match.group(1)} ../materials/textures/{textures[basename]}"
     return re.sub(r"^(\s*map_K[ad])\s+(\S+)\s*$", replace, text, flags=re.MULTILINE)
 
+
+def _rewrite_dae(text: str, textures: dict[str, str]) -> str:
+    """Point COLLADA ``<image>`` file references at the copied textures layout.
+
+    gz-common resolves a COLLADA image path relative to the mesh file, so ``meshes/*.dae``
+    must reference ``../materials/textures/<name>``. ``<init_from>`` elements inside
+    ``<surface>`` are image ids, not paths, and are left untouched.
+    """
+    def replace_image(match: re.Match[str]) -> str:
+        def replace_reference(reference: re.Match[str]) -> str:
+            basename = reference.group(1).strip().rsplit("/", 1)[-1]
+            mapped = textures.get(basename)
+            if mapped is None:
+                return reference.group(0)
+            return f"<init_from>../materials/textures/{mapped}</init_from>"
+
+        return re.sub(r"<init_from>([^<]*)</init_from>", replace_reference, match.group(0))
+
+    return re.sub(r"<image\b[^>]*>.*?</image>", replace_image, text, flags=re.DOTALL)
+
+
+def _validate_dae_images(path: Path, target: Path) -> None:
+    """Every COLLADA image reference must resolve to a copied file inside the model."""
+    for block in re.findall(r"<image\b[^>]*>.*?</image>", path.read_text(encoding="utf-8"), re.DOTALL):
+        for value in re.findall(r"<init_from>([^<]*)</init_from>", block):
+            resolved = (path.parent / value.strip()).resolve()
+            if not resolved.is_relative_to(target.resolve()) or not resolved.is_file():
+                raise RuntimeError(f"{path.name}: image reference {value!r} does not resolve inside the model")
+
 def _provenance(entry: dict, archive: zipfile.ZipFile) -> str:
     owner, name = entry["fuel"].split("/", 1)
     lines = [
@@ -197,7 +341,9 @@ def _provenance(entry: dict, archive: zipfile.ZipFile) -> str:
         "the archive itself embeds no licence text)",
         "Changes by HORUS: copied only the mesh and texture files listed below; textures larger than "
         f"{MAX_TEXTURE_PX} px were downscaled; OBJ material texture paths were rewritten; the upstream "
-        "model.sdf and any plugins/scripts were not used.",
+        "model.sdf and any plugins/scripts were not used."
+        + (" COLLADA <image> references were rewritten to the copied meshes/ and materials/textures/ layout."
+           if entry.get("textures") and any(rel.endswith(".dae") for rel in entry["members"].values()) else ""),
     ]
     if entry.get("attribution"):
         lines.append(f"Attribution: \"{name}\" by {entry['author']} (Open Robotics), Gazebo Fuel, "
@@ -206,7 +352,8 @@ def _provenance(entry: dict, archive: zipfile.ZipFile) -> str:
         lines.append(f"Notes: {entry['notes']}")
     lines.append("Files: " + ", ".join(sorted(entry["members"].values())))
     for source, relative in entry.get("copy_from", {}).items():
-        lines.append(f"Copied: {relative} from sim/models/{source} (base Hatchback v3 archive, CC0 1.0)")
+        note = entry.get("copy_from_note", "base Hatchback v3 archive, CC0 1.0")
+        lines.append(f"Copied: {relative} from sim/models/{source} ({note})")
     lines.append("")
     lines.append("Upstream model.config (verbatim):")
     lines.append(archive.read("model.config").decode("utf-8", "replace").strip())
@@ -224,11 +371,17 @@ def _provenance(entry: dict, archive: zipfile.ZipFile) -> str:
 
 
 def _model_config(entry: dict) -> str:
+    if entry.get("standalone_sdf"):
+        tail = "Mesh/texture library with a HORUS-authored model.sdf (visual mesh + proxy collisions)."
+        sdf = '<sdf version="1.9">model.sdf</sdf>'
+    else:
+        tail = "Mesh/texture library only."
+        sdf = ""
     return ('<?xml version="1.0"?>\n'
-            f"<model><name>{entry['target']}</name><version>1.0</version>"
+            f"<model><name>{entry['target']}</name><version>1.0</version>{sdf}"
             f"<author><name>{entry['author']}</name></author>"
             f"<description>{entry['description']} from Gazebo Fuel {entry['fuel']} v{entry['version']} "
-            f"({entry['license']}); see PROVENANCE.txt. Mesh/texture library only.</description></model>\n")
+            f"({entry['license']}); see PROVENANCE.txt. {tail}</description></model>\n")
 
 
 def import_archive(entry: dict, cache: Path) -> dict:
@@ -245,8 +398,13 @@ def import_archive(entry: dict, cache: Path) -> dict:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.suffix.lower() in (".png", ".jpg"):
             _save_texture(payload, destination)
+        elif destination.suffix.lower() == ".dae" and entry.get("textures"):
+            destination.write_text(_rewrite_dae(payload.decode("utf-8"), entry["textures"]), encoding="utf-8")
         else:
             destination.write_bytes(payload)
+    for relative in entry["members"].values():
+        if relative.endswith(".dae"):
+            _validate_dae_images(target / relative, target)
     for source, relative in entry.get("copy_from", {}).items():
         shared = MODELS / source
         if not shared.is_file():
@@ -348,9 +506,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache", type=Path, default=Path("/tmp/horus-fuel-cache"),
                         help="download cache; archives are verified against pinned SHA-256")
+    parser.add_argument("--select", action="append", default=[], metavar="TARGET",
+                        help="import only these model directories (repeatable); derived human "
+                             "textures are skipped because they depend on the full import")
     args = parser.parse_args(argv)
-    imported = [import_archive(entry, args.cache) for entry in ARCHIVES]
-    textures = derive_human_textures()
+    entries = [entry for entry in ARCHIVES if not args.select or entry["target"] in args.select]
+    if args.select and not entries:
+        parser.error(f"no archive matches {args.select}")
+    imported = [import_archive(entry, args.cache) for entry in entries]
+    textures = [] if args.select else derive_human_textures()
     print(json.dumps({"imported": imported, "derived_textures": textures}, indent=2))
     return 0
 

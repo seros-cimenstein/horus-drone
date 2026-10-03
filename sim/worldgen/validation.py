@@ -16,11 +16,11 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import Any
 
-from sim.worldgen.geometry import CollisionWorld, load_collisions
+from sim.worldgen.geometry import CollisionWorld, load_collisions, parse_scenery_sidecar
 from sim.worldgen.paths import FilletedPath
 from sim.worldgen.plan import (
-    Camera, Ground, column_clearance, cruise_legs, legs_clearance, person_point, plan_follow,
-    plan_vantage,
+    CANONICAL_MAX_LEG_M, CANONICAL_VANTAGE_BOUNDS_M, Camera, Ground, column_clearance,
+    cruise_legs, legs_clearance, person_point, plan_follow, plan_vantage,
 )
 
 # The campaign's posture-targeted tests need a target the detector can actually see; recall is
@@ -54,11 +54,19 @@ def _ground(kind: str, layout: Any) -> Ground:
 
 def _load_world(kind: str, layout: Any, sdf: str, *, model_dir: Path, world_dir: Path,
                 files: dict[str, bytes | str] | None = None) -> tuple[CollisionWorld, Ground]:
+    # The SDF is validated from a temp file, so the scenery sidecar cannot sit next to it:
+    # parse the in-memory `<stem>.scenery.json` and pass its proxies explicitly.
+    scenery = []
+    for relative, content in (files or {}).items():
+        if relative.endswith(".scenery.json"):
+            text = content.decode("utf-8") if isinstance(content, bytes) else content
+            scenery.extend(parse_scenery_sidecar(text))
     with tempfile.NamedTemporaryFile(mode="w", suffix=".sdf", encoding="utf-8") as stream:
         stream.write(sdf)
         stream.flush()
         primitives = load_collisions(stream.name, resource_paths=(model_dir, world_dir),
-                                     models=in_memory_models(files or {}))
+                                     models=in_memory_models(files or {}),
+                                     scenery_proxies=scenery or None)
     return CollisionWorld(primitives), _ground(kind, layout)
 
 
@@ -438,6 +446,11 @@ def world_report(world: CollisionWorld, ground: Ground, manifest: dict[str, Any]
     kind = manifest["kind"]
     from sim.worldgen.layout import FOREST_VANTAGE_ROLES
 
+    # Procedural worlds plan over the whole map with their flight profile's limits; canonical
+    # worlds keep the 60 m actor inset and 60 m cruise legs they shipped with.
+    flight = manifest.get("flight") or {}
+    vantage_bounds = float(flight.get("vantage_bounds_m", CANONICAL_VANTAGE_BOUNDS_M))
+    max_leg = float(flight.get("max_leg_m", CANONICAL_MAX_LEG_M))
     roles = FOREST_VANTAGE_ROLES if kind == "forest" else ("red_shirt", "collapsed")
     for index, role in enumerate(roles):
         person = next((p for p in manifest["people"] if p["role"] == role), None)
@@ -446,11 +459,13 @@ def world_report(world: CollisionWorld, ground: Ground, manifest: dict[str, Any]
             continue
         point = person_point(person, ground, person["posture"])
         vantage = plan_vantage(world, ground, camera, person["model"], point,
-                               random.Random(manifest["seed"] * 17 + index), transit_alt=transit)
+                               random.Random(manifest["seed"] * 17 + index), transit_alt=transit,
+                               bounds=vantage_bounds)
         if vantage is None:
             failures.append(f"no safe line-of-sight vantage for {person['model']}")
             continue
-        legs = cruise_legs((0.0, 0.0, 0.0), vantage.eye, vantage.heading_deg, transit)
+        legs = cruise_legs((0.0, 0.0, 0.0), vantage.eye, vantage.heading_deg, transit,
+                           max_leg_m=max_leg)
         if legs_clearance(world, (0.0, 0.0, 3.5), legs) < 1.5:
             failures.append(f"transit to {person['model']} vantage is unsafe")
 
@@ -472,7 +487,7 @@ def world_report(world: CollisionWorld, ground: Ground, manifest: dict[str, Any]
                 continue
             vantage = plan_vantage(world, ground, camera, person["model"], point,
                                    random.Random(manifest["seed"] * 31 + len(observable)),
-                                   transit_alt=transit)
+                                   transit_alt=transit, bounds=vantage_bounds)
             if vantage is None or vantage.slant_m > OBSERVABLE_SLANT_MAX_M:
                 continue
             observable.append(person["model"])

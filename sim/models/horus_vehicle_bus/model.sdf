@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="horus_vehicle_bus">
+    <static>true</static>
+    <link name="link">
+      <visual name="bus">
+        <pose>0 0 0.0007 0 0 0</pose>
+        <geometry><mesh><uri>model://horus_vehicle_bus/meshes/bus.obj</uri><scale>0.01 0.01 0.01</scale></mesh></geometry>
+      </visual>
+      <collision name="proxy_0_box">
+        <pose>0 -0.0516 1.8492 0 0 0</pose>
+        <geometry><box><size>2.7077 12.4861 3.6983</size></box></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>

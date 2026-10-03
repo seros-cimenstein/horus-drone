@@ -13,14 +13,49 @@ or a 2D NumPy array (``heights[row][col]``, rows along +y).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 from typing import Any, Sequence
 
 HEIGHT_DECIMALS = 4  # the COLLADA writer's precision; grids are rounded to it before export
-MAP_MIN = -75.0
-MAP_SIZE = 150.0
-GROUND_CELL = 2.0
-GRID_SIDE = int(MAP_SIZE / GROUND_CELL) + 1
+
+
+@dataclass(frozen=True, slots=True)
+class MapSpec:
+    """The square map extent shared by the terrain grid, textures and the planners.
+
+    ``half_m`` is the half extent (the map spans ``-half_m .. +half_m`` on both axes) and
+    ``cell_m`` the terrain grid spacing in metres. ``grid_side`` grid nodes span one axis
+    end to end, so the exported height grid is ``grid_side x grid_side``.
+    """
+
+    half_m: float
+    cell_m: float
+
+    def __post_init__(self) -> None:
+        if self.half_m <= 0.0:
+            raise ValueError(f"half_m must be positive, got {self.half_m!r}")
+        if self.cell_m <= 0.0:
+            raise ValueError(f"cell_m must be positive, got {self.cell_m!r}")
+
+    @property
+    def min(self) -> float:
+        """World coordinate of the lower map edge (both axes)."""
+        return -self.half_m
+
+    @property
+    def size(self) -> float:
+        """Full side length of the map in metres."""
+        return 2.0 * self.half_m
+
+    @property
+    def grid_side(self) -> int:
+        """Number of terrain grid nodes along one axis."""
+        return int(self.size / self.cell_m) + 1
+
+
+CANONICAL_MAP = MapSpec(75.0, 2.0)      # the committed 150 m worlds
+PROCEDURAL_MAP = MapSpec(600.0, 4.0)    # generated worlds: 1.2 km, 4 m terrain cells (301 x 301)
 
 
 def quantize_rows(rows: Sequence[Sequence[float]]) -> list[list[float]]:

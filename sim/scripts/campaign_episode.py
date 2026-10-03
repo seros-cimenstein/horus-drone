@@ -32,6 +32,21 @@ TERMINAL = {"succeeded", "failed", "cancelled", "expired"}
 STOP = threading.Event()
 CLEARANCE_THRESHOLD_M = 1.5
 CLEARANCE_ROUNDING_TOLERANCE_M = 0.005
+# Lowest real-time factor campaign hosts show on the 1.2 km worlds (Koko: ~0.35-0.45; see
+# sim/README.md). Command TTLs are wall-clock, so a leg must budget sim_time /
+# CAMPAIGN_MIN_RTF wall seconds.
+CAMPAIGN_MIN_RTF = 0.35
+
+
+def _goto_ttl_s(leg_distance_m: float, speed_m_s: float) -> float:
+    """Wall-clock goto TTL for one cruise leg, covering the campaign's RTF floor.
+
+    The executor TTL is wall-clock, so a leg of ``leg_distance_m`` at ``speed_m_s`` needs
+    ``distance / (speed * CAMPAIGN_MIN_RTF)`` wall seconds; 60 s covers acceleration, yaw
+    alignment and the arrival slowdown. The 120 s floor keeps canonical 60 m legs (and every
+    existing canonical command) unchanged.
+    """
+    return max(120.0, leg_distance_m / (max(0.1, speed_m_s) * CAMPAIGN_MIN_RTF) + 60.0)
 
 CAMERA_POSE_CHAIN = ("horus_iris", "iris_with_gimbal", "gimbal", "pitch_link")
 CAMERA_POSE_HISTORY = frozenset(CAMERA_POSE_CHAIN)
@@ -795,6 +810,13 @@ def _copy_sitl_console(directory: Path) -> str | None:
 
 
 class Episode:
+    # Planner limits used before ``__init__`` resolves the world's flight profile (canonical
+    # 150 m values; see sim/worldgen/plan.CANONICAL_*). ``__init__`` overwrites them from the
+    # world profile; ``object.__new__`` test fixtures get the canonical defaults.
+    vantage_bounds_m = 60.0
+    max_leg_m = 60.0
+    transit_speed_m_s = 3.0
+
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.ttl_scale = float(getattr(args, "ttl_scale", 1.0) or 1.0)
@@ -835,6 +857,37 @@ class Episode:
         self._person_models = {str(person.get("model", "")) for person in self.people}
         self.follow = self.manifest.get("follow", {})
         self.transit_alt = float(self.manifest["transit_altitude_m"])
+        # The world's flight profile: generated worlds run the procedural profile, canonical
+        # worlds keep the outdoor one. It supplies the executor config the MCP server loads
+        # (HORUS_CONFIG/--config) and the planner limits: vantage bounds, cruise leg length
+        # and the expected transit speed for per-leg command TTLs.
+        from horus.config import load_config
+        from sim.worldgen.plan import CANONICAL_MAX_LEG_M, CANONICAL_VANTAGE_BOUNDS_M
+        self.procedural = not bool(self.manifest.get("canonical", True))
+        self.profile_name = (
+            f"horus_procedural_{self.kind}" if self.procedural else f"horus_{self.kind}"
+        )
+        self.config_container_path = f"/horus/config/{self.profile_name}.yaml"
+        self.config_relative_path = f"config/{self.profile_name}.yaml"
+        profile = load_config(ROOT / self.config_relative_path).executor
+        polygon = profile.geofence_polygon_ned
+        if self.procedural and polygon:
+            self.vantage_bounds_m = min(max(abs(north), abs(east)) for north, east in polygon)
+            self.max_leg_m = float(profile.max_distance_m)
+        else:
+            # Canonical worlds keep the planner limits they shipped with: the 60 m actor
+            # geofence inset and 60 m cruise legs.
+            self.vantage_bounds_m = CANONICAL_VANTAGE_BOUNDS_M
+            self.max_leg_m = CANONICAL_MAX_LEG_M
+        cruise_gate = profile.cruise_min_altitude_m
+        if (
+            profile.cruise_speed_m_s is not None
+            and cruise_gate is not None
+            and self.transit_alt >= cruise_gate
+        ):
+            self.transit_speed_m_s = float(profile.cruise_speed_m_s)
+        else:
+            self.transit_speed_m_s = float(profile.max_speed_m_s)
         self.tests: dict[str, dict[str, Any]] = {}
         self.path_history: list[dict[str, Any]] = []
         self.start_wall = time.monotonic()
@@ -871,7 +924,7 @@ class Episode:
 
     def _start_server(self) -> None:
         environment = dict(os.environ)
-        environment["HORUS_CONFIG"] = f"/horus/config/horus_{self.kind}.yaml"
+        environment["HORUS_CONFIG"] = self.config_container_path
         environment["HORUS_RUN_DIR"] = str(self.directory)
         environment["HORUS_EVENT_LOG"] = str(self.directory / "events.jsonl")
         self._server_log = (self.directory / "mcp.log").open("w", encoding="utf-8")
@@ -1270,7 +1323,7 @@ class Episode:
             point = person_point(person, self.ground, posture)
             vantage = plan_vantage(self.world, self.ground, self.camera, str(person["model"]), point,
                                    self.rng, transit_alt=self.transit_alt, require_los=False,
-                                   min_clearance_m=1.5, attempts=160)
+                                   min_clearance_m=1.5, bounds=self.vantage_bounds_m, attempts=160)
             if vantage is None:
                 continue
             if vantage.blocker and blocked is None:
@@ -1291,16 +1344,22 @@ class Episode:
         start = self._drone()
         if start is None:
             return {"passed": False, "reason": "no ground-truth drone pose"}
-        legs = cruise_legs(start[:3], eye, heading_deg(yaw_rad), self.transit_alt)
+        legs = cruise_legs(start[:3], eye, heading_deg(yaw_rad), self.transit_alt,
+                           max_leg_m=self.max_leg_m)
         clearance = legs_clearance(self.world, start[:3], legs, drone_radius_m=0.6)
         if _clearance_below_threshold(clearance):
             return {"passed": False, "reason": f"planned transit legs clearance {clearance:.3f} m < "
                     f"{CLEARANCE_THRESHOLD_M:.1f} m",
                     "min_clearance_m": clearance, "legs": legs}
         statuses = []
+        previous = start[:3]
         for point, heading in legs:
-            response = await self._skill("goto", {"pose": ned_pose(point), "heading_deg": heading, "ttl_s": 120.0},
-                                         timeout_s=180.0)
+            leg_distance = math.dist(previous, point)
+            ttl_s = _goto_ttl_s(leg_distance, self.transit_speed_m_s)
+            response = await self._skill("goto", {"pose": ned_pose(point), "heading_deg": heading,
+                                                  "ttl_s": ttl_s},
+                                         timeout_s=max(180.0, ttl_s + 60.0))
+            previous = point
             statuses.append(response)
             if response.get("status") != "succeeded":
                 return {"passed": False, "reason": f"goto ended {response.get('status')}",
@@ -1478,7 +1537,7 @@ class Episode:
         point = person_point(dict(person), self.ground, str(person.get("posture", "standing")))
         vantage = plan_vantage(self.world, self.ground, self.camera, str(person.get("model")), point,
                                self.rng, transit_alt=self.transit_alt, require_los=True,
-                               min_clearance_m=1.5, attempts=400)
+                               min_clearance_m=1.5, bounds=self.vantage_bounds_m, attempts=400)
         if vantage is None:
             return None, None, "no clear collision-safe vantage for target"
         route = await self._navigate(vantage.eye, vantage.yaw_rad)
@@ -1545,7 +1604,8 @@ class Episode:
         from sim.scripts.procedural_campaign import match_candidates_to_people
         point = person_point(person, self.ground, str(person.get("posture", "standing")))
         vantage = plan_vantage(self.world, self.ground, self.camera, str(person["model"]), point, self.rng,
-                               transit_alt=self.transit_alt, require_los=True, min_clearance_m=1.5, attempts=220)
+                               transit_alt=self.transit_alt, require_los=True, min_clearance_m=1.5,
+                               bounds=self.vantage_bounds_m, attempts=220)
         if vantage is None:
             return None, "no collision-safe vantage"
         route = await self._navigate(vantage.eye, vantage.yaw_rad)
@@ -2042,10 +2102,10 @@ class Episode:
         follow_person = next((person for person in self.people if person.get("model") == intended_model), None)
         expected_colour = self.follow.get("shirt_colour_attribute")
         env = dict(os.environ)
-        env["HORUS_CONFIG"] = f"/horus/config/horus_{self.kind}.yaml"
+        env["HORUS_CONFIG"] = self.config_container_path
         env["PYTHONUNBUFFERED"] = "1"
         cmd = ["/opt/horus-venv/bin/horus", "--server-url", "http://127.0.0.1:8000/mcp",
-               "--config", f"config/horus_{self.kind}.yaml", "--mission", str(mission_path)]
+               "--config", self.config_relative_path, "--mission", str(mission_path)]
         proc = subprocess.Popen(cmd, cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, bufsize=1)
         output_queue: queue.Queue[str | None] = queue.Queue()
@@ -2239,7 +2299,8 @@ class Episode:
                 if not _hazard_path_is_collision_course(clearance):
                     continue
                 yaw_rad = math.atan2(destination[1] - start[1], destination[0] - start[0])
-                legs = cruise_legs(drone[:3], start, heading_deg(yaw_rad), self.transit_alt)
+                legs = cruise_legs(drone[:3], start, heading_deg(yaw_rad), self.transit_alt,
+                                   max_leg_m=self.max_leg_m)
                 approach_clearance = legs_clearance(self.world, drone[:3], legs, drone_radius_m=0.6)
                 if _clearance_below_threshold(approach_clearance):
                     continue
@@ -2276,7 +2337,7 @@ class Episode:
             if live is None:
                 break
             legs = cruise_legs(live[:3], candidate["start"], heading_deg(candidate["yaw_rad"]),
-                               self.transit_alt)
+                               self.transit_alt, max_leg_m=self.max_leg_m)
             live_clearance = legs_clearance(self.world, live[:3], legs, drone_radius_m=0.6)
             entry = {**_hazard_trial_summary(candidate), "live_transit_clearance_m": live_clearance}
             if _clearance_below_threshold(live_clearance):

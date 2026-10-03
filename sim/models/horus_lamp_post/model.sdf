@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="horus_lamp_post">
+    <static>true</static>
+    <link name="link">
+      <visual name="lamp">
+        <pose>0 0 0 0 0 0</pose>
+        <geometry><mesh><uri>model://horus_lamp_post/meshes/lamp_post.dae</uri><scale>3 3 3</scale></mesh></geometry>
+      </visual>
+      <collision name="proxy_0_cylinder">
+        <pose>0 0.0178 4.1891 0 0 0</pose>
+        <geometry><cylinder><radius>0.0879</radius><length>8.3783</length></cylinder></geometry>
+      </collision>
+      <collision name="proxy_1_box">
+        <pose>0 -1.4853 8.8251 0 0 0</pose>
+        <geometry><box><size>0.4881 3.1821 0.8935</size></box></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>

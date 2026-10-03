@@ -8,7 +8,7 @@ from typing import Sequence
 from sim.worldgen.png import png_rgb, solid_png
 from sim.worldgen.layout import distance_to_path
 from sim.worldgen.sdf import TERRAIN_COLLIDE_BITMASK, f
-from sim.worldgen.surface import GRID_SIDE, GROUND_CELL, MAP_MIN, MAP_SIZE
+from sim.worldgen.surface import CANONICAL_MAP, MapSpec
 
 
 def write_npy(rows: Sequence[Sequence[float]]) -> bytes:
@@ -43,7 +43,8 @@ def noise_texture(width: int, height: int, base: tuple[int, int, int], seed: int
                   variation: int, *, style: str = "mottled",
                   trail_paths: Sequence[tuple[float, float]] | None = None,
                   clearing: tuple[float, float] | None = None,
-                  clearing_radius: float = 17.0) -> bytes:
+                  clearing_radius: float = 17.0,
+                  map_spec: MapSpec = CANONICAL_MAP) -> bytes:
     rng = random.Random(seed)
     broad_noise = noise_grid(rng, 12, 12)
     detail_noise = noise_grid(rng, 64, 64)
@@ -59,8 +60,8 @@ def noise_texture(width: int, height: int, base: tuple[int, int, int], seed: int
             color = [max(0, min(255, round(channel + grain * variation + fleck)))
                      for channel in base]
             if trail_paths is not None and clearing is not None:
-                x = MAP_MIN + u * MAP_SIZE
-                y = MAP_MIN + v * MAP_SIZE
+                x = map_spec.min + u * map_spec.size
+                y = map_spec.min + v * map_spec.size
                 litter = max(0.0, min(0.42, (broad + 0.25) * 0.28))
                 clearing_distance = math.hypot(x - clearing[0], y - clearing[1])
                 clearing_mix = max(0.0, min(1.0, (clearing_radius - clearing_distance) / 8.0))
@@ -86,28 +87,45 @@ def noise_texture(width: int, height: int, base: tuple[int, int, int], seed: int
 
 
 
-def terrain_dae(rows: Sequence[Sequence[float]]) -> str:
+def _require_square_grid(rows: Sequence[Sequence[float]], map_spec: MapSpec) -> int:
+    """Validate a square height grid against ``map_spec`` and return its side length."""
+    side = len(rows)
+    if side != map_spec.grid_side or any(len(row) != side for row in rows):
+        raise ValueError(f"height grid must be {map_spec.grid_side} x {map_spec.grid_side} for "
+                         f"{map_spec!r}, got {side} rows")
+    return side
+
+
+def terrain_dae(rows: Sequence[Sequence[float]], map_spec: MapSpec = CANONICAL_MAP, *,
+                uv_tile_m: float | None = None) -> str:
+    side = _require_square_grid(rows, map_spec)
     points: list[str] = []
     normals: list[str] = []
     texcoords: list[str] = []
     for row, values in enumerate(rows):
-        y = MAP_MIN + row * GROUND_CELL
-        lower_row, upper_row = max(0, row - 1), min(GRID_SIDE - 1, row + 1)
+        y = map_spec.min + row * map_spec.cell_m
+        lower_row, upper_row = max(0, row - 1), min(side - 1, row + 1)
         for col, z in enumerate(values):
-            x = MAP_MIN + col * GROUND_CELL
+            x = map_spec.min + col * map_spec.cell_m
             points.extend((f(x), f(y), f(z)))
-            texcoords.extend((f(col / (GRID_SIDE - 1)), f(row / (GRID_SIDE - 1))))
-            left_col, right_col = max(0, col - 1), min(GRID_SIDE - 1, col + 1)
-            dz_dx = (values[right_col] - values[left_col]) / ((right_col - left_col) * GROUND_CELL)
-            dz_dy = (rows[upper_row][col] - rows[lower_row][col]) / ((upper_row - lower_row) * GROUND_CELL)
+            if uv_tile_m is None:
+                texcoords.extend((f(col / (side - 1)), f(row / (side - 1))))
+            else:
+                # Generated 1.2 km maps tile a seamless ground texture every ``uv_tile_m``
+                # metres instead of stretching one 512 px image over the whole map.
+                texcoords.extend((f(col * map_spec.cell_m / uv_tile_m),
+                                  f(row * map_spec.cell_m / uv_tile_m)))
+            left_col, right_col = max(0, col - 1), min(side - 1, col + 1)
+            dz_dx = (values[right_col] - values[left_col]) / ((right_col - left_col) * map_spec.cell_m)
+            dz_dy = (rows[upper_row][col] - rows[lower_row][col]) / ((upper_row - lower_row) * map_spec.cell_m)
             nx, ny, nz = -dz_dx, -dz_dy, 1.0
             magnitude = math.sqrt(nx * nx + ny * ny + nz * nz)
             normals.extend(f(value / magnitude) for value in (nx, ny, nz))
     triangles: list[str] = []
-    for row in range(GRID_SIDE - 1):
-        for col in range(GRID_SIDE - 1):
-            a = row * GRID_SIDE + col
-            b, d = a + 1, a + GRID_SIDE
+    for row in range(side - 1):
+        for col in range(side - 1):
+            a = row * side + col
+            b, d = a + 1, a + side
             c = d + 1
             for vertex in (a, b, c, a, c, d):
                 triangles.extend((str(vertex), str(vertex), str(vertex)))
@@ -122,11 +140,11 @@ def terrain_dae(rows: Sequence[Sequence[float]]) -> str:
   </profile_COMMON></effect></library_effects>
   <library_materials><material id="forest-ground-material" name="forest ground"><instance_effect url="#forest-ground-effect"/></material></library_materials>
   <library_geometries><geometry id="terrain" name="forest terrain"><mesh>
-    <source id="terrain-positions"><float_array id="terrain-positions-array" count="{len(points)}">{' '.join(points)}</float_array><technique_common><accessor source="#terrain-positions-array" count="{GRID_SIDE * GRID_SIDE}" stride="3"><param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/></accessor></technique_common></source>
-    <source id="terrain-normals"><float_array id="terrain-normals-array" count="{len(normals)}">{' '.join(normals)}</float_array><technique_common><accessor source="#terrain-normals-array" count="{GRID_SIDE * GRID_SIDE}" stride="3"><param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/></accessor></technique_common></source>
-    <source id="terrain-uv"><float_array id="terrain-uv-array" count="{len(texcoords)}">{' '.join(texcoords)}</float_array><technique_common><accessor source="#terrain-uv-array" count="{GRID_SIDE * GRID_SIDE}" stride="2"><param name="S" type="float"/><param name="T" type="float"/></accessor></technique_common></source>
+    <source id="terrain-positions"><float_array id="terrain-positions-array" count="{len(points)}">{' '.join(points)}</float_array><technique_common><accessor source="#terrain-positions-array" count="{side * side}" stride="3"><param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/></accessor></technique_common></source>
+    <source id="terrain-normals"><float_array id="terrain-normals-array" count="{len(normals)}">{' '.join(normals)}</float_array><technique_common><accessor source="#terrain-normals-array" count="{side * side}" stride="3"><param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/></accessor></technique_common></source>
+    <source id="terrain-uv"><float_array id="terrain-uv-array" count="{len(texcoords)}">{' '.join(texcoords)}</float_array><technique_common><accessor source="#terrain-uv-array" count="{side * side}" stride="2"><param name="S" type="float"/><param name="T" type="float"/></accessor></technique_common></source>
     <vertices id="terrain-vertices"><input semantic="POSITION" source="#terrain-positions"/></vertices>
-    <triangles material="forest-ground-material" count="{(GRID_SIDE - 1) * (GRID_SIDE - 1) * 2}"><input semantic="VERTEX" source="#terrain-vertices" offset="0"/><input semantic="NORMAL" source="#terrain-normals" offset="1"/><input semantic="TEXCOORD" source="#terrain-uv" offset="2" set="0"/><p>{' '.join(triangles)}</p></triangles>
+    <triangles material="forest-ground-material" count="{(side - 1) * (side - 1) * 2}"><input semantic="VERTEX" source="#terrain-vertices" offset="0"/><input semantic="NORMAL" source="#terrain-normals" offset="1"/><input semantic="TEXCOORD" source="#terrain-uv" offset="2" set="0"/><p>{' '.join(triangles)}</p></triangles>
   </mesh></geometry></library_geometries>
   <library_visual_scenes><visual_scene id="Scene" name="Scene"><node id="Terrain" name="Terrain"><instance_geometry url="#terrain"><bind_material><technique_common><instance_material symbol="forest-ground-material" target="#forest-ground-material"><bind_vertex_input semantic="UVMap" input_semantic="TEXCOORD" input_set="0"/></instance_material></technique_common></bind_material></instance_geometry></node></visual_scene></library_visual_scenes>
   <scene><instance_visual_scene url="#Scene"/></scene>
@@ -137,10 +155,12 @@ def terrain_dae(rows: Sequence[Sequence[float]]) -> str:
 def terrain_model_files(rows: Sequence[Sequence[float]], seed: int, model_name: str,
                         trail: Sequence[tuple[float, float]], clearing: tuple[float, float],
                         *, textures: bool = True, clearing_radius: float = 17.0,
-                        tint: tuple[float, float, float] = (1.0, 1.0, 1.0)) -> dict[str, bytes | str]:
+                        tint: tuple[float, float, float] = (1.0, 1.0, 1.0),
+                        map_spec: MapSpec = CANONICAL_MAP,
+                        uv_tile_m: float | None = None) -> dict[str, bytes | str]:
     base = tuple(max(0, min(255, round(channel * factor))) for channel, factor in zip((92, 108, 64), tint))
     files: dict[str, bytes | str] = {
-        f"models/{model_name}/meshes/terrain.dae": terrain_dae(rows),
+        f"models/{model_name}/meshes/terrain.dae": terrain_dae(rows, map_spec, uv_tile_m=uv_tile_m),
         f"models/{model_name}/model.sdf": f'''<?xml version="1.0"?>
 <sdf version="1.9"><model name="{model_name}"><static>true</static><link name="ground">
   <collision name="terrain_collision"><geometry><mesh><uri>model://{model_name}/meshes/terrain.dae</uri></mesh></geometry><surface><contact><collide_bitmask>{TERRAIN_COLLIDE_BITMASK:#06x}</collide_bitmask></contact></surface></collision>
@@ -148,14 +168,21 @@ def terrain_model_files(rows: Sequence[Sequence[float]], seed: int, model_name: 
 </link></model></sdf>
 ''',
         f"models/{model_name}/model.config": f'''<?xml version="1.0"?>
-<model><name>{model_name}</name><version>1.0</version><sdf version="1.9">model.sdf</sdf><author><name>HORUS</name></author><description>Generated 150 m forest terrain mesh with a procedural trail-blended ground texture.</description></model>
+<model><name>{model_name}</name><version>1.0</version><sdf version="1.9">model.sdf</sdf><author><name>HORUS</name></author><description>Generated {map_spec.size:g} m forest terrain mesh with a procedural trail-blended ground texture.</description></model>
 ''',
     }
     if textures:
-        files[f"models/{model_name}/materials/textures/forest_ground.png"] = noise_texture(
-            512, 512, base, seed, 24,
-            trail_paths=trail, clearing=clearing,
-            clearing_radius=clearing_radius)
+        if uv_tile_m is None:
+            files[f"models/{model_name}/materials/textures/forest_ground.png"] = noise_texture(
+                512, 512, base, seed, 24,
+                trail_paths=trail, clearing=clearing,
+                clearing_radius=clearing_radius, map_spec=map_spec)
+        else:
+            # Tiled ground: one seamless forest-floor repeat every ``uv_tile_m`` metres.
+            from sim.worldgen.materials import forest_floor_texture
+
+            files[f"models/{model_name}/materials/textures/forest_ground.png"] = \
+                forest_floor_texture(seed, size=256)
     else:
         files[f"models/{model_name}/materials/textures/forest_ground.png"] = solid_png(base)
     return files

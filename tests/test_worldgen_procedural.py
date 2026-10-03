@@ -12,6 +12,7 @@ import json
 import math
 import os
 import random
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -20,7 +21,9 @@ import yaml
 
 from sim.scripts.civilian_life import MotionEngine, load_scenario
 from sim.worldgen import build_world
+from sim.worldgen.assets import ASSETS
 from sim.worldgen.geometry import CollisionWorld, load_collisions
+from sim.worldgen.layout import distance_to_paths
 from sim.worldgen.people import PERSON_ASSETS
 from sim.worldgen.plan import (
     Camera,
@@ -37,10 +40,36 @@ ROOT = Path(__file__).resolve().parents[1]
 SEEDS = range(1, int(os.environ.get("HORUS_WORLDGEN_SEEDS", "8")) + 1)
 WORLDS = [(kind, seed) for kind in ("forest", "urban") for seed in SEEDS]
 CANONICAL = [("forest", None), ("urban", None)]
-MAX_ALTITUDE = {"forest": 36.0, "urban": 48.0}  # config/horus_<kind>.yaml executor.max_altitude_m
-RTL_ALT_M = 45.0  # config/ardupilot/horus_sitl_outdoor.parm
+# Canonical worlds keep the 60 m actor inset and 60 m cruise legs they shipped with; generated
+# worlds carry their flight profile's limits in the manifest (actor_geofence_m / flight.*).
 GEOFENCE_INSET = 60.0
+RTL_ALT_M = 45.0  # config/ardupilot/horus_sitl_outdoor.parm
 ROLES_OF_INTEREST = {"forest": ("missing_hiker", "injured"), "urban": ("red_shirt", "collapsed")}
+
+
+def _profile(kind: str) -> dict:
+    path = ROOT / "config" / f"horus_procedural_{kind}.yaml"
+    return yaml.safe_load(path.read_text())["executor"]
+
+
+PROFILES = {kind: _profile(kind) for kind in ("forest", "urban")}
+MAX_ALTITUDE = {kind: float(PROFILES[kind]["max_altitude_m"]) for kind in PROFILES}
+TRANSIT_MIN_M = {kind: float(PROFILES[kind]["cruise_min_altitude_m"]) for kind in PROFILES}
+TREE_TOP_LIMIT_M = 23.0  # config comment: forest trees stay below 23 m (profile caps 36 m)
+
+
+def _vantage_bounds(manifest: dict) -> float:
+    flight = manifest.get("flight") or {}
+    return float(flight.get("vantage_bounds_m", GEOFENCE_INSET))
+
+
+def _actor_inset(manifest: dict) -> float:
+    return float(manifest.get("actor_geofence_m", GEOFENCE_INSET))
+
+
+def _manifest_bounds_radius(manifest: dict) -> float:
+    bounds = manifest["bounds"]
+    return math.hypot(bounds["x"][1], bounds["y"][1]) + 30.0
 
 
 class World:
@@ -154,9 +183,11 @@ def test_home_pad_is_clear_and_transit_altitude_is_safe(worlds, kind, seed):
     transit = w.manifest["transit_altitude_m"]
     clearance, blocker = w.world.segment_clearance((0, 0, 3.5), (0, 0, transit), radius=0.6)
     assert clearance >= 2.0, f"{w.label}: take-off column blocked by {blocker and blocker.name}"
-    highest = w.world.max_top(0.0, 0.0, 110.0)
+    highest = w.world.max_top(0.0, 0.0, _manifest_bounds_radius(w.manifest))
     assert highest + 5.9 <= transit <= MAX_ALTITUDE[kind], f"{w.label}: transit {transit} vs top {highest}"
     assert highest <= RTL_ALT_M - 3.0, f"{w.label}: RTL altitude does not clear {highest:.1f} m obstacles"
+    if seed is not None:
+        assert transit >= TRANSIT_MIN_M[kind], f"{w.label}: transit {transit} below the profile cruise gate"
 
 
 @_all(WORLDS + CANONICAL)
@@ -167,10 +198,11 @@ def test_people_and_vehicles_stay_inside_the_geofence_and_off_obstacles(worlds, 
     t = 0.0
     kinds = {agent.model: agent.kind for agent in w.scenario.agents}
     postures = {p["model"]: PERSON_ASSETS[p["asset"]]["posture"] for p in w.manifest["people"]}
+    inset = _actor_inset(w.manifest)
     while t < 90.0:
         t += rng.uniform(0.05, 0.4)
         for model, (x, y, z, _yaw) in engine.update(t).items():
-            assert max(abs(x), abs(y)) <= GEOFENCE_INSET, f"{w.label}: {model} at ({x:.1f}, {y:.1f}) t={t:.1f}"
+            assert max(abs(x), abs(y)) <= inset, f"{w.label}: {model} at ({x:.1f}, {y:.1f}) t={t:.1f}"
             if kinds[model] == "vehicle":
                 clearance, blocker = w.world.clearance((x, y, 1.0))
                 assert clearance >= 0.9, f"{w.label}: {model} hits {blocker.name} at t={t:.1f}"
@@ -185,13 +217,15 @@ def test_every_person_of_interest_has_a_safe_line_of_sight_vantage(worlds, kind,
     w = worlds(kind, seed)
     camera = Camera()
     transit = w.manifest["transit_altitude_m"]
+    bounds = _vantage_bounds(w.manifest)
     rng = random.Random(seed or 0)
     for person in w.manifest["people"]:
         if person["role"] not in ROLES_OF_INTEREST[kind]:
             continue
         posture = PERSON_ASSETS[person["asset"]]["posture"]
         target = person_point(person, w.ground, posture)
-        vantage = plan_vantage(w.world, w.ground, camera, person["model"], target, rng, transit_alt=transit)
+        vantage = plan_vantage(w.world, w.ground, camera, person["model"], target, rng,
+                               transit_alt=transit, bounds=bounds)
         assert vantage is not None, f"{w.label}: no safe vantage sees {person['model']}"
         legs = cruise_legs((0.0, 0.0, 0.0), vantage.eye, vantage.heading_deg, transit)
         assert legs_clearance(w.world, (0.0, 0.0, 3.5), legs) >= 1.5, f"{w.label}: route to {person['model']}"
@@ -222,7 +256,7 @@ def test_follow_target_is_selectable_occluded_and_safe_to_follow(worlds, kind, s
     assert plan.column_clearance_m >= 1.5, f"{w.label}: stage column clearance {plan.column_clearance_m:.2f}"
     assert plan.lane_clearance_m >= 1.5, f"{w.label}: follow lane clearance {plan.lane_clearance_m:.2f}"
     assert 2.0 <= plan.occluded_s <= 5.0, f"{w.label}: longest occlusion {plan.occluded_s} s"
-    assert max(abs(plan.stage[0]), abs(plan.stage[1])) <= GEOFENCE_INSET
+    assert max(abs(plan.stage[0]), abs(plan.stage[1])) <= _actor_inset(w.manifest)
     camera = Camera()
     people = {p["model"]: p for p in w.manifest["people"]}
     target = people[follow["model"]]
@@ -265,10 +299,11 @@ def test_generated_follow_mission_is_runnable(worlds, kind, seed):
     assert any(agent.group == args[args.index("--group") + 1] for agent in w.scenario.agents)
     tools = [step["tool"] for step in loaded["steps"] if "tool" in step]
     assert set(tools) <= {"take_off", "goto", "follow"}
+    bounds = _vantage_bounds(w.manifest)
     for step in loaded["steps"]:
         if step.get("tool") == "goto":
             pose = step["arguments"]["pose"]
-            assert max(abs(pose["north_m"]), abs(pose["east_m"])) <= GEOFENCE_INSET
+            assert max(abs(pose["north_m"]), abs(pose["east_m"])) <= bounds
             assert pose["up_m"] <= MAX_ALTITUDE[kind]
 
 
@@ -305,6 +340,7 @@ def test_forest_posture_targets_are_observable(worlds, kind, seed):
     w = worlds(kind, seed)
     camera = Camera()
     transit = w.manifest["transit_altitude_m"]
+    bounds = _vantage_bounds(w.manifest)
     for posture in ("lying", "sitting"):
         people = [person for person in w.manifest["people"] if person["posture"] == posture]
         assert people, f"{w.label}: no {posture} person"
@@ -314,7 +350,7 @@ def test_forest_posture_targets_are_observable(worlds, kind, seed):
             if column_clearance(w.world, point[0], point[1], point[2] + 0.5, transit, 0.6) < 2.0:
                 continue
             vantage = plan_vantage(w.world, w.ground, camera, person["model"], point,
-                                   _random.Random(seed or 0), transit_alt=transit)
+                                   _random.Random(seed or 0), transit_alt=transit, bounds=bounds)
             if vantage is not None and vantage.slant_m <= 12.0:
                 observable.append(person["model"])
         assert observable, f"{w.label}: no observable {posture} person (open sky + <= 12 m slant)"
@@ -322,3 +358,259 @@ def test_forest_posture_targets_are_observable(worlds, kind, seed):
     # The search mission keeps its canopy-hidden hiker alongside the open casualty.
     roles = {person["role"] for person in w.manifest["people"]}
     assert {"missing_hiker", "casualty"} <= roles, f"{w.label}: {sorted(roles)}"
+
+
+def _scenery_tile_visuals(w: World) -> list[dict]:
+    """Every instanced asset visual of the procedural scenery tiles, in world coordinates."""
+    root = ET.parse(w.sdf_path).getroot()
+    visuals = []
+    for model in root.iter("model"):
+        name = model.get("name") or ""
+        if not name.startswith("scenery_"):
+            continue
+        tile_pose = model.find("pose")
+        ox, oy = (float(value) for value in (tile_pose.text or "0 0 0 0 0 0").split()[:2])
+        for link in model.findall("link"):
+            for visual in link.findall("visual"):
+                pose = visual.find("pose")
+                if pose is None:
+                    continue
+                px, py, pz = (float(value) for value in pose.text.split()[:3])
+                mesh = visual.find("geometry/mesh")
+                if mesh is None:
+                    continue
+                scale_text = mesh.findtext("scale")
+                scale = float(scale_text.split()[0]) if scale_text else 1.0
+                visuals.append({"name": visual.get("name"), "x": ox + px, "y": oy + py,
+                                "z": pz, "mesh_scale": scale})
+    return visuals
+
+
+def _tree_instances(w: World) -> list[dict]:
+    """Pine/oak instance visuals with their asset key and instance scale."""
+    trees = []
+    for visual in _scenery_tile_visuals(w):
+        name = visual["name"] or ""
+        for key in ("tree_pine", "tree_oak"):
+            if name.startswith(key):
+                registry_scale = float(ASSETS[key].visuals[0].scale)
+                trees.append({**visual, "asset": key,
+                              "instance_scale": visual["mesh_scale"] / registry_scale})
+                break
+    return trees
+
+
+@_all([("forest", seed) for seed in SEEDS])
+def test_procedural_forest_scenery_matches_the_design(worlds, kind, seed):
+    """Real end-to-end checks over the emitted SDF and its scenery sidecar."""
+    w = worlds(kind, seed)
+    scenery = w.manifest.get("scenery")
+    assert scenery, f"{w.label}: manifest carries no scenery summary"
+    assert 1500 <= scenery["trees"] + scenery["saplings"] <= 9000, f"{w.label}: {scenery}"
+    assert scenery["trail_length_m"] >= 2500, f"{w.label}: trail network {scenery['trail_length_m']} m"
+
+    trails = w.manifest["areas"]["trails"]
+    clearings = [(entry["center"][0], entry["center"][1], entry["radius"])
+                 for entry in w.manifest["areas"]["clearings"]]
+    assert len(trails) >= 5 and len(clearings) >= 4, f"{w.label}: network {len(trails)}/{len(clearings)}"
+    assert 1 <= len(w.manifest["areas"]["camps"]) <= 3, f"{w.label}: camps"
+
+    # No primitive vegetation anywhere in the scenery tiles.
+    root = ET.parse(w.sdf_path).getroot()
+    for model in root.iter("model"):
+        if (model.get("name") or "").startswith("scenery_"):
+            for tag in ("sphere", "cone", "cylinder", "box"):
+                assert model.find(f".//{tag}") is None, \
+                    f"{w.label}: scenery tile {model.get('name')} contains a primitive <{tag}>"
+
+    # Trees keep their tops under the 23 m cap and stay out of trails/clearings, except the
+    # two designated mission pieces: the missing hiker's canopy and the follow occluder.
+    missing = next(person for person in w.manifest["people"] if person["role"] == "missing_hiker")
+    occluder = w.manifest["follow"]["occluder_xy"]
+    trees = _tree_instances(w)
+    assert len(trees) >= 1500, f"{w.label}: {len(trees)} tree visuals"
+    for tree in trees:
+        top = tree["z"] + ASSETS[tree["asset"]].native_height_m * tree["instance_scale"]
+        assert top <= TREE_TOP_LIMIT_M, f"{w.label}: {tree['name']} top {top:.2f} m"
+        if (math.hypot(tree["x"] - missing["position"][0], tree["y"] - missing["position"][1]) < 9.0
+                or math.hypot(tree["x"] - occluder[0], tree["y"] - occluder[1]) < 8.0):
+            continue
+        sapling = tree["instance_scale"] < 0.5
+        limit = 2.5 if sapling else 6.0
+        distance = distance_to_paths((tree["x"], tree["y"]), trails)
+        assert distance >= limit, f"{w.label}: {tree['name']} is {distance:.2f} m from a trail"
+        for cx, cy, radius in clearings:
+            assert math.hypot(tree["x"] - cx, tree["y"] - cy) >= radius, \
+                f"{w.label}: {tree['name']} stands inside clearing ({cx:.0f}, {cy:.0f})"
+
+    # The scenery sidecar covers every tree instance with at least one proxy.
+    sidecar = json.loads((w.manifest_path.parent / f"{w.label}.scenery.json").read_text())
+    proxies = sidecar["proxies"]
+    assert len(proxies) >= len(trees), f"{w.label}: {len(proxies)} proxies for {len(trees)} trees"
+    for tree in trees:
+        assert any(math.hypot(proxy["transform"][0] - tree["x"],
+                              proxy["transform"][1] - tree["y"]) < 0.05 for proxy in proxies), \
+            f"{w.label}: no sidecar proxy at {tree['name']} ({tree['x']:.1f}, {tree['y']:.1f})"
+
+
+@_all([("forest", seed) for seed in SEEDS])
+def test_procedural_forest_mission_content_is_spread(worlds, kind, seed):
+    """Mission targets live across the map, not next to home."""
+    w = worlds(kind, seed)
+    people = {person["role"]: person for person in w.manifest["people"]}
+    missing = people["missing_hiker"]
+    trails = w.manifest["areas"]["trails"]
+    distance_home = math.hypot(*missing["position"])
+    assert distance_home >= 150.0, f"{w.label}: missing hiker {distance_home:.1f} m from home"
+    off_trail = distance_to_paths(missing["position"], trails)
+    assert 6.0 <= off_trail <= 15.0, f"{w.label}: missing hiker {off_trail:.2f} m from a trail"
+
+    clearing = w.manifest["areas"]["clearing"]
+    assert math.hypot(*clearing["center"]) >= 120.0, f"{w.label}: mission clearing too close to home"
+    for role in ("injured", "casualty"):
+        assert math.hypot(*people[role]["position"]) >= 120.0, f"{w.label}: {role} near home"
+
+    follow_start = w.manifest["follow"]["route"][0]
+    assert math.hypot(*follow_start) >= 100.0, f"{w.label}: follow route starts {math.hypot(*follow_start):.1f} m out"
+    quadrants = set()
+    for person in w.manifest["people"]:
+        if person["role"] == "hiker" and person.get("route"):
+            midpoint = person["route"][len(person["route"]) // 2]
+            quadrants.add((midpoint[0] >= 0, midpoint[1] >= 0))
+    assert len(quadrants) >= 3, f"{w.label}: hikers only in {quadrants}"
+
+
+# ---------------------------------------------------------------------------------------------
+# Procedural 1.2 km city (urban) expectations
+# ---------------------------------------------------------------------------------------------
+def _urban_sidecar(w: World) -> list[dict]:
+    """Every collision proxy of the world's scenery sidecar, in world coordinates."""
+    path = w.manifest_path.parent / f"{w.label}.scenery.json"
+    return json.loads(path.read_text())["proxies"]
+
+
+def _urban_building_proxies(w: World) -> list[dict]:
+    """The box proxies that stand in for buildings (rooftop equipment boxes are under 3 m)."""
+    return [proxy for proxy in _urban_sidecar(w)
+            if proxy["shape"] == "box" and proxy["size"][2] >= 3.0]
+
+
+@_all([("urban", seed) for seed in SEEDS])
+def test_procedural_urban_buildings_stay_clear_of_roads_and_sidewalks(worlds, kind, seed):
+    """No building may reach into a carriageway or sidewalk band, and every building owns
+    exactly one sidecar proxy while every collided tile is covered by the sidecar."""
+    w = worlds(kind, seed)
+    areas = w.manifest["areas"]
+    assert areas["building_count"] >= 400, f"{w.label}: {areas['building_count']} buildings"
+    buildings = _urban_building_proxies(w)
+    assert len(buildings) == areas["building_count"], \
+        f"{w.label}: {len(buildings)} proxies for {areas['building_count']} buildings"
+    sidewalk = float(areas["sidewalk_width_m"])
+    for axis, half_index in (("x", 0), ("y", 1)):
+        for proxy in buildings:
+            centre = proxy["transform"][0 if axis == "x" else 1]
+            half_extent = proxy["size"][half_index] / 2
+            for road, half in zip(areas["roads"][axis], areas["road_half_width_m"][axis]):
+                assert abs(centre - road) >= half_extent + half + sidewalk - 1e-6, \
+                    f"{w.label}: building {proxy['transform'][:2]} overlaps {axis}={road}"
+    root = ET.parse(w.sdf_path).getroot()
+    tiles = {model.get("name") for model in root.iter("model")
+             if (model.get("name") or "").startswith("scenery_")
+             and model.find('.//collision[@name="scenery_collision"]') is not None}
+    covered = {proxy["model"].split("/")[0] for proxy in _urban_sidecar(w)}
+    assert tiles == covered, f"{w.label}: tiles without sidecar proxies {sorted(tiles - covered)}"
+
+
+@_all([("urban", seed) for seed in SEEDS])
+def test_procedural_urban_building_tops_stay_within_the_cap(worlds, kind, seed):
+    """Downtown tops (rooftop equipment included) stay under 34 m and clear of the transit."""
+    w = worlds(kind, seed)
+    tops = []
+    for proxy in _urban_sidecar(w):
+        if proxy["shape"] == "box":
+            top = proxy["transform"][2] + proxy["size"][2] / 2
+        elif proxy["shape"] == "cylinder":
+            top = proxy["transform"][2] + proxy["size"][1] / 2
+        else:
+            top = proxy["transform"][2] + proxy["size"][0]
+        tops.append(top)
+    assert max(tops) <= 34.0, f"{w.label}: tallest scenery top {max(tops):.2f} m"
+    tallest_building = max(proxy["transform"][2] + proxy["size"][2] / 2
+                           for proxy in _urban_building_proxies(w))
+    transit = w.manifest["transit_altitude_m"]
+    assert tallest_building + 5.9 <= transit, \
+        f"{w.label}: transit {transit} does not clear {tallest_building:.2f} m"
+
+
+@_all([("urban", seed) for seed in SEEDS])
+def test_procedural_urban_mission_content_is_spread_across_the_map(worlds, kind, seed):
+    """Red shirt, casualty and follow route sit far from home; sites cover the map."""
+    w = worlds(kind, seed)
+    people = {person["role"]: person for person in w.manifest["people"]}
+    for role, minimum in (("red_shirt", 150.0), ("collapsed", 120.0)):
+        distance = math.hypot(*people[role]["position"])
+        assert distance >= minimum, f"{w.label}: {role} {distance:.1f} m from home"
+    follow_start = w.manifest["follow"]["route"][0]
+    assert math.hypot(*follow_start) >= 100.0, \
+        f"{w.label}: follow route starts {math.hypot(*follow_start):.1f} m out"
+
+    sites = {site["name"]: site for site in w.manifest["sites"]}
+    assert {"home_plaza", "mission_plaza", "mission_park", "downtown", "bus_stop", "collapse",
+            "follow_occluder"} <= set(sites), f"{w.label}: sites {sorted(sites)}"
+    assert math.hypot(*sites["mission_plaza"]["center"]) >= 150.0
+    quadrants = {(site["center"][0] >= 0, site["center"][1] >= 0) for site in w.manifest["sites"]}
+    assert len(quadrants) >= 3, f"{w.label}: mission sites only in {quadrants}"
+
+    areas = w.manifest["areas"]
+    assert len(areas["plazas"]) >= 2, f"{w.label}: {len(areas['plazas'])} plazas"
+    assert 3 <= len(areas["parks"]) <= 6, f"{w.label}: {len(areas['parks'])} parks"
+    mission_plaza = next(plaza for plaza in areas["plazas"] if plaza["mission"])
+    for person in w.manifest["people"]:
+        if person["role"] in ("plaza_crowd", "red_shirt"):
+            dx = abs(person["position"][0] - mission_plaza["center"][0])
+            dy = abs(person["position"][1] - mission_plaza["center"][1])
+            assert dx <= mission_plaza["half_size"] and dy <= mission_plaza["half_size"], \
+                f"{w.label}: {person['model']} outside the mission plaza"
+
+
+@_all([("urban", seed) for seed in SEEDS])
+def test_procedural_urban_traffic_is_mesh_vehicles_only(worlds, kind, seed):
+    """Circulating vehicles are mesh-backed (a heavy bus loop included), never primitives."""
+    w = worlds(kind, seed)
+    from sim.worldgen.vehicles import vehicle_type
+
+    types = [vehicle["type"] for vehicle in w.manifest["vehicles"]]
+    assert types, f"{w.label}: no circulating traffic"
+    for name in types:
+        kind_spec = vehicle_type(name)
+        assert kind_spec.mesh is not None and kind_spec.assets, \
+            f"{w.label}: vehicle {name} is a primitive body"
+    assert any(vehicle_type(name).heavy for name in types), f"{w.label}: no bus/truck loop"
+    areas = w.manifest["areas"]
+    assert areas["roads"]["x"] and areas["roads"]["y"]
+    assert w.manifest["follow"]["occluder_models_or_collisions"], f"{w.label}: no occluder models"
+
+
+@_all([("urban", seed) for seed in SEEDS])
+def test_procedural_urban_scenery_matches_the_design(worlds, kind, seed):
+    """Roads, sidewalks, zebra crossings, plazas, parks, trees, lamps and shelters are all
+    merged/instanced scenery meshes; no scenery tile contains primitive geometry."""
+    w = worlds(kind, seed)
+    names = [visual["name"] or "" for visual in _scenery_tile_visuals(w)]
+    for prefix in ("facade_", "roof_", "asphalt_", "sidewalk_", "crosswalk_", "plaza_",
+                   "lawn_", "path_"):
+        assert any(name.startswith(prefix) for name in names), f"{w.label}: no {prefix}* mesh"
+    trees = [name for name in names if name.startswith(("tree_oak", "tree_pine"))]
+    assert len(trees) >= 50, f"{w.label}: {len(trees)} tree visuals"
+    lamps = [name for name in names if name.startswith("lamp_post")]
+    assert len(lamps) >= 100, f"{w.label}: {len(lamps)} lamps"
+    benches = [name for name in names if name.startswith("bench_a")]
+    assert len(benches) >= 4, f"{w.label}: {len(benches)} benches"
+    assert any(name.startswith("bus_stop_shelter") for name in names), f"{w.label}: no bus shelter"
+    assert any(name.startswith("follow_shelter") for name in names), f"{w.label}: no follow shelter"
+    root = ET.parse(w.sdf_path).getroot()
+    for model in root.iter("model"):
+        if (model.get("name") or "").startswith("scenery_"):
+            for tag in ("sphere", "cone", "cylinder", "box"):
+                assert model.find(f".//{tag}") is None, \
+                    f"{w.label}: scenery tile {model.get('name')} contains a primitive <{tag}>"

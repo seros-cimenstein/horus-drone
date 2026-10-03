@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="horus_person_sitting_a">
+    <static>true</static>
+    <link name="link">
+      <visual name="person">
+        <pose>0 0 -1.0153 0 0 0</pose>
+        <geometry><mesh><uri>model://horus_person_sitting_a/meshes/rescue_randy.dae</uri><scale>1.6438 1.6438 1.6438</scale></mesh></geometry>
+      </visual>
+      <collision name="proxy_0_box">
+        <pose>-0.1632 -0.3373 0.5998 0 0 0</pose>
+        <geometry><box><size>1.2283 1.6741 1.1997</size></box></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>

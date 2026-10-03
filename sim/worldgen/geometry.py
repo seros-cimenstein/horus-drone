@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import math
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -130,6 +131,50 @@ def _geometry(collision: ET.Element) -> tuple[str, tuple[float, ...]] | None:
 
 
 TERRAIN_COLLISION = "terrain_collision"
+SCENERY_COLLISION = "scenery_collision"
+SCENERY_SIDECAR_SUFFIX = ".scenery.json"
+
+
+def scenery_sidecar_path(sdf_path: str | Path) -> Path:
+    """The ``<stem>.scenery.json`` sidecar that belongs to ``<stem>.sdf``."""
+    path = Path(sdf_path)
+    return path.parent / f"{path.stem}{SCENERY_SIDECAR_SUFFIX}"
+
+
+def scenery_sidecar_text(proxies: Sequence[Primitive]) -> str:
+    """Serialize world-space scenery proxies for :func:`load_collisions`."""
+    payload = {"version": 1, "proxies": [
+        {"name": primitive.name, "model": primitive.model, "shape": primitive.shape,
+         "transform": [float(value) for value in primitive.transform],
+         "size": [float(value) for value in primitive.size]}
+        for primitive in proxies
+    ]}
+    return json.dumps(payload, separators=(",", ":")) + "\n"
+
+
+def parse_scenery_sidecar(text: str) -> list[Primitive]:
+    """Parse a ``<stem>.scenery.json`` sidecar into static primitives (strict, world-space)."""
+    payload = json.loads(text)
+    if not isinstance(payload, dict) or not isinstance(payload.get("proxies"), list):
+        raise ValueError("scenery sidecar must be a JSON object with a 'proxies' array")
+    expected = {"box": 3, "cylinder": 2, "sphere": 1}
+    primitives: list[Primitive] = []
+    for entry in payload["proxies"]:
+        if not isinstance(entry, dict):
+            raise ValueError(f"scenery sidecar proxy must be an object, got {entry!r}")
+        shape = entry.get("shape")
+        if shape not in expected:
+            raise ValueError(f"scenery sidecar proxy has unsupported shape {shape!r}")
+        transform = tuple(float(value) for value in entry.get("transform", ()))
+        size = tuple(float(value) for value in entry.get("size", ()))
+        if len(transform) != 6:
+            raise ValueError(f"scenery sidecar proxy {entry.get('name')!r} needs a 6-number transform")
+        if len(size) != expected[shape] or any(value <= 0.0 for value in size):
+            raise ValueError(f"scenery sidecar proxy {entry.get('name')!r} has invalid size {size!r}")
+        primitives.append(Primitive(name=str(entry.get("name", "scenery_collision/proxy")),
+                                    model=str(entry.get("model", "")), shape=shape,
+                                    transform=transform, size=size, static=True))
+    return primitives
 
 
 def load_collisions(
@@ -138,6 +183,7 @@ def load_collisions(
     resource_paths: Iterable[str | Path] = (),
     include_dynamic: bool = False,
     models: Mapping[str, str] | None = None,
+    scenery_proxies: Sequence[Primitive] | None = None,
 ) -> list[Primitive]:
     """Load bounded collision primitives from an SDF world or model.
 
@@ -148,12 +194,24 @@ def load_collisions(
     live outside the world package, so they are not followed. Included ``<actor>`` files carry
     no collisions. Collisions named ``terrain_collision`` are the ground, whose height the
     shared terrain surface provides; any other static mesh collider is rejected because it has
-    no primitive proxy.
+    no primitive proxy — except ``scenery_collision``, which is covered by the world-space
+    proxies of the ``<stem>.scenery.json`` sidecar next to the SDF (or by ``scenery_proxies``
+    when the SDF is generated in memory, as the validator does).
     """
     paths = tuple(Path(path) for path in resource_paths)
     in_memory = dict(models or {})
     root = ET.parse(sdf_path).getroot()
     primitives: list[Primitive] = []
+
+    if scenery_proxies is None:
+        sidecar = scenery_sidecar_path(sdf_path)
+        scenery_entries = (parse_scenery_sidecar(sidecar.read_text(encoding="utf-8"))
+                           if sidecar.is_file() else [])
+    else:
+        scenery_entries = list(scenery_proxies)
+    scenery: dict[str, list[Primitive]] = {}
+    for primitive in scenery_entries:
+        scenery.setdefault(primitive.model, []).append(primitive)
 
     def add_model(
         model: ET.Element,
@@ -181,6 +239,13 @@ def load_collisions(
                 if collision_name == TERRAIN_COLLISION:
                     continue  # the ground: heights come from the shared terrain surface
                 if shape == "mesh":
+                    if collision_name == SCENERY_COLLISION:
+                        covering = scenery.get(f"{model_path}/{SCENERY_COLLISION}")
+                        if covering:
+                            primitives.extend(covering)
+                            continue
+                        raise ValueError(f"{model_path}/{collision_name}: mesh collision has no "
+                                         "primitive proxies (missing sidecar or scenery_proxies)")
                     raise ValueError(f"{model_path}/{collision_name}: mesh collision has no primitive "
                                      "proxy for clearance/line-of-sight checks")
                 local_pose = _pose(collision.find("pose"))

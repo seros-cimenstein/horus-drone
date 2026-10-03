@@ -1,0 +1,32 @@
+Source: Gazebo Fuel OpenRobotics/Oak tree, version 7
+URL: https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree/7/Oak%20tree.zip
+Archive SHA-256: ae128176f707b571d2a2a47a1ab6b80596e81d96402501a64f4f28a49543daa5 (byte-equal to the exact-version Fuel endpoint)
+Author (model.config): Louise Poubel
+Licence: Creative Commons Zero v1.0 Universal (CC0 1.0) (Fuel model-level publisher metadata at import time; the archive itself embeds no licence text)
+Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used. COLLADA <image> references were rewritten to the copied meshes/ and materials/textures/ layout.
+Notes: Upstream materials/scripts (Ogre alpha rejection) are not copied; the branch texture keeps its alpha channel and the HORUS model.sdf uses it as a PBR albedo map so gz-sim alpha-tests the foliage.
+Files: materials/textures/bark_diffuse.png, materials/textures/branch_diffuse.png, meshes/oak_tree.dae
+
+Upstream model.config (verbatim):
+<?xml version="1.0"?>
+
+<model>
+  <name>Oak tree</name>
+  <version>1.0</version>
+  <sdf version="1.6">model.sdf</sdf>
+
+  <author>
+    <name>Louise Poubel</name>
+    <email>louise@osrfoundation.org</email>
+  </author>
+
+  <description>
+    An oak tree.
+  </description>
+</model>
+
+meshes/oak_tree.dae COLLADA contributor (verbatim):
+<contributor>
+      <author>Blender User</author>
+      <authoring_tool>Blender 2.79.0</authoring_tool>
+    </contributor>

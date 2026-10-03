@@ -15,10 +15,12 @@ from sim.scripts.procedural_campaign import (
     select_largest_attribute_candidate,
 )
 from sim.scripts.campaign_episode import (
+    CAMPAIGN_MIN_RTF,
     Episode,
     _arguments,
     _clearance_below_threshold,
     _exception_summary,
+    _goto_ttl_s,
     _hazard_path_is_collision_course,
     _mission_id_matches,
     _parse_camera_info,
@@ -28,6 +30,13 @@ from sim.scripts.campaign_episode import (
     _topic_messages,
     compose_camera_pose,
 )
+
+
+def test_goto_ttl_covers_a_worst_case_leg_at_the_campaign_rtf_floor():
+    worst_wall_s = 850.0 / 8.0 / CAMPAIGN_MIN_RTF
+    assert _goto_ttl_s(850.0, 8.0) >= worst_wall_s
+    # Canonical 60 m legs keep their shipped 120 s TTL bit-for-bit.
+    assert _goto_ttl_s(60.0, 3.0) == 120.0
 
 
 def test_clearance_threshold_accepts_rounding_but_keeps_real_shortfall():

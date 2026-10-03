@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="horus_animal_deer">
+    <static>true</static>
+    <link name="link">
+      <visual name="body">
+        <geometry><mesh><uri>model://horus_animal_deer/meshes/deer.obj</uri></mesh></geometry>
+        <material><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://horus_animal_deer/materials/textures/deer_fur.png</albedo_map><metalness>0.0</metalness><roughness>1.0</roughness></metal></pbr></material>
+      </visual>
+      <collision name="body_envelope"><pose>-0.0042 0 0.6746 0 0 0</pose><geometry><box><size>1.4797 0.3887 1.3508</size></box></geometry></collision>
+    </link>
+  </model>
+</sdf>

@@ -9,12 +9,13 @@ from typing import TypeAlias
 from sim.worldgen.appearance import Appearance
 from sim.worldgen.dressing import Dressing, canonical_dressing, sample_dressing
 from sim.worldgen.forest import build_forest
+from sim.worldgen.forest_procedural import sample_forest_layout
 from sim.worldgen.layout import (
     ForestLayout, UrbanLayout, canonical_forest_layout, canonical_urban_layout,
-    sample_forest_layout, sample_urban_layout,
 )
 from sim.worldgen.scenario import scenario_text
 from sim.worldgen.urban import build_urban
+from sim.worldgen.urban_procedural import sample_urban_layout
 
 ROOT = Path(__file__).resolve().parents[2]
 SIM_DIR = ROOT / "sim"
@@ -109,18 +110,38 @@ def _route(person) -> list[list[float]]:
 
 
 def _transit_altitude(layout: ForestLayout | UrbanLayout) -> float:
+    procedural = not layout.canonical
     if isinstance(layout, ForestLayout):
-        required = 2.2 + layout.tree_height_range[1] * 1.18 + 6.0
+        if layout.canonical:
+            required = 2.2 + layout.tree_height_range[1] * 1.18 + 6.0
+        else:
+            # Procedural rule (config/horus_procedural_forest.yaml): >= cruise_min 26 m,
+            # >= tallest scenery top + 5.9 m, <= max_altitude 36 m.
+            required = max(26.0, layout.scenery_max_top_m + 5.9)
         limit = 36.0
-    else:
+    elif layout.canonical:
         building_tops = [b.height + (1.23 if b.height > 18 else 0.58)
                          for b in layout.buildings]
         park_tops = [tree.height * 1.08 for tree in layout.park_trees]
         required = max([9.6, *building_tops, *park_tops]) + 6.0
         limit = 45.0
+    else:
+        # Procedural urban rule (config/horus_procedural_urban.yaml): >= 38 m, >= tallest
+        # scenery top + 5.9 m, <= 48 m.
+        required = max(38.0, getattr(layout, "scenery_max_top_m", 0.0) + 5.9)
+        limit = 48.0
     if required > limit:
         raise ValueError(f"layout needs {required:.2f} m transit altitude, above {limit:.0f} m limit")
+    if procedural:
+        # The ceiling keeps the invariant transit >= tallest top + 5.9 m exact (round()
+        # could fall up to 5 mm short of it).
+        return math.ceil(required * 100.0) / 100.0
     return round(required, 2)
+
+
+def _manifest_number(value: float) -> float | int:
+    """A JSON number that keeps integral map extents ints (canonical manifests are byte-frozen)."""
+    return int(value) if float(value).is_integer() else float(value)
 
 
 def _manifest(layout: ForestLayout | UrbanLayout, kind: str, stem: str,
@@ -143,7 +164,9 @@ def _manifest(layout: ForestLayout | UrbanLayout, kind: str, stem: str,
         occluders = (["follow_occlusion_bush_lower_collision",
                       "follow_occlusion_bush_middle_collision",
                       "follow_occlusion_bush_upper_collision"] if layout.canonical else
-                     ["follow_occlusion_bush_primary_collision"])
+                     # Procedural forests occlude with a foliage SceneryMesh; its collision
+                     # proxies live in the scenery sidecar under this mesh name.
+                     ["follow_occluder"])
         expected_occlusion = layout.expected_occlusion_s
         follow = {
             "model": follow_person.model, "group": follow_person.group,
@@ -165,7 +188,15 @@ def _manifest(layout: ForestLayout | UrbanLayout, kind: str, stem: str,
             "clearing": {"center": list(layout.clearing), "radius": layout.clearing_radius},
             "camp": list(layout.camp),
         }
-        ground = {"file": ground_path, "origin_xy": [-75, -75], "cell_m": 2.0}
+        if not layout.canonical:
+            areas["trails"] = [[[x, y] for x, y in trail] for trail in layout.trails]
+            areas["creeks"] = [[[x, y] for x, y in creek] for creek in layout.creeks]
+            areas["clearings"] = [{"center": [cx, cy], "radius": radius}
+                                  for cx, cy, radius in layout.clearings]
+            areas["camps"] = [[x, y] for x, y in layout.camps]
+        ground = {"file": ground_path,
+                  "origin_xy": [_manifest_number(layout.map.min), _manifest_number(layout.map.min)],
+                  "cell_m": layout.map.cell_m}
     else:
         follow_person = layout.follow_jogger
         occluder_names = {
@@ -194,13 +225,37 @@ def _manifest(layout: ForestLayout | UrbanLayout, kind: str, stem: str,
             "park": {"center": list(layout.park_center), "half_size": layout.park_half_size},
             "crosswalk_centres": [list(p) for p in layout.crosswalk_centres],
         }
+        if layout.city is not None:
+            from sim.worldgen.urban_procedural import STREET_HALF_M, SIDEWALK_WIDTH_M, ARTERIAL_HALF_M
+
+            city = layout.city
+            mission = next(plaza for plaza in city.plazas if plaza.mission)
+            areas["plaza"] = {"center": [mission.x, mission.y], "half_size": mission.half_size}
+            areas["plazas"] = [{"center": [p.x, p.y], "half_size": p.half_size, "mission": p.mission}
+                               for p in city.plazas]
+            areas["parks"] = [{"center": [p.x, p.y], "half_size": p.half_size, "mission": p.mission}
+                              for p in city.parks]
+            areas["arterial_roads"] = {"x": list(city.arterial_roads_x),
+                                       "y": list(city.arterial_roads_y)}
+            areas["road_half_width_m"] = {
+                "x": [ARTERIAL_HALF_M if road in city.arterial_roads_x else STREET_HALF_M
+                      for road in layout.roads_x],
+                "y": [ARTERIAL_HALF_M if road in city.arterial_roads_y else STREET_HALF_M
+                      for road in layout.roads_y],
+            }
+            areas["sidewalk_width_m"] = SIDEWALK_WIDTH_M
+            areas["building_count"] = len(layout.buildings)
+            occluder_names = ["follow_shelter_glass", "follow_shelter_roof"]
+            follow["occluder_models_or_collisions"] = occluder_names
         ground = None
-    return {
+    edge_min = _manifest_number(layout.map.min)
+    edge_max = _manifest_number(layout.map.min + layout.map.size)
+    manifest = {
         "world": stem,
         "kind": kind,
         "seed": layout.seed,
         "canonical": layout.canonical,
-        "bounds": {"x": [-75, 75], "y": [-75, 75]},
+        "bounds": {"x": [edge_min, edge_max], "y": [edge_min, edge_max]},
         "home": [0, 0],
         "scenario": scenario_path,
         "sdf": sdf_path,
@@ -214,6 +269,16 @@ def _manifest(layout: ForestLayout | UrbanLayout, kind: str, stem: str,
         "attempts": layout.attempts,
         "dressing": dressing.manifest(),
     }
+    if not layout.canonical:
+        # Procedural-only fields: mission sites, the actor geofence inset and the planner
+        # limits of the world's flight profile (config/horus_procedural_<kind>.yaml).
+        manifest["sites"] = [{"name": name, "kind": site_kind, "center": [x, y], "radius": radius}
+                             for name, site_kind, x, y, radius in layout.sites]
+        manifest["actor_geofence_m"] = layout.actor_inset_m
+        manifest["flight"] = {"vantage_bounds_m": 585.0, "max_leg_m": 850.0}
+        if isinstance(layout, ForestLayout):
+            manifest["scenery"] = dict(layout.scenery_counts)
+    return manifest
 
 
 def _dressing(kind: str, layout: ForestLayout | UrbanLayout, stratum: str | None) -> Dressing:
@@ -259,6 +324,17 @@ def _validate_canonical_routes(layout: ForestLayout | UrbanLayout) -> None:
             raise ValueError(f"canonical vehicle route {vehicle.model} is not drivable: {exc}") from exc
 
 
+def _procedural_sampler(kind: str):
+    """The 1.2 km sampler for one world kind (each kind owns its module)."""
+    if kind == "forest":
+        from sim.worldgen.forest_procedural import sample_forest_layout
+
+        return sample_forest_layout
+    from sim.worldgen.urban_procedural import sample_urban_layout
+
+    return sample_urban_layout
+
+
 def build_world(kind: str, seed: int, *, procedural: bool,
                 textures: bool = True, stratum: str | None = None) -> WorldBundle:
     """Build a deterministic outdoor world without writing to disk."""
@@ -266,8 +342,7 @@ def build_world(kind: str, seed: int, *, procedural: bool,
         raise ValueError("kind must be 'forest' or 'urban'")
     if procedural:
         validator = lambda candidate: _validate_candidate(kind, candidate, stratum)
-        layout = (sample_forest_layout(seed, validate=validator) if kind == "forest"
-                  else sample_urban_layout(seed, validate=validator))
+        layout = _procedural_sampler(kind)(seed, validate=validator)
         stem = f"horus_{kind}_p{seed}"
     else:
         layout = canonical_forest_layout(seed) if kind == "forest" else canonical_urban_layout(seed)
@@ -283,7 +358,7 @@ def build_world(kind: str, seed: int, *, procedural: bool,
     else:
         ground_name = ground_path = None
     scenario = scenario_text(stem, layout.seed, agents, ground_name, events=dressing.events,
-                             interactions=True)
+                             interactions=True, ground_map=layout.map)
     manifest = _manifest(layout, kind, stem, scenario_path,
                          ground_path, f"{stem}.sdf", agents, dressing)
     if not procedural:
