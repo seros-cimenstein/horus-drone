@@ -73,6 +73,13 @@ class Candidate:
     # Track-level person evidence: a person label or person-only attribute was observed at some
     # point in this track's history, so a frame that mislabels it (e.g. "kite") cannot retract it.
     person_evidence: bool = False
+    # Number of stored reference views for this candidate's track, including the creation view
+    # (1 when multi-view references are disabled or nothing has been admitted yet).
+    reference_views: int = 1
+    # Size of the frame this candidate was seen in, when the tracker had the image; consumers use
+    # it for pixel-to-angle geometry (the executor's ground-plane range estimate).
+    frame_width: int | None = None
+    frame_height: int | None = None
 
     def to_dict(self, *, include_embedding: bool = False) -> dict[str, Any]:
         """Return a JSON-friendly candidate record, omitting private ReID data by default."""
@@ -90,7 +97,11 @@ class Candidate:
             "class_id": self.class_id,
             "attributes": dict(self.attributes),
             "person_evidence": self.person_evidence,
+            "reference_views": self.reference_views,
         }
+        if self.frame_width is not None and self.frame_height is not None:
+            result["frame_width"] = self.frame_width
+            result["frame_height"] = self.frame_height
         for optional in ("distance_m", "bearing"):
             if optional in self.attributes:
                 result[optional] = self.attributes[optional]

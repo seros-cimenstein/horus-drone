@@ -64,6 +64,13 @@ def create_perception_system(
         TrackerConfig(
             max_lost_seconds=max(2.5, min(settings.ring_buffer_s, _MAX_LOST_TRACK_S)),
             revalidation_grace_s=float(settings.revalidation_grace_s),
+            reference_views=int(settings.reference_views),
+            reference_view_min_width_px=int(settings.reference_view_min_width_px),
+            reference_view_min_height_px=int(settings.reference_view_min_height_px),
+            reference_view_dedupe_cos=float(settings.reference_view_dedupe_cos),
+            reacquisition_confirm_s=float(settings.reacquisition_confirm_s),
+            shirt_colour_window=int(settings.shirt_colour_window),
+            shirt_colour_min_votes=int(settings.shirt_colour_min_votes),
         ),
         embedder=embedder,
     )

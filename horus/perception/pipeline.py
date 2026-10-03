@@ -884,6 +884,9 @@ class PerceptionSystem:
     def _candidate_dict(self, candidate: Candidate, frame: Frame | None = None) -> dict[str, Any]:
         profile = self._profile
         result = candidate.to_dict()
+        # The candidate object is a per-frame snapshot; report the track's current gallery size so
+        # a consumer sees views admitted after the frame was processed.
+        result["reference_views"] = self.tracker.reference_view_count(candidate.id)
         target = profile.value
         classifier = profile.classifier
         class_name = _profile_value(target, "class_name") if target is not None else None
