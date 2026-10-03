@@ -1,2 +1,3 @@
 Derived by sim/scripts/derive_procedural_airframe.py from horus_iris_with_gimbal_outdoor.
-Change: includes the box-collision Iris body and gimbal copies.
+Change: includes the box-collision Iris body and gimbal copies, and the single-ring
+horus_sensor_payload_procedural under the include name horus_sensor_payload.

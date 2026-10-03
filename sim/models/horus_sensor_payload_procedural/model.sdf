@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="horus_sensor_payload">
+    <link name="payload">
+      <!-- Virtual sensors only: no payload visuals or collisions can occlude the camera.
+           One 8-beam horizontal ring replaces the six single-beam proximity ToFs, so generated
+           1.2 km worlds render one lidar scan; scripts/tof_bridges.sh fans the beams out to the
+           same MAVLink DISTANCE_SENSOR sectors (RING_BEAMS in horus/tof_bridge/bridge.py).
+           Sensor topics are deliberately unset: gz-sim scopes them under the world and every
+           enclosing model, so the same payload works in the indoor and outdoor airframes. -->
+      <inertial>
+        <mass>0.04</mass>
+        <inertia>
+          <ixx>0.0002</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>0.0002</iyy><iyz>0</iyz><izz>0.0002</izz>
+        </inertia>
+      </inertial>
+      <sensor name="proximity_ring" type="gpu_lidar">
+        <pose>0 0 0.08 0 0 0</pose>
+        <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
+        <lidar>
+          <scan>
+            <horizontal><samples>8</samples><resolution>1</resolution><min_angle>-3.1415926536</min_angle><max_angle>2.3561944902</max_angle></horizontal>
+            <vertical><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></vertical>
+          </scan>
+          <range><min>0.05</min><max>4.0</max><resolution>0.01</resolution></range>
+        </lidar>
+      </sensor>
+      <sensor name="range_down" type="gpu_lidar">
+        <pose>-0.20 0 0.04 0 1.5707963268 0</pose>
+        <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
+        <lidar>
+          <scan>
+            <horizontal><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></horizontal>
+            <vertical><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></vertical>
+          </scan>
+          <range><min>0.05</min><max>4.0</max><resolution>0.01</resolution></range>
+        </lidar>
+      </sensor>
+    </link>
+  </model>
+</sdf>
