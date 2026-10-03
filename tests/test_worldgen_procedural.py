@@ -366,8 +366,8 @@ def _scenery_tile_visuals(w: World) -> list[dict]:
     visuals = []
     for model in root.iter("model"):
         name = model.get("name") or ""
-        if not name.startswith("scenery_"):
-            continue
+        if not name.startswith("scenery_") or name == "scenery_collision":
+            continue  # the merged collision model carries no visuals and sits at the origin
         tile_pose = model.find("pose")
         ox, oy = (float(value) for value in (tile_pose.text or "0 0 0 0 0 0").split()[:2])
         for link in model.findall("link"):

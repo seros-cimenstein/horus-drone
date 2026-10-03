@@ -263,6 +263,9 @@ class AssetVisual:
     # without an environment map, so every albedo-mapped material states both values.
     metalness: float = 0.0
     roughness: float = 0.8
+    # Thousands of shadow-casting trees made every ToF ray sensor render redraw the forest's
+    # shadow maps once the drone camera enabled shadows (live RTF 0.10 vs 0.86 without).
+    cast_shadows: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,7 +408,8 @@ ASSETS: dict[str, Asset] = {
         # One material-free visual: the importer embeds the branch (alpha) and bark textures in
         # the COLLADA effects, so every instance shares the mesh materials. Per-visual SDF
         # materials on ~15k branch/bark visuals exhausted Koko's iGPU (RTF 0.008 -> 0.44).
-        visuals=(AssetVisual("tree", _mesh("horus_tree_pine", "pine_tree.dae"), scale=2.3632),),
+        visuals=(AssetVisual("tree", _mesh("horus_tree_pine", "pine_tree.dae"), scale=2.3632,
+                             cast_shadows=False),),
         native_height_m=11.9999, footprint_radius_m=3.7499,
         # Bark cylinder over the full trunk + a canopy cylinder covering the branch sub-mesh
         # bounds (radius = the x/y half extent so the cylinder stays inside them).
@@ -418,7 +422,7 @@ ASSETS: dict[str, Asset] = {
     "tree_oak": Asset(
         key="tree_oak", kind="tree", model_dir="horus_tree_oak",
         visuals=(AssetVisual("tree", _mesh("horus_tree_oak", "oak_tree.dae"),
-                             pose=(0.0, 0.0, 0.10655, 0.0, 0.0, 0.0), scale=1.5156),),
+                             pose=(0.0, 0.0, 0.10655, 0.0, 0.0, 0.0), scale=1.5156, cast_shadows=False),),
         native_height_m=10.0003, footprint_radius_m=9.0199,
         # Trunk cylinder up to the crown + a crown cylinder inscribed in the foliage bounds (the
         # mesh's widest leaves are outside it by <= 1.5 m). The basal root flare (r <= 2.0 m,

@@ -24,10 +24,11 @@
       </axis>
     </joint>
 
-    <!-- Virtual ToF payload: the same sensor set the indoor airframe carries (sensor topics are
-         world-scoped by gz-sim, so the bridge derives them from the world/model names). -->
+    <!-- Virtual ToF payload: generated worlds carry the single-ring payload
+         (model://horus_sensor_payload_procedural); the include name stays horus_sensor_payload,
+         so the world-scoped ToF topic chain and the downward rangefinder are unchanged. -->
     <include>
-      <uri>model://horus_sensor_payload</uri>
+      <uri>model://horus_sensor_payload_procedural</uri>
       <name>horus_sensor_payload</name>
     </include>
     <joint name="sensor_payload_fixed_joint" type="fixed">

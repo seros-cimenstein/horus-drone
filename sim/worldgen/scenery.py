@@ -303,9 +303,10 @@ def _instance_visuals(instance: SceneryInstance, asset, index: int, ox: float,
         if visual.submesh:
             geometry += f"<submesh><name>{visual.submesh}</name></submesh>"
         geometry += "</mesh>"
+        shadows = "" if getattr(visual, "cast_shadows", True) else "<cast_shadows>false</cast_shadows>"
         parts.append(f'<visual name="{name}"><pose>{_coord(wx - ox)} {_coord(wy - oy)} {_coord(wz)} '
                      f'{_coord(float(visual.pose[3]))} {_coord(float(visual.pose[4]))} {_coord(yaw)}</pose>'
-                     f"<geometry>{geometry}</geometry>{_visual_material(visual)}</visual>")
+                     f"<geometry>{geometry}</geometry>{_visual_material(visual)}{shadows}</visual>")
     return "".join(parts)
 
 

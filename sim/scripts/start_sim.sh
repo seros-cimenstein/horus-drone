@@ -40,15 +40,26 @@ world_dir="${world_file%/*}"
 # Canonical scenarios live in sim/scenarios; procedural worlds keep theirs beside the SDF.
 scenario_file="/horus/sim/scenarios/${world_stem}.yaml"
 [[ -f "${scenario_file}" ]] || scenario_file="${world_dir}/${world_stem}.yaml"
-# Worlds that carry the ToF payload (sim/models/horus_sensor_payload) also bridge it to
-# MAVLink so ArduPilot proximity avoidance has range data; the payload sits deeper in the
-# outdoor airframe, so the scoped topic chain differs per world.
+# Worlds that carry the ToF payload also bridge it to MAVLink so ArduPilot proximity avoidance
+# has range data; the payload sits deeper in the outdoor airframe, so the scoped topic chain
+# differs per world. Generated worlds (horus_<kind>_p<seed>) carry the single-ring payload; the
+# indoor and canonical outdoor worlds keep the seven single-beam sensors.
 payload_chain=""
-if [[ "${world_stem}" == "horus_indoor" ]]; then
-  payload_chain="horus_iris/horus_sensor_payload"
-elif [[ "${world_stem}" == horus_forest* || "${world_stem}" == horus_urban* ]]; then
-  payload_chain="horus_iris/iris_with_gimbal/horus_sensor_payload"
-fi
+payload_layout=""
+case "${world_stem}" in
+  horus_indoor)
+    payload_chain="horus_iris/horus_sensor_payload"
+    payload_layout=seven
+    ;;
+  horus_forest_p*|horus_urban_p*)
+    payload_chain="horus_iris/iris_with_gimbal/horus_sensor_payload"
+    payload_layout=ring
+    ;;
+  horus_forest*|horus_urban*)
+    payload_chain="horus_iris/iris_with_gimbal/horus_sensor_payload"
+    payload_layout=seven
+    ;;
+esac
 # The executor/SITL profile follows the world: generated worlds (horus_<kind>_p<seed>) get the
 # procedural fence/speed parameters, canonical horus_forest/horus_urban worlds the outdoor ones.
 # An explicit HORUS_SITL_PARAM_FILE always wins.
@@ -297,6 +308,7 @@ if [[ -n "${payload_chain}" ]]; then
     export HORUS_PYTHON=/opt/horus-venv/bin/python
     export HORUS_MAVLINK_ENDPOINT=tcp:127.0.0.1:5763
     export HORUS_TOF_RATE_HZ=20
+    export HORUS_TOF_LAYOUT="${payload_layout}"
     exec /horus/scripts/tof_bridges.sh --world "${world_stem}" --model-chain "${payload_chain}"
   ) > "${log_dir}/tof_bridge.log" 2>&1 &
   bridge_pid=$!

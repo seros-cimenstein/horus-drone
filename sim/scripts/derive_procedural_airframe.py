@@ -5,8 +5,12 @@ The outdoor airframe (``horus_iris_with_gimbal_outdoor``) collides through trian
 body (``iris_collision.stl``) and three gimbal arms. Against a generated world's large terrain
 mesh those mesh-vs-mesh contacts stall dartsim (RTF 0.00 on Koko), while the same world with box
 proxies runs at RTF ~0.47. This script writes procedural copies whose mesh collisions are replaced
-by their mesh-bound boxes; visuals, joints, sensors, plugins and include names are unchanged, so
-camera/ToF topic paths stay identical to the outdoor chain.
+by their mesh-bound boxes; visuals, joints, plugins and include names are unchanged, so camera
+topic paths stay identical to the outdoor chain. It also writes
+``horus_sensor_payload_procedural``: the ToF payload with its six single-beam proximity sensors
+replaced by one 8-beam ring, which generated worlds render in a single lidar scan. The procedural
+airframe includes the ring payload under the unchanged include name ``horus_sensor_payload``, so
+the world-scoped ToF topic chain stays identical too.
 
 Run inside the simulation image (it reads the upstream Iris model from /opt/ardupilot_gazebo):
 
@@ -79,6 +83,60 @@ def _write(name: str, sdf: str, description: str, provenance: str) -> None:
     (directory / "PROVENANCE.txt").write_text(provenance, encoding="utf-8")
 
 
+def _replace_once(text: str, old: str, new: str) -> str:
+    if text.count(old) != 1:
+        raise ValueError(f"expected exactly one occurrence of {old!r}")
+    return text.replace(old, new)
+
+
+_PROXIMITY_SENSOR = re.compile(
+    r'\n      <sensor name="proximity_[^"]+" type="gpu_lidar">.*?</sensor>', re.S)
+# -pi (dead astern) through 3*pi/4 with eight samples: beams every 45 degrees at
+# -180/-135/-90/-45/0/45/90/135, the directions RING_BEAMS bridges in horus/tof_bridge/bridge.py.
+_RING_SENSOR = """      <sensor name="proximity_ring" type="gpu_lidar">
+        <pose>0 0 0.08 0 0 0</pose>
+        <update_rate>10</update_rate><always_on>true</always_on><visualize>false</visualize>
+        <lidar>
+          <scan>
+            <horizontal><samples>8</samples><resolution>1</resolution><min_angle>-3.1415926536</min_angle><max_angle>2.3561944902</max_angle></horizontal>
+            <vertical><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></vertical>
+          </scan>
+          <range><min>0.05</min><max>4.0</max><resolution>0.01</resolution></range>
+        </lidar>
+      </sensor>"""
+
+_PAYLOAD_COMMENT = (
+    """      <!-- Virtual sensors only: no payload visuals or collisions can occlude the camera.
+           Each single-beam ToF is yawed to the sector it is bridged as (scripts/tof_bridges.sh):
+           MAVLink orientation k (clockwise, 45 deg steps) is body yaw -k*45 deg here.
+           Sensor topics are deliberately unset: gz-sim scopes them under the world and every
+           enclosing model, so the same payload works in the indoor and outdoor airframes. -->""",
+    """      <!-- Virtual sensors only: no payload visuals or collisions can occlude the camera.
+           One 8-beam horizontal ring replaces the six single-beam proximity ToFs, so generated
+           1.2 km worlds render one lidar scan; scripts/tof_bridges.sh fans the beams out to the
+           same MAVLink DISTANCE_SENSOR sectors (RING_BEAMS in horus/tof_bridge/bridge.py).
+           Sensor topics are deliberately unset: gz-sim scopes them under the world and every
+           enclosing model, so the same payload works in the indoor and outdoor airframes. -->""")
+
+_AIRFRAME_PAYLOAD_COMMENT = (
+    """    <!-- Virtual ToF payload: the same sensor set the indoor airframe carries (sensor topics are
+         world-scoped by gz-sim, so the bridge derives them from the world/model names). -->""",
+    """    <!-- Virtual ToF payload: generated worlds carry the single-ring payload
+         (model://horus_sensor_payload_procedural); the include name stays horus_sensor_payload,
+         so the world-scoped ToF topic chain and the downward rangefinder are unchanged. -->""")
+
+
+def _ring_payload() -> str:
+    payload = (MODELS / "horus_sensor_payload" / "model.sdf").read_text(encoding="utf-8")
+    matches = _PROXIMITY_SENSOR.findall(payload)
+    if len(matches) != 6:
+        raise ValueError(f"expected six proximity sensors in horus_sensor_payload, found {len(matches)}")
+    payload = _PROXIMITY_SENSOR.sub("", payload)
+    payload = _replace_once(payload, '      <sensor name="range_down"',
+                            _RING_SENSOR + '\n      <sensor name="range_down"')
+    return _replace_once(payload, *_PAYLOAD_COMMENT)
+
+
 def main() -> int:
     iris = (UPSTREAM / "iris_with_standoffs" / "model.sdf").read_text(encoding="utf-8")
     iris = _boxify(iris, "base_collision",
@@ -102,14 +160,24 @@ def main() -> int:
 
     airframe = (MODELS / "horus_iris_with_gimbal_outdoor" / "model.sdf").read_text(encoding="utf-8")
     for old, new in (("model://iris_with_standoffs<", "model://horus_iris_standoffs_procedural<"),
-                     ("model://horus_gimbal_small_3d_outdoor<", "model://horus_gimbal_small_3d_procedural<")):
+                     ("model://horus_gimbal_small_3d_outdoor<", "model://horus_gimbal_small_3d_procedural<"),
+                     ("model://horus_sensor_payload<", "model://horus_sensor_payload_procedural<")):
         if old not in airframe:
             raise ValueError(f"{old!r} not found in the outdoor airframe")
         airframe = airframe.replace(old, new)
+    airframe = _replace_once(airframe, *_AIRFRAME_PAYLOAD_COMMENT)
     _write("horus_iris_with_gimbal_procedural", airframe,
-           "Outdoor Iris with gimbal and ToF payload using primitive collisions for generated worlds.",
+           "Outdoor Iris with gimbal and single-ring ToF payload (primitive collisions).",
            "Derived by sim/scripts/derive_procedural_airframe.py from horus_iris_with_gimbal_outdoor.\n"
-           "Change: includes the box-collision Iris body and gimbal copies.\n")
+           "Change: includes the box-collision Iris body and gimbal copies, and the single-ring\n"
+           "horus_sensor_payload_procedural under the include name horus_sensor_payload.\n")
+
+    _write("horus_sensor_payload_procedural", _ring_payload(),
+           "Generated-world ToF payload: one 8-beam proximity ring and the downward rangefinder.",
+           "Derived by sim/scripts/derive_procedural_airframe.py from horus_sensor_payload.\n"
+           "Change: the six single-beam proximity_* ToF sensors are replaced by one 8-beam\n"
+           "proximity_ring gpu_lidar at the payload origin (beams every 45 degrees from -180 to\n"
+           "135, same 10 Hz and 0.05-4.0 m range); range_down, links and inertial are unchanged.\n")
 
     _write("horus_iris_procedural",
            '<?xml version="1.0"?>\n<sdf version="1.9"><model name="horus_iris_procedural"><include>'
@@ -118,7 +186,8 @@ def main() -> int:
            "Generated-world Iris camera, gimbal and ToF proximity payload (primitive collisions).",
            "Written by sim/scripts/derive_procedural_airframe.py; wrapper mirroring horus_iris_outdoor.\n")
     print("wrote horus_iris_procedural, horus_iris_with_gimbal_procedural, "
-          "horus_gimbal_small_3d_procedural, horus_iris_standoffs_procedural")
+          "horus_gimbal_small_3d_procedural, horus_iris_standoffs_procedural, "
+          "horus_sensor_payload_procedural")
     return 0
 
 

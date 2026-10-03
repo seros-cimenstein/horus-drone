@@ -9,7 +9,14 @@ import time
 from collections.abc import Sequence
 from typing import Any
 
-from .bridge import DistanceSensorReading, MultiSensorBridge, SensorSpec
+from .bridge import (
+    DistanceSensorReading,
+    MultiSensorBridge,
+    RING_BEAMS,
+    RingSensorSpec,
+    SensorSpec,
+    sensor_ids,
+)
 from .transport import subscribe_laser_scan
 
 BRIDGE_SOURCE_SYSTEM = 254
@@ -28,6 +35,12 @@ PAYLOAD_SENSORS: tuple[tuple[str, int, int], ...] = (
     ("range_down", 25, 6),
 )
 PAYLOAD_LINK = "payload"
+# Generated worlds (horus_forest_p*/horus_urban_p*) carry horus_sensor_payload_procedural: the
+# six horizontal single-beam ToFs replaced by one 8-beam ring (RING_BEAMS). The downward
+# rangefinder is identical in both layouts.
+PAYLOAD_RING_SENSOR = "proximity_ring"
+PAYLOAD_LAYOUTS = ("seven", "ring")
+PAYLOAD_DOWN_SENSOR = PAYLOAD_SENSORS[-1]
 
 
 def payload_topic_root(world: str, model_chain: str) -> str:
@@ -50,6 +63,25 @@ def payload_sensors(world: str, model_chain: str) -> list[SensorSpec]:
     root = payload_topic_root(world, model_chain)
     return [SensorSpec(f"{root}/{name}/scan", orientation, sensor_id)
             for name, orientation, sensor_id in PAYLOAD_SENSORS]
+
+
+def payload_ring_sensors(world: str, model_chain: str) -> list[SensorSpec | RingSensorSpec]:
+    """The generated-world payload sensors: the ring topic plus the unchanged down sensor."""
+    root = payload_topic_root(world, model_chain)
+    name, orientation, sensor_id = PAYLOAD_DOWN_SENSOR
+    return [
+        RingSensorSpec(f"{root}/{PAYLOAD_RING_SENSOR}/scan", RING_BEAMS),
+        SensorSpec(f"{root}/{name}/scan", orientation, sensor_id),
+    ]
+
+
+def payload_specs(world: str, model_chain: str, layout: str = "seven") -> list[SensorSpec | RingSensorSpec]:
+    """Payload sensors for ``layout``: the classic seven, or the generated-world ring."""
+    if layout == "seven":
+        return payload_sensors(world, model_chain)
+    if layout == "ring":
+        return payload_ring_sensors(world, model_chain)
+    raise ValueError(f"unknown payload layout {layout!r}; expected one of {', '.join(PAYLOAD_LAYOUTS)}")
 
 
 class _PymavlinkSender:
@@ -94,12 +126,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--world",
-        help="Gazebo world name; with --model-chain, bridges the standard seven-sensor ToF payload",
+        help="Gazebo world name; with --model-chain, bridges the payload's seven sensors "
+             "(or its 8-beam ring with --layout ring)",
     )
     parser.add_argument(
         "--model-chain",
         help="model names between the world and the payload, slash- or comma-separated "
              "(e.g. horus_iris/iris_with_gimbal/horus_sensor_payload)",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=PAYLOAD_LAYOUTS,
+        default=None,
+        help="payload layout for --world/--model-chain: seven single-beam ToF sensors "
+             "(indoor, canonical outdoor; the default) or ring, one proximity_ring scan fanned "
+             "out to one DISTANCE_SENSOR per beam (generated worlds)",
     )
     parser.add_argument(
         "--mavlink",
@@ -179,7 +220,7 @@ def _open_mavlink(endpoint: str) -> Any:
 
 
 def _serve(
-    sensors: list[SensorSpec],
+    sensors: Sequence[SensorSpec | RingSensorSpec],
     link: Any,
     rate_hz: float,
     startup_timeout: float,
@@ -193,7 +234,7 @@ def _serve(
     def scan_callback(topic: str):
         def on_scan(scan: Any) -> None:
             try:
-                if bridge.on_scan(topic, scan) is not None:
+                if bridge.on_scan(topic, scan):
                     with received_lock:
                         received.add(topic)
             except Exception as exc:
@@ -206,11 +247,19 @@ def _serve(
 
     for sensor in sensors:
         nodes.append(subscribe_laser_scan(sensor.topic, scan_callback(sensor.topic)))
-        print(
-            f"Subscribed to {sensor.topic} as DISTANCE_SENSOR id={sensor.sensor_id} "
-            f"orientation={sensor.orientation}",
-            flush=True,
-        )
+        if isinstance(sensor, RingSensorSpec):
+            ids = ", ".join(str(beam.sensor_id) for beam in sensor.beams)
+            print(
+                f"Subscribed to {sensor.topic} as a {len(sensor.beams)}-beam ring "
+                f"(DISTANCE_SENSOR ids {ids})",
+                flush=True,
+            )
+        else:
+            print(
+                f"Subscribed to {sensor.topic} as DISTANCE_SENSOR id={sensor.sensor_id} "
+                f"orientation={sensor.orientation}",
+                flush=True,
+            )
 
     ready = False
     watch = _StartupWatch(startup_timeout)
@@ -225,7 +274,7 @@ def _serve(
             missing = [sensor.topic for sensor in sensors if sensor.topic not in received]
         if not missing and not ready:
             print(
-                f"Ready: {len(sensors)} LaserScan sensors streaming over one MAVLink link",
+                f"Ready: {len(sensors)} LaserScan topics streaming over one MAVLink link",
                 flush=True,
             )
             ready = True
@@ -248,16 +297,19 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--world and --model-chain must be given together")
     if args.world and args.sensor:
         parser.error("--sensor cannot be combined with --world/--model-chain")
+    if args.sensor and args.layout:
+        parser.error("--layout cannot be combined with --sensor")
     if not args.world and not args.sensor:
         parser.error("one of --sensor or --world/--model-chain is required")
     try:
-        sensors = (payload_sensors(args.world, args.model_chain) if args.world
+        sensors = (payload_specs(args.world, args.model_chain, args.layout or "seven") if args.world
                    else [_parse_sensor(value, index) for index, value in enumerate(args.sensor)])
     except ValueError as exc:
         parser.error(str(exc))
     if len({sensor.topic for sensor in sensors}) != len(sensors):
         parser.error("--sensor topics must be unique")
-    if len({sensor.sensor_id for sensor in sensors}) != len(sensors):
+    ids = [sensor_id for sensor in sensors for sensor_id in sensor_ids(sensor)]
+    if len(set(ids)) != len(ids):
         parser.error("--sensor IDs must be unique")
     try:
         link = _open_mavlink(args.mavlink)
