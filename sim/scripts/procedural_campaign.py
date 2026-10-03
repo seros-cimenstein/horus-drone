@@ -220,6 +220,7 @@ def aggregate_campaign(episodes: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             "scan_coverage": [], "follow_reacquire": [], "landing_error": [],
             "hazard": [], "civilian": [], "rtf_mean": [], "rtf_p10": [],
             "camera_pose_vantages": [], "camera_info_hfov": [],
+            "grounder": {"active": 0, "total": 0, "models": []},
         })
         kind_row["episodes"] += 1
         tests = episode.get("tests", {})
@@ -293,6 +294,15 @@ def aggregate_campaign(episodes: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         camera_info = episode.get("camera_info")
         if isinstance(camera_info, Mapping):
             kind_row["camera_info_hfov"].append(camera_info.get("horizontal_fov_deg"))
+        grounder = episode.get("grounder")
+        if isinstance(grounder, Mapping):
+            bucket = kind_row["grounder"]
+            bucket["total"] += 1
+            if grounder.get("active") is True:
+                bucket["active"] += 1
+            model = grounder.get("model")
+            if isinstance(model, str) and model and model not in bucket["models"]:
+                bucket["models"].append(model)
     for kind_row in kinds.values():
         for bucket in kind_row["tests"].values():
             bucket["pass_rate"] = bucket["passed"] / bucket["total"] if bucket["total"] else None
@@ -313,6 +323,7 @@ def aggregate_campaign(episodes: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         rtf_p10 = kind_row.pop("rtf_p10")
         camera_pose_vantages = kind_row.pop("camera_pose_vantages")
         camera_info_hfov = kind_row.pop("camera_info_hfov")
+        grounder = kind_row.pop("grounder")
         pitch_stats = _distribution_with_std(pose.get("pitch_deg") for pose in camera_pose_vantages)
         yaw_offset_stats = _distribution_with_std(pose.get("yaw_offset_deg") for pose in camera_pose_vantages)
         roll_stats = _distribution_with_std(pose.get("roll_deg") for pose in camera_pose_vantages)
@@ -333,6 +344,7 @@ def aggregate_campaign(episodes: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
                        "skipped_invalid_trials": len(skipped_hazards)},
             "civilian_checks": {"passed": sum(civilians), "total": len(civilians),
                                 "pass_rate": sum(civilians) / len(civilians) if civilians else None},
+            "grounder": grounder,
             "rtf_mean": _distribution(rtf_mean), "rtf_p10": _distribution(rtf_p10),
             "camera_info_hfov_deg": _distribution_with_std(camera_info_hfov),
             "camera_pose": {
@@ -345,7 +357,16 @@ def aggregate_campaign(episodes: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
 
 
 def render_summary_markdown(summary: Mapping[str, Any]) -> str:
+    grounder_rows = [episode.get("grounder") for episode in summary.get("episodes", [])
+                     if isinstance(episode, Mapping) and isinstance(episode.get("grounder"), Mapping)]
+    grounder_models = sorted({str(row["model"]) for row in grounder_rows if row.get("model")})
+    grounder_line = "Grounder: not recorded"
+    if grounder_rows:
+        grounder_line = (f"Grounder: {sum(1 for row in grounder_rows if row.get('active') is True)}"
+                         f"/{len(grounder_rows)} episodes active"
+                         + (f" ({', '.join(grounder_models)})" if grounder_models else ""))
     lines = ["# HORUS procedural campaign", "", f"Episodes: {summary.get('episode_count', 0)}", "",
+             grounder_line, "",
              "## Test pass rates", "", "| Kind | Test | Passed / run | Rate | Seeds |", "|---|---|---:|---:|---|"]
     aggregate = summary.get("aggregate", {})
     kinds = aggregate.get("by_kind", {}) if isinstance(aggregate, Mapping) else {}
@@ -412,6 +433,11 @@ def render_summary_markdown(summary: Mapping[str, Any]) -> str:
         civilian_rate = "n/a" if rate is None else f"{rate:.1%}"
         lines.append(f"| {kind} | civilian checks | {civilians.get('passed', 0)}/{civilians.get('total', 0)} "
                      f"({civilian_rate}) |")
+        grounder = metrics.get("grounder", {})
+        grounder_models = ", ".join(str(model) for model in grounder.get("models", []) if model)
+        grounder_suffix = f" ({grounder_models})" if grounder_models else ""
+        lines.append(f"| {kind} | grounder active episodes | {grounder.get('active', 0)}/"
+                     f"{grounder.get('total', 0)}{grounder_suffix} |")
     def angle_text(value: Any, *, signed: bool = False) -> str:
         if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)):
             return "n/a"

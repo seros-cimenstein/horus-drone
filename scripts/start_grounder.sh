@@ -13,7 +13,7 @@ log_dir=/horus/sim/logs
 log_file="${log_dir}/horus-grounder.log"
 pid_file="${log_dir}/horus-grounder.pid"
 mkdir -p -- "${log_dir}"
-export HF_HOME=/horus/models/hf
+export HF_HOME="${HORUS_GROUNDER_HF_CACHE:-/horus/models/hf}"
 if /opt/horus-venv/bin/python -c \
   'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8100/health", timeout=0.4)' \
   >/dev/null 2>&1; then

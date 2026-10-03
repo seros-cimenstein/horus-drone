@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 import shutil
@@ -448,6 +449,58 @@ def _json_write(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
 
 
+GROUNDER_HEALTH_URL = "http://127.0.0.1:8100/health"
+GROUNDER_HEALTH_TIMEOUT_S = 1.0
+
+
+def _grounder_status(start: Mapping[str, Any] | None, end: Mapping[str, Any] | None,
+                     mcp: Mapping[str, Any] | None = None,
+                     open_vocab_candidates: int = 0) -> dict[str, Any]:
+    """Episode grounder state from every available signal, recording which one decided it.
+
+    The /health probes can both miss a service that is loading or already serving (the start
+    probe runs before startup, and a probe outside the sim container cannot reach its loopback),
+    so the MCP pipeline's own grounder status and observed ``open_vocab`` candidates count too.
+    """
+    start = start if isinstance(start, Mapping) else {}
+    end = end if isinstance(end, Mapping) else {}
+    mcp = mcp if isinstance(mcp, Mapping) else {}
+    signals: dict[str, bool] = {
+        "start_probe": bool(start.get("active")),
+        "end_probe": bool(end.get("active")),
+        "mcp_pipeline": str(mcp.get("status") or "") == "ok",
+        "open_vocab_candidates": int(open_vocab_candidates) > 0,
+    }
+    active = any(signals.values())
+    decided_by = [name for name, value in signals.items() if value] or ["no_signal"]
+    return {
+        "active": active,
+        "model": end.get("model") or start.get("model") or mcp.get("model"),
+        "detail": None if active else (end.get("detail") or start.get("detail") or mcp.get("reason")),
+        "decided_by": decided_by,
+        "signals": signals,
+        "open_vocab_candidates": int(open_vocab_candidates),
+        "start": dict(start),
+        "end": dict(end),
+        "mcp": dict(mcp),
+    }
+
+
+def probe_grounder(url: str = GROUNDER_HEALTH_URL,
+                   timeout_s: float = GROUNDER_HEALTH_TIMEOUT_S) -> dict[str, Any]:
+    """One health probe of the loopback grounding service; never raises when it is absent."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        return {"active": False, "model": None, "detail": f"{type(exc).__name__}: {exc}"}
+    if not isinstance(payload, Mapping) or payload.get("ok") is not True:
+        return {"active": False, "model": None, "detail": f"unexpected health response: {payload!r}"}
+    model = payload.get("model")
+    return {"active": True, "model": model if isinstance(model, str) else None,
+            "detail": f"health probe ok at {url}"}
+
+
 def _braced(text: str, label: str) -> list[str]:
     """Extract protobuf-text blocks for ``label`` while respecting quoted strings."""
     blocks: list[str] = []
@@ -743,6 +796,9 @@ class Episode:
             print(f"camera chain SDF fallback unavailable: {type(exc).__name__}: {exc}", flush=True)
         self.person_assets = PERSON_ASSETS
         self.people = list(self.manifest.get("people", []))
+        # Grounder evidence: candidates seeded by the open-vocabulary pass can only come from it.
+        self.open_vocab_candidates = 0
+        self.mcp_grounder: dict[str, Any] = {}
         self._person_models = {str(person.get("model", "")) for person in self.people}
         self.follow = self.manifest.get("follow", {})
         self.transit_alt = float(self.manifest["transit_altitude_m"])
@@ -800,6 +856,10 @@ class Episode:
         images = [block for block in blocks if getattr(block, "type", None) == "image"]
         if isinstance(payload, dict):
             payload["_image_data"] = [getattr(image, "data", None) for image in images]
+            perception = payload.get("perception")
+            grounder = perception.get("grounder") if isinstance(perception, Mapping) else None
+            if isinstance(grounder, Mapping):
+                self.mcp_grounder = dict(grounder)
         return payload
 
     async def _wait_tool_task(self, response: Any, *, max_wall_s: float | None = None,
@@ -1078,9 +1138,18 @@ class Episode:
             }
         return projected, details, camera_pose
 
+    def _note_candidate_sources(self, candidates: Any) -> None:
+        """Count open-vocabulary seeds, which only exist when the grounder answered."""
+        if not isinstance(candidates, Iterable):
+            return
+        for candidate in candidates:
+            if isinstance(candidate, Mapping) and str(candidate.get("source")) == "open_vocab":
+                self.open_vocab_candidates += 1
+
     def _detection_rows(self, frame: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[Any], dict[str, Any]]:
         from sim.scripts.procedural_campaign import match_candidates_to_people, candidate_bbox
         candidates = frame.get("candidate_table", [])
+        self._note_candidate_sources(candidates)
         projected, details, camera_pose = self._person_projection(frame)
         matching = match_candidates_to_people(candidates, projected)
         matching["camera_pose"] = camera_pose
@@ -1384,6 +1453,7 @@ class Episode:
         matching = __import__("sim.scripts.procedural_campaign", fromlist=["match_candidates_to_people"]).match_candidates_to_people(
             frame["candidate_table"], projected)
         candidates = frame["candidate_table"]
+        self._note_candidate_sources(candidates)
         wanted = person.get("shirt_colour_attribute")
         # Same rule (and confidence floor) the runner's select_candidate applies.
         selected = select_largest_attribute_candidate(candidates, equals=wanted)
@@ -2479,6 +2549,7 @@ def main(argv: list[str] | None = None) -> int:
                               "status": "failed", "tests": {}}
     started_wall, started_epoch = time.monotonic(), time.time()
     try:
+        result["grounder"] = probe_grounder()
         episode = Episode(args)
         tests = asyncio.run(episode.run())
         result.update({
@@ -2519,6 +2590,12 @@ def main(argv: list[str] | None = None) -> int:
                     result["final_metrics_error"] = f"{type(exc).__name__}: {exc}"
         result["wall_duration_s"] = time.monotonic() - started_wall
         result["finished_at"] = datetime.now(timezone.utc).isoformat()
+        # The start probe ran before the service finished loading; probe again at the end so a
+        # grounder that was active for the tests is reported as active.
+        result["grounder"] = _grounder_status(
+            result.get("grounder"), probe_grounder(),
+            getattr(episode, "mcp_grounder", None) if episode is not None else None,
+            getattr(episode, "open_vocab_candidates", 0) if episode is not None else 0)
         console = _copy_sitl_console(directory)
         if console is not None:
             result["sitl_console_log"] = console
