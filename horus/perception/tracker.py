@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
-from collections import OrderedDict
+from collections import Counter, OrderedDict, deque
 import math
 import time
-from dataclasses import dataclass, replace
-from typing import Any, Protocol, Sequence
+from dataclasses import dataclass, field, replace
+from typing import Any, Mapping, Protocol, Sequence
 
 from .types import BBox, Candidate, Detection, Embedding, Frame
 
@@ -38,15 +38,57 @@ class TrackerConfig:
     # loses the target once the window expires; re-acquisition never grants this grace.
     revalidation_grace_s: float = 1.0
     revalidation_grace_margin: float = 0.05
+    # Multi-view references (R1): a live, continuously associated track stores up to
+    # ``reference_views`` views in total (the creation view plus admitted extras) and validates
+    # against the best of them, so a marginal appearance dip does not lose a correctly tracked
+    # target. Admission is anchored on the creation view (full threshold) and gated by class,
+    # shirt colour, crop size and near-duplicate distance (rules in _admit_reference_view).
+    # Re-acquisition after a loss stays PRIMARY-ONLY with the full threshold and all gates: a
+    # widened acceptance region was measured to raise same-colour look-alike false accepts from
+    # 5-21% to 76-92% in the smoke6 replay.
+    reference_views: int = 4
+    # 12x30 px: every logged wrong candidate in the smoke6 re-identification sweeps was a
+    # 10-25 px tall sliver (heights 15-25) or had an unconfirmed shirt colour, while the smallest
+    # campaign-validated true re-acquisition crop was 30x39 px.
+    reference_view_min_width_px: int = 12
+    reference_view_min_height_px: int = 30
+    reference_view_dedupe_cos: float = 0.98
+    # Re-acquisition must pass on this many distinct processed frames within this window before
+    # a lost ID is rematched (filters one-frame artifacts); 0 disables the confirmation.
+    reacquisition_confirm_s: float = 1.0
     max_reid_center_distance: float = 3.0
+    # The published shirt colour is a bounded vote over the track's recent accepted
+    # classifications: the first frames of a track can misread (blur, warm light, occlusion),
+    # and one bad frame must not stick to the track's identity gates for the track's whole life.
+    # ``shirt_colour_window`` bounds the vote; a colour is published only with at least
+    # ``shirt_colour_min_votes`` votes and strictly more votes than any other colour, so an
+    # undecided track (and a tie) publishes no colour at all.
+    shirt_colour_window: int = 5
+    shirt_colour_min_votes: int = 3
 
     def __post_init__(self) -> None:
         if self.max_lost_seconds <= 0 or self.revalidate_after_seconds < 0:
             raise ValueError("track retention must be positive and revalidation delay non-negative")
+        for name in ("shirt_colour_window", "shirt_colour_min_votes"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.shirt_colour_min_votes > self.shirt_colour_window:
+            raise ValueError("shirt_colour_min_votes must not exceed shirt_colour_window")
         if not math.isfinite(self.revalidation_grace_s) or self.revalidation_grace_s < 0:
             raise ValueError("revalidation_grace_s must be a finite non-negative number")
         if not 0.0 <= self.revalidation_grace_margin <= 1.0:
             raise ValueError("revalidation_grace_margin must be in [0, 1]")
+        if isinstance(self.reference_views, bool) or not isinstance(self.reference_views, int) or self.reference_views < 1:
+            raise ValueError("reference_views must be a positive integer")
+        for name in ("reference_view_min_width_px", "reference_view_min_height_px"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if not 0.0 <= self.reference_view_dedupe_cos <= 1.0:
+            raise ValueError("reference_view_dedupe_cos must be in [0, 1]")
+        if not math.isfinite(self.reacquisition_confirm_s) or self.reacquisition_confirm_s < 0:
+            raise ValueError("reacquisition_confirm_s must be a finite non-negative number")
         for name in (
             "iou_threshold",
             "revalidation_iou_threshold",
@@ -86,6 +128,14 @@ class _Track:
     person_evidence: bool = False
     # Last time validate_candidate accepted this track at or above the similarity threshold.
     last_validated_monotonic: float = 0.0
+    # Additional confirmed appearance views (the creation view is ``reference_embedding``), capped
+    # at TrackerConfig.reference_views - 1; the oldest extra view is evicted first.
+    reference_views: list[Embedding] = field(default_factory=list)
+    # Accepted shirt-colour classifications of this track, oldest first, bounded by
+    # TrackerConfig.shirt_colour_window; only the vote result is published in ``attributes``.
+    shirt_colour_votes: deque[str] = field(default_factory=deque)
+    # (width, height) of the frame this track was last seen in, for pixel-to-angle geometry.
+    frame_size: tuple[int, int] | None = None
 
 
 class ColorHistogramEmbedder:
@@ -229,6 +279,8 @@ class PersistentTracker:
         self._cache_frame_id: int | None = None
         self._similarity_windows: dict[tuple[str, int], dict[str, Any]] = {}
         self._similarity_totals: dict[tuple[str, int], int] = {}
+        # Re-acquisition confirmations: reference_id -> {"candidate_id", "frame_id", "monotonic"}.
+        self._reacquisition_pending: dict[int, dict[str, Any]] = {}
 
     def seed(
         self,
@@ -238,8 +290,14 @@ class PersistentTracker:
         label: str,
         confidence: float,
         source: str,
+        attributes: Mapping[str, Any] | None = None,
     ) -> Candidate:
-        """Create a CSRT-backed free-text track in a processed frame."""
+        """Create a CSRT-backed free-text track in a processed frame.
+
+        ``attributes`` carries provenance for the caller (for example the grounder span a
+        vocabulary seed came from). A seed never carries detector person evidence by itself:
+        only a detector person detection or the person-only shirt-colour attribute grants that.
+        """
         if source not in {"open_vocab", "point"}:
             raise ValueError("seed source must be 'open_vocab' or 'point'")
         class_name = str(label).strip()
@@ -258,7 +316,7 @@ class PersistentTracker:
             class_name=class_name,
             class_id=None,
             confidence=float(confidence),
-            attributes={},
+            attributes=dict(attributes or {}),
             reference_embedding=embedding,
             current_embedding=embedding,
             arrival_monotonic=time.monotonic(),
@@ -267,6 +325,7 @@ class PersistentTracker:
             pose=frame.pose,
             source=source,
             csrt_tracker=tracker,
+            frame_size=_frame_size(image),
         )
         self._tracks[track_id] = track
         if self._cache_frame_id != frame.frame_id:
@@ -335,6 +394,7 @@ class PersistentTracker:
             self._embedding_cache.clear()
             self._cache_frame_id = frame_id
         self._current_image = image
+        frame_size = _frame_size(image)
 
         normalized = [_coerce_detection(item) for item in detections]
         expired = [
@@ -393,7 +453,14 @@ class PersistentTracker:
                 if track.source == "detector":
                     if association_overlap < self.config.iou_threshold:
                         continue
-                elif association_overlap <= 0.0:
+                elif association_overlap < self.config.revalidation_iou_threshold:
+                    # A seeded track (open_vocabulary or point) gets its identity from the grounder
+                    # or the operator, so an associated detection may only refresh it when the
+                    # boxes agree strongly. The previous "any overlap" rule let a different
+                    # person's detection attach to a seed and publish that person's shirt colour
+                    # on the seed (Koko run koko-after-forest-15178-ttl3: a grounder seed boxed on
+                    # a solid:crimson hiker reported green from a detector track overlapping at
+                    # IoU 0.156, and a wide_band:black+beige seed likewise).
                     continue
                 if (
                     track.source == "detector"
@@ -426,14 +493,14 @@ class PersistentTracker:
                 track.class_name = detection.class_name
                 track.class_id = detection.class_id
             track.confidence = detection.confidence
-            attributes = dict(detection.attributes)
-            if attributes.get("shirt_colour") is None and track.attributes.get("shirt_colour") is not None:
-                # An inconclusive frame (side view, partial occlusion) must not erase the track's known
-                # shirt colour: re-identification uses it to reject look-alike people.
-                attributes["shirt_colour"] = track.attributes["shirt_colour"]
-                if "shirt_colour_confidence" in track.attributes:
-                    attributes["shirt_colour_confidence"] = track.attributes["shirt_colour_confidence"]
-            track.attributes = attributes
+            if frame_size is not None:
+                track.frame_size = frame_size
+            # An inconclusive frame (side view, partial occlusion) must not erase the track's
+            # settled shirt colour, and one misread frame must not settle it either: the
+            # published colour is the bounded vote over recent accepted classifications.
+            track.attributes = _vote_shirt_colour(
+                detection.attributes, track.shirt_colour_votes, self.config
+            )
             track.current_embedding = None
             track.arrival_monotonic = arrival_monotonic
             track.timestamp = now
@@ -457,13 +524,14 @@ class PersistentTracker:
             track_id = self._next_id
             self._next_id += 1
             embedding = self.encode(image, detection.bbox)
+            votes: deque[str] = deque()
             self._tracks[track_id] = _Track(
                 id=track_id,
                 bbox=detection.bbox,
                 class_name=detection.class_name,
                 class_id=detection.class_id,
                 confidence=detection.confidence,
-                attributes=dict(detection.attributes),
+                attributes=_vote_shirt_colour(detection.attributes, votes, self.config),
                 reference_embedding=embedding,
                 current_embedding=embedding,
                 arrival_monotonic=arrival_monotonic,
@@ -471,6 +539,8 @@ class PersistentTracker:
                 frame_id=frame_id,
                 pose=pose,
                 person_evidence=_is_person_detection(detection),
+                shirt_colour_votes=votes,
+                frame_size=frame_size,
             )
             self._embedding_cache[(frame_id, track_id)] = embedding
             detection_track_ids[detection_index] = track_id
@@ -541,6 +611,9 @@ class PersistentTracker:
         reference_id: int,
         candidate: Candidate,
         threshold: float,
+        primary_similarity: float | None = None,
+        matched_view: int = 0,
+        view_count: int = 1,
     ) -> None:
         """Record one appearance comparison at DEBUG and aggregate it into a per-second summary.
 
@@ -565,6 +638,11 @@ class PersistentTracker:
             "crop_width_px": crop_width_px,
             "crop_height_px": crop_height_px,
             "frame_id": candidate.frame_id,
+            # Multi-view references: which of the stored views produced the best score, how many
+            # views exist, and what the creation view alone scored.
+            "matched_view": matched_view,
+            "reference_view_count": view_count,
+            "primary_similarity": primary_similarity,
         }
         _LOGGER.debug(
             json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
@@ -584,6 +662,8 @@ class PersistentTracker:
                 "best_similarity": None,
                 "best_candidate_id": None,
                 "best_crop_px": None,
+                "best_view_index": 0,
+                "reference_view_count": 1,
                 "last_similarity": None,
                 "own_track_seen": False,
             }
@@ -598,6 +678,8 @@ class PersistentTracker:
                 window["best_similarity"] = similarity
                 window["best_candidate_id"] = record.get("candidate_id")
                 window["best_crop_px"] = (record.get("crop_width_px"), record.get("crop_height_px"))
+                window["best_view_index"] = record.get("matched_view", 0)
+                window["reference_view_count"] = record.get("reference_view_count", 1)
         if record.get("candidate_id") == record.get("reference_id"):
             window["own_track_seen"] = True
         elapsed = now - window["started"]
@@ -614,6 +696,8 @@ class PersistentTracker:
             "best_similarity": window["best_similarity"],
             "best_candidate_id": window["best_candidate_id"],
             "best_crop_px": list(window["best_crop_px"]) if window["best_crop_px"] else None,
+            "best_view_index": window.get("best_view_index", 0),
+            "reference_view_count": window.get("reference_view_count", 1),
             "last_similarity": window["last_similarity"],
             "own_track_seen": window["own_track_seen"],
         }
@@ -667,6 +751,134 @@ class PersistentTracker:
         )
         return reason
 
+    def reference_view_count(self, track_id: int) -> int:
+        """Stored reference views for a track, including the creation view (1 when unknown)."""
+        track = self._tracks.get(int(track_id))
+        if track is None:
+            return 1
+        return 1 + len(track.reference_views)
+
+    def _match_reference_views(
+        self, track: _Track, embedding: Embedding | None
+    ) -> tuple[float | None, int]:
+        """Best similarity across the stored views and the index of the view that produced it.
+
+        Index 0 is the creation view (``track.reference_embedding``); 1.. are admitted extra
+        views. ``None`` when there is no reference appearance or no live embedding.
+        """
+        if track.reference_embedding is None or embedding is None:
+            return None, 0
+        best = cosine_similarity(track.reference_embedding, embedding)
+        best_index = 0
+        for index, view in enumerate(track.reference_views, start=1):
+            similarity = cosine_similarity(view, embedding)
+            if similarity is not None and (best is None or similarity > best):
+                best, best_index = similarity, index
+        return best, best_index
+
+    def _crop_is_usable(self, candidate: Candidate) -> bool:
+        """True when the candidate's crop is large enough for its embedding to mean anything.
+
+        The smoke6 logs show wrong candidates reaching 0.70-0.88 similarity only while they were
+        10-25 px tall border slivers whose embeddings are noise; every true candidate in the logs
+        was at least 19x39 px (the smallest campaign-validated re-acquisition was 30x39 px). The
+        size comes from the frame when its dimensions are known and from the box itself
+        otherwise, so a perception implementation without frame metadata is not rejected wholesale.
+        """
+        width_px, height_px = _crop_pixel_dimensions(self._current_image, candidate.bbox)
+        shape = getattr(self._current_image, "shape", None)
+        if shape is None or len(shape) < 2:
+            # No frame metadata to clamp the box against (a synthetic perception double): fall
+            # back to the box extent instead of rejecting everything.
+            width_px = max(0.0, float(candidate.bbox[2]) - float(candidate.bbox[0]))
+            height_px = max(0.0, float(candidate.bbox[3]) - float(candidate.bbox[1]))
+        return (
+            width_px >= self.config.reference_view_min_width_px
+            and height_px >= self.config.reference_view_min_height_px
+        )
+
+    def _admit_reference_view(
+        self, track: _Track, candidate: Candidate, live_embedding: Embedding | None
+    ) -> bool:
+        """Store a confirmed appearance view for a live, continuously associated track.
+
+        Rules (all must hold; the caller guarantees the view passed the FULL threshold against the
+        creation view, never on a grace-forgiven frame):
+          1. the candidate is the track's own fresh candidate (guaranteed by the caller);
+          2. it passed the full threshold against the creation view (caller);
+          3. class gate: a differing known class is never stored;
+          4. shirt-colour gate: a differing known colour is never stored;
+          5. crop gate: 12x30 px minimum (see _crop_is_usable);
+          6. diversity: a view within ``reference_view_dedupe_cos`` of a stored one adds nothing;
+          7. the gallery is capped at ``reference_views`` views in total; the oldest extra view is
+             evicted first and the creation view is never evicted.
+        """
+        if live_embedding is None:
+            return False
+        limit = max(0, self.config.reference_views - 1)
+        if limit == 0:
+            return False
+        track_class = track.class_name.casefold()
+        candidate_class = candidate.class_name.casefold()
+        if (
+            track_class not in ("", "object", "unknown")
+            and candidate_class not in ("", "object", "unknown")
+            and track_class != candidate_class
+        ):
+            return False
+        reference_colour = track.attributes.get("shirt_colour")
+        if reference_colour is not None and candidate.attributes.get("shirt_colour") != reference_colour:
+            return False
+        if not self._crop_is_usable(candidate):
+            return False
+        if track.reference_embedding is not None:
+            similarity = cosine_similarity(track.reference_embedding, live_embedding)
+            if similarity is not None and similarity >= self.config.reference_view_dedupe_cos:
+                return False
+        for view in track.reference_views:
+            similarity = cosine_similarity(view, live_embedding)
+            if similarity is not None and similarity >= self.config.reference_view_dedupe_cos:
+                return False
+        track.reference_views.append(live_embedding)
+        if len(track.reference_views) > limit:
+            del track.reference_views[0]
+        return True
+
+    def _confirm_reacquisition(self, reference_id: int, candidate_id: int, frame_id: Any) -> bool:
+        """Require the same candidate id to pass on two distinct processed frames.
+
+        The first passing frame records a pending confirmation and reports no match; a later frame
+        with the same candidate id inside ``reacquisition_confirm_s`` confirms it. A different
+        candidate, an expired window, or the same frame repeated (the executor calls this many
+        times per frame) does not count. ``reacquisition_confirm_s`` of 0 disables the rule.
+        """
+        window = self.config.reacquisition_confirm_s
+        if window <= 0:
+            return True
+        now = time.monotonic()
+        if len(self._reacquisition_pending) > 128:
+            # Bound the confirmation state: unrelated references that never confirm must not
+            # accumulate for the lifetime of the process.
+            oldest = sorted(self._reacquisition_pending.items(), key=lambda item: item[1]["monotonic"])
+            for reference, _ in oldest[: len(oldest) - 128]:
+                del self._reacquisition_pending[reference]
+        pending = self._reacquisition_pending.get(reference_id)
+        if (
+            pending is not None
+            and pending["candidate_id"] == candidate_id
+            and pending["frame_id"] != frame_id
+            and now - pending["monotonic"] <= window
+        ):
+            del self._reacquisition_pending[reference_id]
+            return True
+        if pending is None or pending["candidate_id"] != candidate_id or pending["frame_id"] != frame_id:
+            self._reacquisition_pending[reference_id] = {
+                "candidate_id": candidate_id,
+                "frame_id": frame_id,
+                "monotonic": now,
+            }
+        return False
+
     def _validate_candidate(
         self,
         track_id: int,
@@ -690,8 +902,12 @@ class PersistentTracker:
         if track.reference_embedding is None:
             return None, "no_reference_appearance"
         live_embedding = self._embed_candidate(candidate)
-        similarity = cosine_similarity(track.reference_embedding, live_embedding)
         threshold = self.config.revalidation_similarity_threshold
+        # The creation view decides admission; matching may use any stored view, so a marginal dip
+        # against the creation view no longer loses a correctly tracked, continuously associated
+        # target (the smoke6 orbit target dipped 0.7917 -> 0.7196 with a 77x81 px crop).
+        primary_similarity = cosine_similarity(track.reference_embedding, live_embedding)
+        similarity, matched_view = self._match_reference_views(track, live_embedding)
         if log_similarity:
             self._log_similarity(
                 mode="selected_validation",
@@ -699,6 +915,9 @@ class PersistentTracker:
                 reference_id=track.id,
                 candidate=candidate,
                 threshold=threshold,
+                primary_similarity=primary_similarity,
+                matched_view=matched_view,
+                view_count=1 + len(track.reference_views),
             )
         now = time.monotonic()
         if similarity is None or similarity < threshold:
@@ -725,6 +944,12 @@ class PersistentTracker:
                 return replace(candidate, embedding=live_embedding), None
             return None, "appearance_mismatch"
         track.last_validated_monotonic = now
+        if primary_similarity is not None and primary_similarity >= threshold:
+            if self._admit_reference_view(track, candidate, live_embedding):
+                _LOGGER.debug(
+                    "track %d stored reference view %d (primary %.3f, gallery max %.3f)",
+                    track.id, len(track.reference_views), primary_similarity, similarity,
+                )
         return replace(candidate, embedding=live_embedding), None
 
     def validate_id(self, track_id: int, **kwargs: Any) -> bool:
@@ -732,8 +957,17 @@ class PersistentTracker:
         return self.validate_candidate(track_id, **kwargs) is not None
 
     def reidentify_candidate(self, track_id: int) -> tuple[Candidate, float] | None:
-        """Re-match a lost track's reference embedding to a fresh current candidate."""
-        track = self._tracks.get(int(track_id)) or self._retired.get(int(track_id))
+        """Re-match a lost track to a fresh current candidate.
+
+        R1: re-acquisition stays anchored on the creation view alone (``reference_embedding``) at
+        the full threshold - the multi-view gallery is deliberately NOT consulted here, because a
+        widened acceptance region was measured to raise same-colour look-alike false accepts from
+        5-21% to 76-92% in the smoke6 replay. The class, shirt-colour and crop gates apply, and the
+        same candidate id must pass on two distinct processed frames within
+        ``reacquisition_confirm_s`` before the ID is rematched.
+        """
+        reference_id = int(track_id)
+        track = self._tracks.get(reference_id) or self._retired.get(reference_id)
         if track is None or track.reference_embedding is None:
             return None
         reference_colour = track.attributes.get("shirt_colour")
@@ -756,6 +990,7 @@ class PersistentTracker:
                 reference_id=track.id,
                 candidate=candidate,
                 threshold=threshold,
+                view_count=1 + len(track.reference_views),
             )
             if (
                 track.class_name not in ("", "object", "unknown")
@@ -767,13 +1002,27 @@ class PersistentTracker:
                 and candidate.attributes.get("shirt_colour") != reference_colour
             ):
                 continue
+            if not self._crop_is_usable(candidate):
+                continue
             if (
                 similarity is not None
                 and similarity >= threshold
                 and (best is None or similarity > best[1])
             ):
                 best = (replace(candidate, embedding=live_embedding), similarity)
-        return best
+        if best is None:
+            # A break in the confirmation resets the pending state: two consecutive frames of the
+            # same candidate must pass inside the window.
+            self._reacquisition_pending.pop(reference_id, None)
+            return None
+        candidate, similarity = best
+        if not self._confirm_reacquisition(reference_id, candidate.id, candidate.frame_id):
+            _LOGGER.debug(
+                "re-identification of %d as candidate %d is pending a second confirmed frame",
+                reference_id, candidate.id,
+            )
+            return None
+        return candidate, similarity
 
     def rematch(
         self,
@@ -1014,6 +1263,60 @@ def _is_person_detection(detection: Detection) -> bool:
     )
 
 
+def _decide_shirt_colour(
+    votes: deque[str], config: TrackerConfig
+) -> tuple[str, float] | None:
+    """Majority colour over the bounded vote window, or ``None`` while undecided.
+
+    A colour needs at least ``shirt_colour_min_votes`` votes and strictly more votes than any
+    other colour, so a tie (a possible flip in progress) publishes nothing and an undecided
+    track carries no colour attribute at all.
+    """
+    if not votes:
+        return None
+    counts = Counter(votes)
+    colour, count = max(counts.items(), key=lambda item: (item[1], item[0]))
+    runner_up = max((value for name, value in counts.items() if name != colour), default=0)
+    if count < config.shirt_colour_min_votes or count <= runner_up:
+        return None
+    return colour, count / len(votes)
+
+
+def _vote_shirt_colour(
+    detection_attributes: Any, votes: deque[str], config: TrackerConfig
+) -> dict[str, Any]:
+    """Record this frame's accepted classification and publish the vote's decision.
+
+    ``votes`` is trimmed to ``shirt_colour_window``; an inconclusive frame (no colour) does not
+    vote, so it neither decides nor erases a settled colour. Any upstream ``shirt_colour`` is
+    replaced by the decision, keeping the published attribute and its confidence consistent.
+    """
+    attributes = dict(detection_attributes or {})
+    colour = attributes.get("shirt_colour")
+    if isinstance(colour, str) and colour:
+        votes.append(colour)
+        while len(votes) > config.shirt_colour_window:
+            votes.popleft()
+    attributes.pop("shirt_colour", None)
+    attributes.pop("shirt_colour_confidence", None)
+    decided = _decide_shirt_colour(votes, config)
+    if decided is not None:
+        attributes["shirt_colour"] = decided[0]
+        attributes["shirt_colour_confidence"] = decided[1]
+    return attributes
+
+
+def _frame_size(image: Any) -> tuple[int, int] | None:
+    """(width, height) of an OpenCV image, or None when no image is available."""
+    shape = getattr(image, "shape", None)
+    if shape is None or len(shape) < 2:
+        return None
+    width, height = int(shape[1]), int(shape[0])
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
 def _candidate_from_track(track: _Track, *, embedding: Embedding | None = None) -> Candidate:
     return Candidate(
         id=track.id,
@@ -1028,4 +1331,7 @@ def _candidate_from_track(track: _Track, *, embedding: Embedding | None = None) 
         source=track.source,
         embedding=track.current_embedding if embedding is None else embedding,
         person_evidence=track.person_evidence,
+        reference_views=1 + len(track.reference_views),
+        frame_width=None if track.frame_size is None else track.frame_size[0],
+        frame_height=None if track.frame_size is None else track.frame_size[1],
     )

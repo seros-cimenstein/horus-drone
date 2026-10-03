@@ -131,6 +131,24 @@ class PerceptionSettings:
     # Keep a live track's identity through a brief appearance-score dip (see TrackerConfig);
     # 0 disables the grace and requires every validated frame to pass the threshold.
     revalidation_grace_s: float = 1.0
+    # Multi-view references (R1): a live, continuously associated track stores up to
+    # ``reference_views`` confirmed views in total and validates against the best of them, so an
+    # appearance dip does not lose a correctly tracked target. Admission is anchored on the
+    # creation view at the full threshold and gated by class, shirt colour and crop size.
+    # Re-acquisition after a loss stays creation-view-only with the full threshold and gates.
+    reference_views: int = 4
+    reference_view_min_width_px: int = 12
+    reference_view_min_height_px: int = 30
+    reference_view_dedupe_cos: float = 0.98
+    # Re-acquisition must pass on two distinct processed frames within this many seconds
+    # (0 disables the confirmation).
+    reacquisition_confirm_s: float = 1.0
+    # The published shirt colour is a bounded vote over the track's recent accepted
+    # classifications, so one misread frame cannot label a track: a colour needs at least
+    # ``shirt_colour_min_votes`` votes within the last ``shirt_colour_window`` and strictly
+    # more votes than any other colour, and an undecided track publishes no colour.
+    shirt_colour_window: int = 5
+    shirt_colour_min_votes: int = 3
     ignore_regions: tuple[tuple[float, float, float, float], ...] = ()
 
     def __post_init__(self) -> None:
@@ -148,6 +166,34 @@ class PerceptionSettings:
             or self.revalidation_grace_s < 0
         ):
             raise ValueError("perception.revalidation_grace_s must be a finite non-negative number")
+        if isinstance(self.reference_views, bool) or not isinstance(self.reference_views, int) or self.reference_views < 1:
+            raise ValueError("perception.reference_views must be a positive integer")
+        for name in ("reference_view_min_width_px", "reference_view_min_height_px"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"perception.{name} must be a positive integer")
+        if (
+            isinstance(self.reference_view_dedupe_cos, bool)
+            or not isinstance(self.reference_view_dedupe_cos, (int, float))
+            or not math.isfinite(self.reference_view_dedupe_cos)
+            or not 0.0 <= self.reference_view_dedupe_cos <= 1.0
+        ):
+            raise ValueError("perception.reference_view_dedupe_cos must be in [0, 1]")
+        if (
+            isinstance(self.reacquisition_confirm_s, bool)
+            or not isinstance(self.reacquisition_confirm_s, (int, float))
+            or not math.isfinite(self.reacquisition_confirm_s)
+            or self.reacquisition_confirm_s < 0
+        ):
+            raise ValueError("perception.reacquisition_confirm_s must be a finite non-negative number")
+        for name in ("shirt_colour_window", "shirt_colour_min_votes"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"perception.{name} must be a positive integer")
+        if self.shirt_colour_min_votes > self.shirt_colour_window:
+            raise ValueError(
+                "perception.shirt_colour_min_votes must not exceed perception.shirt_colour_window"
+            )
         if not isinstance(self.vocabulary, Sequence) or isinstance(self.vocabulary, (str, bytes)):
             raise ValueError("perception.vocabulary must be a list of terms")
         object.__setattr__(self, "vocabulary", list(self.vocabulary))

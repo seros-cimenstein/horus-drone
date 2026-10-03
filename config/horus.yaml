@@ -73,6 +73,23 @@ perception:
   # Keep a live track's identity through a marginal appearance-score dip (see the tracker): the
   # revalidation threshold itself is never lowered, and re-acquisition gets no grace.
   revalidation_grace_s: 1.0
+  # Multi-view references (R1): confirmed views of a live, continuously associated track (capped
+  # here, creation view anchored at the full threshold, class/shirt-colour/crop gated) are used to
+  # validate it; re-acquisition after a loss stays creation-view-only and needs two confirmed
+  # frames (reacquisition_confirm_s).
+  reference_views: 4
+  # Crops smaller than this are embedding noise (smoke6: every wrong candidate was <= 25 px tall
+  # or had an unconfirmed colour; the smallest validated true re-acquisition was 30x39 px).
+  reference_view_min_width_px: 12
+  reference_view_min_height_px: 30
+  reference_view_dedupe_cos: 0.98
+  reacquisition_confirm_s: 1.0
+  # The published shirt colour is a bounded vote over the track's recent accepted
+  # classifications (majority of the last `shirt_colour_window` with at least
+  # `shirt_colour_min_votes`); an undecided track publishes no colour, so one misread frame
+  # cannot label a track's identity gates.
+  shirt_colour_window: 5
+  shirt_colour_min_votes: 3
   # Normalized [x1, y1, x2, y2] camera boxes for the propellers; ignore detections ≥50% covered.
   ignore_regions:
     - [0.0, 0.0, 0.22, 0.24]
