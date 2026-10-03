@@ -51,6 +51,12 @@ PROCEDURAL_MAX_LEG_M = 850.0
 # Flight profile: forest trees must keep their tops below 23 m above the home datum.
 TREE_TOP_LIMIT_M = 23.0
 TREE_LIMIT = 9000                     # tree + sapling instance budget
+# Full stand density within FOCUS_RADIUS_M of home and every mission site; elsewhere only
+# FAR_TREE_DENSITY of it and no saplings. Every tree instance costs each drone render sensor a
+# fixed per-item overhead regardless of distance (a 400 m camera far clip changed nothing):
+# halving the instance count raised live RTF on Koko from 0.23 to 0.49.
+FOCUS_RADIUS_M = 120.0
+FAR_TREE_DENSITY = 0.3
 TRAIL_HALF_WIDTH_M = 1.2              # materials.dirt_trail_texture spans 2.4 m
 CREEK_HALF_WIDTH_M = 1.3              # materials.creek_texture spans 2.6 m
 STRIP_LIFT_M = 0.03                   # strips ride on the terrain to avoid z-fighting
@@ -406,8 +412,14 @@ def _missing_hiker(rng: random.Random, trails: Sequence[Sequence[tuple[float, fl
 
 
 def _tree_field(rng: random.Random, surface, tree_grid: _BlockGrid, sapling_grid: _BlockGrid,
-                half: float = TREE_HALF_M) -> tuple[list[SceneryInstance], int, int, float]:
-    """Instanced trees and saplings with local density variation; no primitive vegetation."""
+                half: float = TREE_HALF_M,
+                focus: Sequence[tuple[float, float]] = ((0.0, 0.0),),
+                ) -> tuple[list[SceneryInstance], int, int, float]:
+    """Instanced trees and saplings with local density variation; no primitive vegetation.
+
+    Stands keep their full density within ``FOCUS_RADIUS_M`` of a ``focus`` point (home and the
+    mission sites); farther away only ``FAR_TREE_DENSITY`` of the trees and no saplings remain.
+    """
     noise = _lattice(rng, 12)
     cell = 10.0
     instances: list[SceneryInstance] = []
@@ -439,6 +451,9 @@ def _tree_field(rng: random.Random, surface, tree_grid: _BlockGrid, sapling_grid
             v = (y + half) / (2.0 * half)
             density = _noise_at(noise, u, v)
             probability = 0.16 if density < 0.40 else (0.55 if density < 0.62 else 0.92)
+            near = any(math.hypot(x - fx, y - fy) <= FOCUS_RADIUS_M for fx, fy in focus)
+            if not near:
+                probability *= FAR_TREE_DENSITY
             if rng.random() > probability:
                 continue
             if tree_grid.blocked_at(x, y) or too_close(x, y, 2.2):
@@ -458,7 +473,7 @@ def _tree_field(rng: random.Random, surface, tree_grid: _BlockGrid, sapling_grid
             remember(x, y)
             trees += 1
             max_top = max(max_top, top)
-            if density > 0.62 and rng.random() < 0.35 and trees + saplings < TREE_LIMIT:
+            if near and density > 0.62 and rng.random() < 0.35 and trees + saplings < TREE_LIMIT:
                 angle = rng.uniform(-math.pi, math.pi)
                 radius = rng.uniform(2.5, 6.0)
                 sx = x + radius * math.cos(angle)
@@ -902,7 +917,9 @@ def _sample_attempt(seed: int, rng: random.Random, attempt: int,
     sapling_grid.mark_disc(canopy_xy[0], canopy_xy[1], 12.0 + GRID_CELL_M)
     tree_grid.mark_disc(occluder_xy[0], occluder_xy[1], 8.0 + GRID_CELL_M)
     sapling_grid.mark_disc(occluder_xy[0], occluder_xy[1], 8.0 + GRID_CELL_M)
-    tree_instances, trees, saplings, tree_top = _tree_field(rng, surface, tree_grid, sapling_grid)
+    focus = ((0.0, 0.0), *((x, y) for _name, _kind, x, y, _radius in base.sites))
+    tree_instances, trees, saplings, tree_top = _tree_field(rng, surface, tree_grid, sapling_grid,
+                                                            focus=focus)
     if trees + saplings > TREE_LIMIT:
         rejections["tree budget"] += 1
         return None
