@@ -158,15 +158,16 @@ export HORUS_MCP_URL="${MCP_URL}"
 export HORUS_COMMANDER_URL="${COMMANDER_URL}"
 export HORUS_SIM_CONTAINER_NAME="${CONTAINER}"
 if (( procedural == 1 )); then
-  # Generated outdoor worlds carry the outdoor fence/wind/gimbal parameters.
-  export HORUS_SITL_PARAM_FILE="${HORUS_SITL_PARAM_FILE:-/horus/config/ardupilot/horus_sitl_outdoor.parm}"
+  procedural_kind="${procedural_kind:-forest}"
+  # Generated outdoor worlds carry the procedural fence/cruise-speed parameters and profile.
+  export HORUS_SITL_PARAM_FILE="${HORUS_SITL_PARAM_FILE:-/horus/config/ardupilot/horus_sitl_procedural.parm}"
+  export HORUS_CONFIG="${HORUS_CONFIG:-/horus/config/horus_procedural_${procedural_kind}.yaml}"
 else
   export HORUS_SITL_PARAM_FILE="${HORUS_SITL_PARAM_FILE:-/horus/config/ardupilot/horus_sitl.parm}"
 fi
 
 if (( procedural == 1 )) && (( remote_mode == 1 )); then
   # Generate on the laptop; remote_up.sh rsyncs sim/generated and starts this SDF remotely.
-  procedural_kind="${procedural_kind:-forest}"
   if [[ -z "${procedural_seed}" ]]; then
     procedural_seed="$(( (RANDOM << 15 | RANDOM) % 90000 + 10000 ))"
     printf 'Random procedural seed for this run: %s\n' "${procedural_seed}"
@@ -177,8 +178,8 @@ if (( procedural == 1 )) && (( remote_mode == 1 )); then
   procedural_stem="$(procedural_world_stem "${procedural_kind}" "${procedural_seed}")"
   export HORUS_REMOTE_WORLD="${procedural_sdf}"
   export HORUS_GUI_WORLD="${procedural_stem}"
-  # The remote MCP must run with the outdoor executor config, not the indoor default.
-  export HORUS_REMOTE_CONFIG="/horus/config/horus_${procedural_kind}.yaml"
+  # The remote MCP must run with the procedural executor config, not the indoor default.
+  export HORUS_REMOTE_CONFIG="/horus/config/horus_procedural_${procedural_kind}.yaml"
 fi
 # The MCP run pointer holds a container path (/horus/...); the host commander needs a host path.
 export HORUS_EVENT_LOG="${HORUS_EVENT_LOG:-${PROJECT_DIR}/runs/demo/$(date -u +%Y%m%dT%H%M%SZ)-commander-events.jsonl}"
@@ -349,7 +350,11 @@ else
     run_args=(start --gui horus_indoor.sdf)
   fi
   "${SIM_DIR}/run.sh" "${run_args[@]}"
-  docker exec --workdir /horus --env "HORUS_MCP_TOKEN=${HORUS_MCP_TOKEN}" \
+  mcp_env_args=(--env "HORUS_MCP_TOKEN=${HORUS_MCP_TOKEN}")
+  if [[ -n "${HORUS_CONFIG:-}" ]]; then
+    mcp_env_args+=(--env "HORUS_CONFIG=${HORUS_CONFIG}")
+  fi
+  docker exec --workdir /horus "${mcp_env_args[@]}" \
     "${CONTAINER}" /opt/horus-venv/bin/horus-mcp &
   mcp_exec_pid=$!
   wait_for_port 8000 'HORUS MCP with perception' "${mcp_exec_pid}"

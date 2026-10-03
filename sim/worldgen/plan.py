@@ -18,6 +18,12 @@ from sim.worldgen.geometry import CollisionWorld
 
 _Point = tuple[float, float, float]
 
+# Planner limits for the canonical 150 m worlds: callers that plan over a canonical world keep
+# these values, while callers that fly a generated map pass limits derived from that world's
+# profile (see sim/scripts/campaign_episode.py). Both are explicit parameters below.
+CANONICAL_MAX_LEG_M = 60.0
+CANONICAL_VANTAGE_BOUNDS_M = 60.0
+
 # Torso point heights above ground by posture; the detector box centre sits near these.
 POSTURE_TORSO_M = {"standing": 1.1, "sitting": 0.7, "lying": 0.25}
 POSTURE_TOP_M = {"standing": 1.9, "sitting": 1.2, "lying": 0.45}
@@ -165,14 +171,17 @@ def plan_vantage(
     min_clearance_m: float = 2.0,
     drone_radius_m: float = 0.6,
     require_los: bool = True,
-    bounds: float = 60.0,
+    bounds: float = CANONICAL_VANTAGE_BOUNDS_M,
     attempts: int = 400,
 ) -> Vantage | None:
     """Sample a hover point that frames the target inside the camera's depression band.
 
     The hover point, and its vertical column up to the transit altitude, keep
     ``min_clearance_m`` from every static collision (after the drone radius) so a
-    climb-cruise-descend route to it is safe.
+    climb-cruise-descend route to it is safe. ``bounds`` is the caller-supplied maximum
+    ``|north|``/``|east|`` offset of the hover point: callers over a canonical world keep
+    ``CANONICAL_VANTAGE_BOUNDS_M`` (the 60 m actor geofence inset); callers over a generated
+    map pass the map's flight-profile geofence extent.
     """
     low, high = camera.depression_band_deg(margin_deg=8.0)
     for _ in range(attempts):
@@ -214,11 +223,13 @@ def legs_clearance(world: CollisionWorld, start: _Point, legs: list[tuple[_Point
 
 
 def cruise_legs(start: _Point, eye: _Point, heading: float, transit_alt: float,
-                max_leg_m: float = 60.0) -> list[tuple[_Point, float]]:
+                max_leg_m: float = CANONICAL_MAX_LEG_M) -> list[tuple[_Point, float]]:
     """Climb over the start, cruise at the transit altitude, then descend onto ``eye``.
 
     Horizontal cruise is split so no leg exceeds ``max_leg_m`` (the executor caps each goto's
-    travel at ``max_distance_m``).
+    travel at ``max_distance_m``). ``max_leg_m`` is caller-supplied: callers over a canonical
+    world keep ``CANONICAL_MAX_LEG_M``; callers over a generated map pass that map's
+    flight-profile ``max_distance_m``.
     """
     legs = [((start[0], start[1], transit_alt), heading)]
     distance = math.hypot(eye[0] - start[0], eye[1] - start[1])

@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="horus_vehicle_pickup">
+    <static>true</static>
+    <link name="link">
+      <visual name="pickup">
+        <pose>0.1201 0 0.0073 0 0 0</pose>
+        <geometry><mesh><uri>model://horus_vehicle_pickup/meshes/pickup.dae</uri></mesh></geometry>
+      </visual>
+      <collision name="proxy_0_box">
+        <pose>0 0 0.9327 0 0 0</pose>
+        <geometry><box><size>5.6647 2.4729 1.8655</size></box></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>

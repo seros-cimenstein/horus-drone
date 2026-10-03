@@ -29,7 +29,12 @@ fi
 # Ethernet GZ_IP), so re-publish until RTP packets arrive on UDP 5600. Call this after MCP has
 # connected to SITL: the lockstep world, and so the camera, only runs once a MAVLink client is
 # attached. The 1.5 s probe shares 5600 with the MCP camera reader (both use SO_REUSEADDR).
-for ((attempt = 1; attempt <= 20; attempt++)); do
+# Generated 1.2 km worlds render their first frames well after MCP connects, so retry for a time
+# budget rather than a fixed count.
+stream_deadline=$((SECONDS + ${HORUS_CAMERA_STREAM_TIMEOUT_S:-180}))
+attempt=0
+while (( SECONDS < stream_deadline )); do
+  attempt=$((attempt + 1))
   docker exec --workdir /horus "${container}" gz topic \
     -t "${camera_topic}" -m gz.msgs.Boolean -p 'data: 1'
   if docker exec "${container}" python3 -c '
@@ -47,5 +52,6 @@ except socket.timeout:
     exit 0
   fi
 done
-printf 'Camera stream did not start after 20 enable attempts: %s\n' "${camera_topic}" >&2
+printf 'Camera stream did not start after %d enable attempts in %d s: %s\n' \
+  "${attempt}" "${HORUS_CAMERA_STREAM_TIMEOUT_S:-180}" "${camera_topic}" >&2
 exit 1

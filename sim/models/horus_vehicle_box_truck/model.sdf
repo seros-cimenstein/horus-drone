@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="horus_vehicle_box_truck">
+    <static>true</static>
+    <link name="link">
+      <visual name="box_truck">
+        <pose>-0.0024 0.0013 0 0 0 0</pose>
+        <geometry><mesh><uri>model://horus_vehicle_box_truck/meshes/truck.obj</uri></mesh></geometry>
+        <material><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://horus_vehicle_box_truck/materials/textures/TruckBox_Diffuse.png</albedo_map><metalness>0</metalness><roughness>0.6</roughness></metal></pbr></material>
+      </visual>
+      <collision name="proxy_0_box">
+        <pose>0 0 1 0 0 0</pose>
+        <geometry><box><size>4 1.633 2</size></box></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>

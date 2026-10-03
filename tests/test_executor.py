@@ -10,7 +10,7 @@ import pytest
 
 from horus.config import ExecutorSettings
 from horus.events import EventBus
-from horus.executor import ExecutorState, HorusExecutor
+from horus.executor import ExecutorState, HorusExecutor, flight_envelope
 from horus.flight import Pose
 
 
@@ -2098,3 +2098,78 @@ def test_emergency_preempts_a_running_search(action):
     _assert_emergency_stays_in_control(executor, flight, action)
     assert not [e for e in asyncio.run(event_bus.wait(0, 0.0)) if e["kind"] == "target_found"]
     executor.close()
+
+
+def _last_velocity(flight):
+    velocities = [command for command in flight.commands if command[0] == "velocity"]
+    assert velocities, "no velocity command was issued"
+    return velocities[-1][1:]
+
+
+def _cruise_settings(**overrides):
+    values = {"cruise_speed_m_s": 2.0, "cruise_min_altitude_m": 3.0}
+    values.update(overrides)
+    return _settings(**values)
+
+
+def test_goto_uses_the_gated_cruise_speed_above_the_minimum_altitude():
+    flight = FakeFlight(Pose(0.0, 0.0, 3.5))
+    executor = HorusExecutor(flight, _cruise_settings(), autostart=False)
+    executor.submit_skill("goto", {"pose": {"north_m": 5.0, "east_m": 0.0, "up_m": 3.5}}, ttl_s=5.0)
+    executor.tick()
+    executor.tick()
+    assert _last_velocity(flight)[:2] == (2.0, 0.0)
+    executor.close()
+
+
+def test_goto_keeps_max_speed_below_the_cruise_minimum_altitude():
+    flight = FakeFlight(Pose(0.0, 0.0, 2.5))
+    executor = HorusExecutor(flight, _cruise_settings(), autostart=False)
+    executor.submit_skill("goto", {"pose": {"north_m": 5.0, "east_m": 0.0, "up_m": 3.5}}, ttl_s=5.0)
+    executor.tick()
+    executor.tick()
+    assert _last_velocity(flight)[:2] == (1.0, 0.0)
+    executor.close()
+
+
+def test_goto_keeps_max_speed_when_the_target_altitude_is_below_the_gate():
+    flight = FakeFlight(Pose(0.0, 0.0, 3.5))
+    executor = HorusExecutor(flight, _cruise_settings(), autostart=False)
+    executor.submit_skill("goto", {"pose": {"north_m": 5.0, "east_m": 0.0, "up_m": 2.0}}, ttl_s=5.0)
+    executor.tick()
+    executor.tick()
+    assert _last_velocity(flight)[:2] == (1.0, 0.0)
+    executor.close()
+
+
+def test_goto_drops_back_to_max_speed_when_descending_below_the_gate():
+    flight = FakeFlight(Pose(0.0, 0.0, 3.5))
+    executor = HorusExecutor(flight, _cruise_settings(), autostart=False)
+    executor.submit_skill("goto", {"pose": {"north_m": 5.0, "east_m": 0.0, "up_m": 3.5}}, ttl_s=5.0)
+    executor.tick()
+    executor.tick()
+    assert _last_velocity(flight)[:2] == (2.0, 0.0)
+    flight._telemetry.pose = Pose(1.0, 0.0, 2.5)
+    executor.tick()
+    # Under the obstacle band the proven max speed applies again.
+    assert _last_velocity(flight)[0] == pytest.approx(1.0)
+    executor.close()
+
+
+def test_disabled_cruise_speed_keeps_max_speed_everywhere():
+    flight = FakeFlight(Pose(0.0, 0.0, 3.5))
+    executor = HorusExecutor(flight, _settings(), autostart=False)
+    executor.submit_skill("goto", {"pose": {"north_m": 5.0, "east_m": 0.0, "up_m": 3.5}}, ttl_s=5.0)
+    executor.tick()
+    executor.tick()
+    assert _last_velocity(flight)[:2] == (1.0, 0.0)
+    executor.close()
+
+
+def test_flight_envelope_reports_cruise_settings():
+    enabled = flight_envelope(_cruise_settings())
+    assert enabled["cruise_speed_m_s"] == 2.0
+    assert enabled["cruise_min_altitude_m"] == 3.0
+    disabled = flight_envelope(_settings())
+    assert disabled["cruise_speed_m_s"] is None
+    assert disabled["cruise_min_altitude_m"] is None

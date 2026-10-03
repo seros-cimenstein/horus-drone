@@ -190,6 +190,8 @@ def flight_envelope(settings: ExecutorSettings) -> dict[str, Any]:
     envelope: dict[str, Any] = {
         "altitude_m": [settings.min_altitude_m, settings.max_altitude_m],
         "max_speed_m_s": settings.max_speed_m_s,
+        "cruise_speed_m_s": settings.cruise_speed_m_s,
+        "cruise_min_altitude_m": settings.cruise_min_altitude_m,
         "max_vertical_speed_m_s": settings.max_vertical_speed_m_s,
         "max_distance_m": settings.max_distance_m,
     }
@@ -334,6 +336,22 @@ class HorusExecutor:
         )
         if not all(math.isfinite(value) for value in numeric_limits):
             raise ValueError("executor limits must be finite")
+        cruise = settings.cruise_speed_m_s
+        if cruise is not None:
+            gate = settings.cruise_min_altitude_m
+            if (
+                isinstance(cruise, bool)
+                or not math.isfinite(cruise)
+                or cruise <= settings.max_speed_m_s
+                or gate is None
+                or isinstance(gate, bool)
+                or not math.isfinite(gate)
+                or not settings.min_altitude_m <= gate <= settings.max_altitude_m
+            ):
+                raise ValueError(
+                    "cruise_speed_m_s must exceed max_speed_m_s and cruise_min_altitude_m "
+                    "must lie within the altitude limits"
+                )
         if settings.geofence_polygon_ned is None:
             self._geofence_polygon = None
         else:
@@ -1090,6 +1108,25 @@ class HorusExecutor:
             matches.append((candidate_id, str(self._value(candidate, "class_name", "")), bbox))
         return sorted(matches)
 
+    def _horizontal_speed_limit(self, target_altitude_m: float | None = None) -> float:
+        """Horizontal speed limit for the current leg: gated cruise speed or ``max_speed_m_s``.
+
+        The cruise speed is allowed only while the vehicle's current altitude above home is
+        at/above ``cruise_min_altitude_m`` AND the commanded target altitude is too, so the
+        whole leg stays above the obstacle band; anywhere below it the proven ``max_speed_m_s``
+        applies. A disabled cruise (None) always returns ``max_speed_m_s``.
+        """
+        cruise = self.settings.cruise_speed_m_s
+        if cruise is None:
+            return self.settings.max_speed_m_s
+        gate = self.settings.cruise_min_altitude_m
+        current = self._current_pose()
+        if current is None or gate is None or current.up_m < gate:
+            return self.settings.max_speed_m_s
+        if target_altitude_m is not None and target_altitude_m < gate:
+            return self.settings.max_speed_m_s
+        return cruise
+
     def _goto_step(self, target: Pose) -> bool:
         current = self._current_pose()
         if current is None:
@@ -1101,7 +1138,8 @@ class HorusExecutor:
         if horizontal <= self.settings.arrival_tolerance_m and vertical <= self.settings.arrival_tolerance_m:
             self._command_zero_velocity()
             return True
-        scale = min(1.0, self.settings.max_speed_m_s / horizontal) if horizontal > 1e-6 else 0.0
+        speed_limit = self._horizontal_speed_limit(target.up_m)
+        scale = min(1.0, speed_limit / horizontal) if horizontal > 1e-6 else 0.0
         vn = north * scale
         ve = east * scale
         vu = max(-self.settings.max_vertical_speed_m_s, min(self.settings.max_vertical_speed_m_s, up))

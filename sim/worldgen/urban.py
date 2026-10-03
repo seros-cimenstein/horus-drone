@@ -8,7 +8,7 @@ from sim.worldgen.dressing import (
     Dressing, add_clutter, add_fauna, animal_models, dress_person, fauna_areas, person_files, sample_events,
 )
 from sim.worldgen.environment import Environment
-from sim.worldgen.layout import CROSSWALK_OFFSET_M, UrbanLayout, VehiclePlacement, crosswalk_side
+from sim.worldgen.layout import UrbanLayout, VehiclePlacement
 from sim.worldgen.scenario import person_record
 from sim.worldgen.sdf import (
     SURFACE_COLOURS, TREE_BARK, TREE_DECIDUOUS, box_geometry, collision, collision_at,
@@ -18,7 +18,8 @@ from sim.worldgen.sdf import (
 from sim.worldgen.vehicles import vehicle_model, vehicle_type
 
 
-def _vehicle_record(vehicle: VehiclePlacement) -> dict:
+def vehicle_record(vehicle: VehiclePlacement) -> dict:
+    """Manifest/scenario record for one circulating vehicle (canonical and procedural)."""
     kind = vehicle_type(vehicle.type)
     return {"model": vehicle.model, "kind": "vehicle", "asset": vehicle.type,
             "position": vehicle.position, "yaw": vehicle.yaw,
@@ -277,6 +278,12 @@ def urban_static_models(layout: UrbanLayout, rng: random.Random, env: Environmen
 
 def build_urban(layout: UrbanLayout, world_dir: Path, *, textures: bool = True, dressing: Dressing
                 ) -> tuple[str, list[dict], dict[str, bytes | str]]:
+    if not layout.canonical:
+        # The 1.2 km procedural city emits instanced scenery and per-tile trimesh collisions;
+        # the canonical 150 m world below keeps its primitive models byte-for-byte.
+        from sim.worldgen.urban_procedural import build_urban_procedural
+
+        return build_urban_procedural(layout, world_dir, textures=textures, dressing=dressing)
     env = dressing.environment
     models = urban_static_models(layout, random.Random(layout.seed), env)
     height = lambda x, y: 0.0  # noqa: E731
@@ -287,7 +294,7 @@ def build_urban(layout: UrbanLayout, world_dir: Path, *, textures: bool = True, 
         agents.append(record)
     files = person_files(dressing, agents, textures=textures)
     for vehicle in layout.vehicles:
-        record = _vehicle_record(vehicle)
+        record = vehicle_record(vehicle)
         models.append(vehicle_model(vehicle.model, vehicle.type, vehicle.position[0], vehicle.position[1], 0.0,
                                     vehicle.yaw, static=False, variant=vehicle.variant,
                                     paint=_legacy_paint(vehicle)))

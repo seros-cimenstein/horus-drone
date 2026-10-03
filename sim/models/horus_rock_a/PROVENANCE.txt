@@ -1,0 +1,44 @@
+Source: Gazebo Fuel OpenRobotics/Falling Rock 1, version 6
+URL: https://fuel.gazebosim.org/1.0/OpenRobotics/models/Falling%20Rock%201/6/Falling%20Rock%201.zip
+Archive SHA-256: 88b38504a76db87266409d658006fe18eb3220937bb0de2d90e945cc0e1ee317 (byte-equal to the exact-version Fuel endpoint)
+Author (model.config): Addisu Taddese, Cole Biesemeyer
+Licence: Creative Commons Attribution 4.0 International (CC BY 4.0) (Fuel model-level publisher metadata at import time; the archive itself embeds no licence text)
+Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used. COLLADA <image> references were rewritten to the copied meshes/ and materials/textures/ layout.
+Attribution: "Falling Rock 1" by Addisu Taddese, Cole Biesemeyer (Open Robotics), Gazebo Fuel, licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Modified as above.
+Notes: The roughness map is not copied (not used); FallingRock01_Collider.dae (the upstream decimated collision hull) is kept for reference, the HORUS model.sdf uses a box proxy for standalone collision.
+Files: materials/textures/FallingRocks_Albedo.jpg, materials/textures/FallingRocks_Normal.jpg, meshes/FallingRock01.dae, meshes/FallingRock01_Collider.dae
+
+Upstream model.config (verbatim):
+<?xml version="1.0"?>
+
+<model>
+  <name>Falling Rocks 1</name>
+  <version>1.0</version>
+  <sdf version="1.6">model.sdf</sdf>
+
+  <author>
+    <name>Addisu Taddese</name>
+    <email>addisu@openrobotics.org</email>
+  </author>
+
+  <author>
+    <name>Cole Biesemeyer</name>
+    <email>cole@openrobotics.org</email>
+  </author>
+
+  <description>
+  </description>
+</model>
+
+meshes/FallingRock01.dae COLLADA contributor (verbatim):
+<contributor>
+      <author/>
+      <authoring_tool>FBX COLLADA exporter</authoring_tool>
+      <comments/>
+    </contributor>
+
+meshes/FallingRock01_Collider.dae COLLADA contributor (verbatim):
+<contributor>
+      <author>Blender User</author>
+      <authoring_tool>Blender 2.83.11</authoring_tool>
+    </contributor>

@@ -4,7 +4,10 @@ Mesh vehicles reuse pinned OpenRobotics Fuel meshes imported by
 ``sim/scripts/import_licensed_assets.py`` (see each model's PROVENANCE.txt). Dimensions below
 are the measured mesh bounds after the listed scale and yaw (front along +x), and the
 collision/oracle footprint is the same box. ``car``, ``van`` and ``bus`` are HORUS primitive
-bodies. Unknown types are errors; nothing falls back to a car.
+bodies kept for the byte-frozen canonical worlds; procedural worlds sample and park only mesh
+types (``SAMPLED_TYPES`` / ``PARKED_TYPES``), and ``vehicle_asset`` maps a mesh type's variant
+to its ``assets.ASSETS`` key for scenery placement. Unknown types are errors; nothing falls
+back to a car.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ class VehicleType:
     mesh_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)  # visual origin so the box centres
     variants: tuple[str, ...] = ()  # alternative mesh URIs (paint textures)
     heavy: bool = False
+    assets: tuple[str, ...] = ()  # ASSETS keys per paint variant (mesh types only)
 
     def footprint(self) -> dict:
         return {"length_m": self.length_m, "width_m": self.width_m, "height_m": self.height_m}
@@ -40,6 +44,8 @@ EMERGENCY_DECEL_M_S2 = 6.5
 LATERAL_ACCEL_M_S2 = 2.0
 
 VEHICLE_TYPES: dict[str, VehicleType] = {vehicle.name: vehicle for vehicle in (
+    # Primitive bodies: canonical worlds only (their bytes are frozen). Procedural worlds
+    # sample / park mesh types exclusively.
     VehicleType("car", 4.4, 1.9, 2.05, (5.0, 8.0), (1.6, 2.2), 2.5, 5.0),
     VehicleType("van", 5.4, 2.15, 2.65, (4.5, 7.0), (1.3, 1.8), 2.2, 5.8),
     VehicleType("bus", 9.2, 2.55, 3.6, (4.0, 6.0), (0.9, 1.4), 1.8, 7.0, heavy=True),
@@ -47,25 +53,37 @@ VEHICLE_TYPES: dict[str, VehicleType] = {vehicle.name: vehicle for vehicle in (
                 mesh="model://horus_vehicle_hatchback/meshes/hatchback.obj", mesh_scale=0.0254,
                 mesh_yaw=math.pi / 2, mesh_offset=(-0.344, 0.0, 0.011),
                 variants=("model://horus_vehicle_hatchback_red/meshes/hatchback.obj",
-                          "model://horus_vehicle_hatchback_blue/meshes/hatchback.obj")),
+                          "model://horus_vehicle_hatchback_blue/meshes/hatchback.obj"),
+                assets=("vehicle_hatchback", "vehicle_hatchback_red", "vehicle_hatchback_blue")),
     VehicleType("sedan", 4.62, 2.01, 1.54, (5.0, 9.0), (1.5, 2.2), 2.6, 5.4,
                 mesh="model://horus_vehicle_sedan/meshes/Hybrid.obj", mesh_scale=0.01,
-                mesh_yaw=math.pi / 2, mesh_offset=(0.04, 0.0, 0.007)),
+                mesh_yaw=math.pi / 2, mesh_offset=(0.04, 0.0, 0.007),
+                assets=("vehicle_sedan",)),
     # The Fuel SDF scales this mesh by 0.06 (5.02 x 2.60 x 2.16 m, oversized for an SUV); 0.05
     # gives 4.18 x 2.17 x 1.80 m.
     VehicleType("suv", 4.18, 2.17, 1.8, (5.0, 8.5), (1.4, 2.0), 2.4, 5.8,
                 mesh="model://horus_vehicle_suv/meshes/suv.obj", mesh_scale=0.05,
-                mesh_yaw=-math.pi / 2, mesh_offset=(-0.056, -0.028, 0.007)),
+                mesh_yaw=-math.pi / 2, mesh_offset=(-0.056, -0.028, 0.007),
+                assets=("vehicle_suv",)),
     VehicleType("pickup", 5.67, 2.47, 1.87, (5.0, 8.0), (1.3, 1.9), 2.3, 6.3,
                 mesh="model://horus_vehicle_pickup/meshes/pickup.dae", mesh_yaw=-math.pi / 2,
-                mesh_offset=(0.12, 0.0, 0.007)),
+                mesh_offset=(0.12, 0.0, 0.007), assets=("vehicle_pickup",)),
     VehicleType("box_truck", 4.0, 1.63, 2.0, (4.0, 6.5), (1.0, 1.5), 2.0, 6.5,
-                mesh="model://horus_vehicle_box_truck/meshes/truck.obj", heavy=True),
+                mesh="model://horus_vehicle_box_truck/meshes/truck.obj", heavy=True,
+                assets=("vehicle_box_truck",)),
     VehicleType("delivery_truck", 5.12, 1.81, 1.79, (4.0, 7.0), (1.1, 1.6), 2.1, 6.5,
-                mesh="model://horus_vehicle_delivery_truck/meshes/truck.obj", heavy=True),
+                mesh="model://horus_vehicle_delivery_truck/meshes/truck.obj", heavy=True,
+                assets=("vehicle_delivery_truck",)),
+    # The Fuel coach bus mesh (12.49 m); the "bus" primitive above stays for canonical worlds.
+    VehicleType("coach", 12.49, 2.71, 3.7, (4.0, 6.5), (0.8, 1.2), 1.8, 10.0,
+                mesh="model://horus_vehicle_bus/meshes/bus.obj", mesh_scale=0.01,
+                mesh_yaw=math.pi / 2, mesh_offset=(-0.052, 0.0, 0.001), heavy=True,
+                assets=("bus",)),
 )}
-SAMPLED_TYPES = ("hatchback", "sedan", "suv", "pickup", "box_truck", "delivery_truck", "van", "bus")
-PARKED_TYPES = ("hatchback", "sedan", "suv", "pickup", "delivery_truck", "car")
+# Procedural worlds use mesh vehicles only: no primitive car/van/bus body is ever emitted.
+SAMPLED_TYPES = ("hatchback", "sedan", "suv", "pickup", "box_truck", "delivery_truck", "coach")
+SAMPLED_WEIGHTS = (5, 5, 3, 2, 1, 2, 1)
+PARKED_TYPES = ("hatchback", "sedan", "suv", "pickup", "box_truck", "delivery_truck")
 PAINTS = ((0.18, 0.31, 0.57), (0.56, 0.20, 0.13), (0.72, 0.72, 0.70), (0.12, 0.12, 0.13),
           (0.42, 0.44, 0.46), (0.24, 0.35, 0.24), (0.66, 0.60, 0.46), (0.80, 0.78, 0.74))
 
@@ -75,6 +93,18 @@ def vehicle_type(name: str) -> VehicleType:
         return VEHICLE_TYPES[name]
     except KeyError:
         raise ValueError(f"unknown vehicle type {name!r}; known: {sorted(VEHICLE_TYPES)}") from None
+
+
+def vehicle_asset(name: str, variant: int = 0) -> str:
+    """scenery ``ASSETS`` key for a mesh vehicle type's paint variant.
+
+    Parked cars and other static placements use the registry asset (measured proxies) instead
+    of an inline model; primitive-only types (canonical ``car``/``van``/``bus``) raise.
+    """
+    kind = vehicle_type(name)
+    if not kind.assets:
+        raise ValueError(f"vehicle type {name!r} has no scenery asset")
+    return kind.assets[variant % len(kind.assets)]
 
 
 def _surface() -> str:

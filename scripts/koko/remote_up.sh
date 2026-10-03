@@ -39,25 +39,40 @@ if [[ ! "${remote_world}" =~ ^[A-Za-z0-9/_.-]+$ ]]; then
   printf 'Remote world must be a simple world name or container SDF path (got %s).\n' "${remote_world}" >&2
   exit 2
 fi
-# The executor config and SITL parameters follow the world kind, the same rule start_sim.sh
-# uses for its automatic outdoor parameter file. Explicit overrides still win.
+# The executor config and SITL parameters follow the world: generated worlds
+# (horus_<kind>_p<seed>) get the procedural profile and parameter file, canonical
+# horus_forest/horus_urban worlds the outdoor ones. Explicit overrides still win.
 remote_world_stem="${remote_world##*/}"
+remote_procedural=0
+case "${remote_world_stem}" in
+  horus_forest_p*|horus_urban_p*) remote_procedural=1 ;;
+esac
 case "${remote_world_stem}" in
   horus_forest*) remote_kind=forest ;;
   horus_urban*) remote_kind=urban ;;
   *) remote_kind="" ;;
 esac
-remote_config="${HORUS_REMOTE_CONFIG:-}"
-if [[ -z "${remote_config}" && -n "${remote_kind}" ]]; then
-  remote_config="/horus/config/horus_${remote_kind}.yaml"
+remote_config_default="/horus/config/horus.yaml"
+sitl_param_default=""
+if [[ -n "${remote_kind}" ]]; then
+  if (( remote_procedural == 1 )); then
+    remote_config_default="/horus/config/horus_procedural_${remote_kind}.yaml"
+    sitl_param_default="/horus/config/ardupilot/horus_sitl_procedural.parm"
+  else
+    remote_config_default="/horus/config/horus_${remote_kind}.yaml"
+    sitl_param_default="/horus/config/ardupilot/horus_sitl_outdoor.parm"
+  fi
 fi
-remote_config="${remote_config:-/horus/config/horus.yaml}"
+remote_config="${HORUS_REMOTE_CONFIG:-}"
+if [[ -z "${remote_config}" ]]; then
+  remote_config="${remote_config_default}"
+fi
 if [[ ! "${remote_config}" =~ ^[A-Za-z0-9/_.-]+$ ]]; then
   printf 'HORUS_REMOTE_CONFIG must be a simple container path (got %s).\n' "${remote_config}" >&2
   exit 2
 fi
 if [[ -z "${HORUS_SITL_PARAM_FILE:-}" && -n "${remote_kind}" ]]; then
-  sitl_param_file="/horus/config/ardupilot/horus_sitl_outdoor.parm"
+  sitl_param_file="${sitl_param_default}"
 fi
 
 state_dir="${HORUS_REMOTE_STATE_DIR}"
@@ -326,7 +341,9 @@ printf '%s\n' "${HORUS_MCP_TOKEN}" | ssh -T "${HORUS_REMOTE}" \
 ssh -T "${HORUS_REMOTE}" bash -s -- "${remote_container}" <<'REMOTE_READY'
 set -Eeuo pipefail
 container="$1"
-for ((attempt = 0; attempt < 120; attempt++)); do
+# MCP binds 8000 only after SITL's first heartbeat; generated 1.2 km worlds allow up to 180 s
+# (flight.heartbeat_timeout_s), so wait a little longer than that.
+for ((attempt = 0; attempt < 420; attempt++)); do
   if [[ "$(docker inspect --format '{{.State.Running}}' "${container}" 2>/dev/null || true)" != true ]]; then
     printf 'Remote simulation container stopped while MCP was starting.\n' >&2
     exit 1

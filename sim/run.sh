@@ -149,6 +149,10 @@ case "${command}" in
       if ! world="$(generate_procedural_world "${kind}" "${seed}" "${stratum}")"; then
         exit 1
       fi
+      # Generated worlds use the procedural flight profile: the SITL parameter file and the
+      # executor config every later MCP/mission start should load. Explicit overrides win.
+      export HORUS_SITL_PARAM_FILE="${HORUS_SITL_PARAM_FILE:-/horus/config/ardupilot/horus_sitl_procedural.parm}"
+      export HORUS_CONFIG="${HORUS_CONFIG:-/horus/config/horus_procedural_${kind}.yaml}"
     fi
     run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
     if (( gui_client_enabled == 1 )); then
@@ -353,6 +357,12 @@ case "${command}" in
         resource_args+=(--memory-swap "${HORUS_SIM_MEMORY_SWAP_LIMIT}")
       fi
     fi
+    # An explicit profile (e.g. run.sh start --procedural) becomes the container default, so a
+    # later `docker exec horus-sim /opt/horus-venv/bin/horus-mcp` loads it without extra flags.
+    config_env_args=()
+    if [[ -n "${HORUS_CONFIG:-}" ]]; then
+      config_env_args=(--env "HORUS_CONFIG=${HORUS_CONFIG}")
+    fi
     run_dir="${RUN_ROOT}/${run_id}"
     docker run --detach --init \
       --name "${CONTAINER}" \
@@ -362,6 +372,7 @@ case "${command}" in
       "${gz_args[@]}" \
       "${resource_args[@]}" \
       "${gui_client_env_args[@]}" \
+      "${config_env_args[@]}" \
       --env "HORUS_SITL_PARAM_FILE=${HORUS_SITL_PARAM_FILE:-}" \
       --env HORUS_SIM_CONTAINER=1 \
       --env "HORUS_SIM_GUI=${gui_enabled}" \
@@ -404,6 +415,28 @@ case "${command}" in
       printf 'Started remote GUI client %s. Runtime files: %s/logs/.\n' \
         "${CONTAINER}" "${run_dir}"
     else
+      # The flight client must not connect before start_sim.sh has released SITL's single serial0
+      # slot (generated 1.2 km worlds take minutes to publish their first statistics).
+      sim_ready=0
+      ready_deadline=$((SECONDS + ${HORUS_SIM_READY_TIMEOUT_S:-900}))
+      while (( SECONDS < ready_deadline )); do
+        if [[ -f "${run_dir}/logs/sim.ready" ]]; then
+          sim_ready=1
+          break
+        fi
+        if [[ "$(docker inspect --format '{{.State.Running}}' "${CONTAINER}" 2>/dev/null || true)" != true ]]; then
+          printf 'Simulation container stopped during startup; inspect %s/logs/ and docker logs.\n' \
+            "${run_dir}" >&2
+          break
+        fi
+        sleep 0.5
+      done
+      if (( sim_ready == 0 )); then
+        printf 'Simulation did not finish starting; logs are retained in %s/logs/.\n' "${run_dir}" >&2
+        HORUS_SIM_CONTAINER_NAME="${CONTAINER}" HORUS_SIM_RUN_ROOT="${RUN_ROOT}" \
+          "${SIM_DIR}/scripts/stop_sim.sh" || true
+        exit 1
+      fi
       printf 'Started %s. Runtime files: %s/run/%s/ (Gazebo and SITL logs are in logs/).\n' \
         "${CONTAINER}" "${SIM_DIR}" "${run_id}"
       printf 'MAVLink flight endpoint (single TCP client): tcp:127.0.0.1:5760\n'

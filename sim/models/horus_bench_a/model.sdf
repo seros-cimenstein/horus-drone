@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="horus_bench_a">
+    <static>true</static>
+    <link name="link">
+      <visual name="bench">
+        <pose>0 0 0 0 0 0</pose>
+        <geometry><mesh><uri>model://horus_bench_a/meshes/FoodCourtBenchShort.obj</uri></mesh></geometry>
+      </visual>
+      <collision name="proxy_0_box">
+        <pose>0 0 0.2151 0 0 0</pose>
+        <geometry><box><size>0.3493 0.9268 0.4302</size></box></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>

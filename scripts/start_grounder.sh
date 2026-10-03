@@ -34,7 +34,13 @@ fi
 
 model="${HORUS_GROUNDER_MODEL:-grounding-dino-tiny}"
 threads="${HORUS_GROUNDER_THREADS:-6}"
-nohup env HF_HOME="${HF_HOME}" PYTHONPATH=/horus \
+# A cached checkpoint needs no network: without HF_HUB_OFFLINE, transformers still contacts
+# huggingface.co at load and retries for minutes when the host cannot reach it.
+offline="${HF_HUB_OFFLINE:-}"
+if [[ -z "${offline}" ]] && compgen -G "${HF_HOME}/hub/models--*${model}*/snapshots/*" >/dev/null; then
+  offline=1
+fi
+nohup env HF_HOME="${HF_HOME}" ${offline:+HF_HUB_OFFLINE="${offline}"} PYTHONPATH=/horus \
   "${python}" -m horus.grounder.server --host 127.0.0.1 --port 8100 \
   --model "${model}" --threads "${threads}" \
   >>"${log_file}" 2>&1 </dev/null &

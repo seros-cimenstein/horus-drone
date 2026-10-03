@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="horus_animal_pigeon">
+    <static>true</static>
+    <link name="link">
+      <visual name="body">
+        <geometry><mesh><uri>model://horus_animal_pigeon/meshes/pigeon.obj</uri></mesh></geometry>
+        <material><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://horus_animal_pigeon/materials/textures/pigeon_feather.png</albedo_map><metalness>0.0</metalness><roughness>1.0</roughness></metal></pbr></material>
+      </visual>
+      <collision name="body_envelope"><pose>-0.0018 0 0.1303 0 0 0</pose><geometry><box><size>0.2814 0.1675 0.2593</size></box></geometry></collision>
+    </link>
+  </model>
+</sdf>

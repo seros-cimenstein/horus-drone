@@ -1,0 +1,7 @@
+# HORUS procedural pigeon mesh (regenerate with sim.worldgen.fauna.write_animal_models) material
+newmtl pigeon
+Ka 0.2 0.2 0.2
+Kd 0.72 0.72 0.72
+Ks 0.02 0.02 0.02
+Ns 8
+map_Kd ../materials/textures/pigeon_feather.png

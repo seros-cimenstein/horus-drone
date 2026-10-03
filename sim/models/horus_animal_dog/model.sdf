@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="horus_animal_dog">
+    <static>true</static>
+    <link name="link">
+      <visual name="body">
+        <geometry><mesh><uri>model://horus_animal_dog/meshes/dog.obj</uri></mesh></geometry>
+        <material><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://horus_animal_dog/materials/textures/dog_fur.png</albedo_map><metalness>0.0</metalness><roughness>1.0</roughness></metal></pbr></material>
+      </visual>
+      <collision name="body_envelope"><pose>-0.0978 0 0.3094 0 0 0</pose><geometry><box><size>1.0109 0.2575 0.6211</size></box></geometry></collision>
+    </link>
+  </model>
+</sdf>

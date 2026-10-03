@@ -1,0 +1,38 @@
+Source: Gazebo Fuel OpenRobotics/Rescue Randy Sitting, version 8
+URL: https://fuel.gazebosim.org/1.0/OpenRobotics/models/Rescue%20Randy%20Sitting/8/Rescue%20Randy%20Sitting.zip
+Archive SHA-256: 611ef9ddadfba16be25963f2b79967fec6493c638ca77d0652f18fbbc5202fb3 (byte-equal to the exact-version Fuel endpoint)
+Author (model.config): Ian Chen, Cole Biesemeyer
+Licence: Creative Commons Zero v1.0 Universal (CC0 1.0) (Fuel model-level publisher metadata at import time; the archive itself embeds no licence text)
+Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used.
+Notes: The thermal texture and the upstream model.sdf's Artifact Proximity Detector include are not copied; the upstream link pose (-0.624 m) that puts the mesh base on the ground is recorded in the HORUS registry instead.
+Files: materials/textures/RescueRandy_Diffuse.jpg, meshes/rescue_randy.dae
+
+Upstream model.config (verbatim):
+<?xml version="1.0"?>
+
+<model>
+  <name>Rescue Randy Sitting</name>
+  <version>1.0</version>
+  <sdf version="1.6">model.sdf</sdf>
+
+  <author>
+    <name>Ian Chen</name>
+    <email>ichen@openrobotics.org</email>
+  </author>
+
+  <author>
+    <name>Cole Biesemeyer</name>
+    <email>cole@openrobotics.org</email>
+  </author>
+
+  <description>
+     A static rescue randy model in the sitting position.
+  </description>
+</model>
+
+meshes/rescue_randy.dae COLLADA contributor (verbatim):
+<contributor>
+      <author/>
+      <authoring_tool>FBX COLLADA exporter</authoring_tool>
+      <comments/>
+    </contributor>

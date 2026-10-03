@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from collections import Counter
-from dataclasses import dataclass, replace
-import functools
+from dataclasses import dataclass
 import math
 import random
-from typing import Callable, Sequence, TypeAlias
+from typing import Sequence, TypeAlias
 
-from sim.worldgen.surface import GRID_SIDE, GROUND_CELL, MAP_MIN, TriangulatedGrid, quantize_rows
+from sim.worldgen.surface import CANONICAL_MAP, MapSpec, TriangulatedGrid, quantize_rows
 
 Point: TypeAlias = tuple[float, float]
 Waypoint: TypeAlias = tuple[float, ...]
@@ -33,24 +31,15 @@ class PersonPlacement:
 # Urban carriageways are 9.5 m wide: one travel lane each way plus a kerbside parking lane.
 DRIVE_LANE_OFFSET_M = 1.9
 PARKING_LANE_OFFSET_M = 3.75
-CARRIAGEWAY_HALF_WIDTH_M = 4.75
 SIDEWALK_OFFSET_M = 5.65
 LAMP_OFFSET_M = 6.85
-CROSSWALK_OFFSET_M = 7.8
+# Procedural city cross-section (shared by ``urban_procedural`` and the urban dressing):
+# standard vs arterial carriageway half widths and the sidewalk width outside the kerb.
+URBAN_STREET_HALF_WIDTH_M = 4.75
+URBAN_ARTERIAL_HALF_WIDTH_M = 7.0
+URBAN_SIDEWALK_WIDTH_M = 1.8
 # Every recruited actor route and wander area stays inside this half-extent.
 GEOFENCE_INSET_M = 60.0
-
-
-def crosswalk_side(index: int) -> float:
-    """Which side of the junction (along the crossed road) procedural crosswalk ``index`` uses."""
-    return 1.0 if index % 2 else -1.0
-
-
-def _on_sidewalk_or_road(point: tuple[float, float], roads_x, roads_y, margin: float) -> bool:
-    """True when a point lies on any carriageway or sidewalk band (plus ``margin``)."""
-    limit = SIDEWALK_OFFSET_M + 0.9 + margin
-    return any(abs(point[0] - x) < limit for x in roads_x) or any(abs(point[1] - y) < limit for y in roads_y)
-BIN_OFFSET_M = 7.05
 
 
 @dataclass(frozen=True)
@@ -144,6 +133,30 @@ class ForestLayout:
     # A prone casualty in the open: the approach test targets a lying person, and a person under
     # a canopy (the missing hiker) is not observable from the transit-altitude vantages.
     casualty: PersonPlacement | None = None
+    map: MapSpec = CANONICAL_MAP
+    # --- procedural 1.2 km forest (empty / default on canonical worlds) ---
+    # Full trail network (``trail`` is the main trail the mission content uses); ``trails``
+    # holds every polyline, including ``trail`` itself. ``creeks`` likewise includes ``creek``.
+    trails: tuple[tuple[Point, ...], ...] = ()
+    creeks: tuple[tuple[Point, ...], ...] = ()
+    clearings: tuple[tuple[Point, float], ...] = ()
+    camps: tuple[Point, ...] = ()
+    # Mission-relevant locations: (name, kind, x, y, radius).
+    sites: tuple[tuple[str, str, float, float, float], ...] = ()
+    # Static scenery handed to ``scenery.emit_scenery`` (instanced assets + merged meshes).
+    scenery_instances: tuple[object, ...] = ()
+    scenery_meshes: tuple[object, ...] = ()
+    # Tallest static scenery top above the home datum (drives the transit altitude).
+    scenery_max_top_m: float = 0.0
+    # (name, count) summary of the emitted scenery, copied into the manifest.
+    scenery_counts: tuple[tuple[str, int], ...] = ()
+    # Flat terrain pad around the landing pad; canonical worlds keep the historical 4 m.
+    home_pad_radius_m: float = 4.0
+    # Coarse polyline the creek depression follows (dense ``creek`` nodes are for rendering).
+    creek_terrain_path: tuple[Point, ...] = ()
+    # Half-extent actor routes and wander areas must stay inside (procedural: 580, 5 m inside
+    # the flight profile's +-585 m polygon).
+    actor_inset_m: float = GEOFENCE_INSET_M
 
     @property
     def people(self) -> tuple[PersonPlacement, ...]:
@@ -186,6 +199,65 @@ class ParkedCar:
     variant: int = 0
 
 
+# ---------------------------------------------------------------------------------------------
+# Procedural 1.2 km city data (see ``urban_procedural``). The canonical 150 m world leaves
+# ``UrbanLayout.city`` as ``None`` and keeps using the flat fields above byte-for-byte.
+@dataclass(frozen=True)
+class PlazaSpec:
+    """One paved plaza; ``mission`` marks the crowd/red-shirt plaza the manifest exposes."""
+
+    x: float
+    y: float
+    half_size: float
+    mission: bool = False
+
+
+@dataclass(frozen=True)
+class ParkSpec:
+    """One park block; ``mission`` marks the park that hosts the sitting group."""
+
+    x: float
+    y: float
+    half_size: float
+    mission: bool = False
+
+
+@dataclass(frozen=True)
+class TreeSpec:
+    """One placed tree: species picks the asset (``oak``/``pine``), height the instance scale."""
+
+    x: float
+    y: float
+    height: float
+    species: str
+    street: bool = False
+
+
+@dataclass(frozen=True)
+class BusStopSpec:
+    """One bus stop: the shelter centre and its length-axis yaw (back wall away from the road)."""
+
+    x: float
+    y: float
+    yaw: float
+
+
+@dataclass(frozen=True)
+class CitySpec:
+    """Everything the procedural city carries beyond the shared ``UrbanLayout`` fields."""
+
+    actor_inset_m: float
+    max_top_m: float
+    arterial_roads_x: tuple[float, ...]
+    arterial_roads_y: tuple[float, ...]
+    plazas: tuple[PlazaSpec, ...]
+    parks: tuple[ParkSpec, ...]
+    trees: tuple[TreeSpec, ...]
+    bus_stops: tuple[BusStopSpec, ...]
+    sites: tuple[tuple[str, str, float, float, float], ...]
+    lamps: tuple[tuple[float, float, float], ...] = ()
+
+
 @dataclass(frozen=True)
 class UrbanLayout:
     seed: int
@@ -224,12 +296,24 @@ class UrbanLayout:
     follow_occluder_kind: str = "shelter"
     follow_occluder_yaw: float = 0.0
     lamp_height_m: float = 8.6
+    map: MapSpec = CANONICAL_MAP
+    # Procedural 1.2 km cities: actor geofence half-extent (inside the profile polygon) and the
+    # tallest static scenery top (buildings incl. rooftop equipment, tree tops). Canonical
+    # worlds keep the 60 m actor inset and never read ``max_top_m``.
+    actor_inset_m: float = GEOFENCE_INSET_M
+    scenery_max_top_m: float = 0.0
+    city: CitySpec | None = None
 
     @property
     def people(self) -> tuple[PersonPlacement, ...]:
         return (*self.commuters, *self.crossings, *self.bus_waiting, *self.joggers,
                 self.follow_jogger, *self.park_sitting, *self.plaza_crowd,
                 *((self.red_shirt,) if self.canonical else ()), self.collapsed)
+
+    @property
+    def sites(self) -> tuple[tuple[str, str, float, float, float], ...]:
+        """Mission/site table ``(name, kind, x, y, radius)``; canonical worlds have none."""
+        return self.city.sites if self.city is not None else ()
 
 
 _FOREST_TRAIL = (
@@ -327,9 +411,38 @@ def distance_to_path(p: Point, path: tuple[Point, ...] | list[Point]) -> float:
     return min(_distance_segment(p, a, b) for a, b in zip(path, path[1:]))
 
 
+def distance_to_paths(p: Point, paths: Sequence[Sequence[Point]]) -> float:
+    """Distance to the nearest of several polylines (``inf`` for an empty network)."""
+    return min((distance_to_path(p, path) for path in paths if len(path) >= 2), default=math.inf)
+
+
+def resample_path(path: Sequence[Point], step_m: float) -> tuple[Point, ...]:
+    """Uniform arc-length resampling of a polyline (keeps the first and last node)."""
+    if len(path) < 2:
+        return tuple(path)
+    if step_m <= 0.0:
+        raise ValueError("step_m must be positive")
+    result: list[Point] = [path[0]]
+    carried = 0.0
+    for a, b in zip(path, path[1:]):
+        length = _distance(a, b)
+        if length <= 0.0:
+            continue
+        position = carried
+        while position + step_m <= length:
+            position += step_m
+            t = position / length
+            result.append((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
+        carried = position - length
+    if result[-1] != path[-1]:
+        result.append(path[-1])
+    return tuple(result)
+
+
 def forest_height(x: float, y: float, layout: ForestLayout) -> float:
+    pad = layout.home_pad_radius_m
     radius = math.hypot(x, y)
-    if radius <= 4.0:
+    if radius <= pad:
         return 0.0
     ax, ay, by, diagonal, cross = layout.terrain_frequencies
     amp0, amp1, amp2 = layout.terrain_amplitudes
@@ -340,7 +453,9 @@ def forest_height(x: float, y: float, layout: ForestLayout) -> float:
         + amp1 * math.sin(y * by + x * cross + phase1)
         + amp2 * math.cos((x + y) * diagonal + phase2)
     )
-    creek_distance = distance_to_path((x, y), layout.creek)
+    # The depression follows the coarse terrain polyline when the layout carries one (the
+    # dense creek polyline would make the 301 x 301 grid build quadratic in its node count).
+    creek_distance = distance_to_path((x, y), layout.creek_terrain_path or layout.creek)
     height -= 0.72 * math.exp(-((creek_distance / 5.3) ** 2))
     # Flatten the clearing with a smooth 4 m transition band; a hard edge left a 0.56–0.67 m
     # step in the terrain that the 2 m mesh rendered as a ramp under actors' feet.
@@ -348,23 +463,48 @@ def forest_height(x: float, y: float, layout: ForestLayout) -> float:
     flatten = max(0.0, min(1.0, (layout.clearing_radius + 2.0 - clearing_distance) / 4.0))
     flatten = flatten * flatten * (3.0 - 2.0 * flatten)
     height = height * (1.0 - 0.78 * flatten) + 0.43 * 0.78 * flatten
-    blend = max(0.0, min(1.0, (radius - 4.0) / 10.0))
+    blend = max(0.0, min(1.0, (radius - pad) / 10.0))
     blend = blend * blend * (3.0 - 2.0 * blend)
     value = max(-0.2, height * blend)
-    return value if layout.canonical else max(-0.2, min(2.0, value))
+    # Generated 1.2 km worlds keep the relief inside ~+-3 m (the clamp is part of the sampler
+    # contract); canonical worlds keep their historical +-0.2/2.0 window byte-for-byte.
+    return value if layout.canonical else max(-1.5, min(3.2, value))
 
 
-@functools.lru_cache(maxsize=8)
+# The terrain grid is a pure function of the terrain fields, not of the mission content or
+# scenery (which the sampler changes on every attempt). Keying the cache on those fields lets
+# the sampler build a 301 x 301 grid once and reuse it for the validated layout, instead of
+# recomputing it after every `dataclasses.replace`.
+_GROUND_ROWS_CACHE: dict[tuple, tuple[tuple[float, ...], ...]] = {}
+
+
+def _terrain_key(layout: ForestLayout) -> tuple:
+    return (layout.canonical, layout.map, layout.home_pad_radius_m,
+            layout.terrain_base, layout.terrain_amplitudes, layout.terrain_phases,
+            layout.terrain_frequencies, layout.creek_terrain_path, layout.creek,
+            layout.clearing, layout.clearing_radius)
+
+
 def forest_ground_rows(layout: ForestLayout) -> tuple[tuple[float, ...], ...]:
     """The exported terrain height grid (rows along +y), quantized like the COLLADA mesh."""
-    return tuple(tuple(row) for row in quantize_rows(
-        [[forest_height(MAP_MIN + col * GROUND_CELL, MAP_MIN + row * GROUND_CELL, layout)
-          for col in range(GRID_SIDE)] for row in range(GRID_SIDE)]))
+    key = _terrain_key(layout)
+    cached = _GROUND_ROWS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    spec = layout.map
+    rows = tuple(tuple(row) for row in quantize_rows(
+        [[forest_height(spec.min + col * spec.cell_m, spec.min + row * spec.cell_m, layout)
+          for col in range(spec.grid_side)] for row in range(spec.grid_side)]))
+    if len(_GROUND_ROWS_CACHE) >= 8:
+        _GROUND_ROWS_CACHE.pop(next(iter(_GROUND_ROWS_CACHE)))
+    _GROUND_ROWS_CACHE[key] = rows
+    return rows
 
 
 def forest_surface(layout: ForestLayout) -> TriangulatedGrid:
     """The physical/rendered forest ground that actors stand on (see ``sim.worldgen.surface``)."""
-    return TriangulatedGrid(forest_ground_rows(layout), MAP_MIN, MAP_MIN, GROUND_CELL)
+    spec = layout.map
+    return TriangulatedGrid(forest_ground_rows(layout), spec.min, spec.min, spec.cell_m)
 
 
 CLEARING_SCAN_ALTITUDE_M = 10.0
@@ -427,451 +567,7 @@ def clears_actor_routes(x: float, y: float, radius: float, people: Sequence[Any]
     return True
 
 
-def forest_follow_occlusion(layout: ForestLayout, *, step_m: float = 0.01
-                            ) -> tuple[float, float]:
-    """Return the longest LOS break and closest follower-lane clearance."""
-    path = layout.follow_hiker.waypoints
-    height = forest_surface(layout).height
-    path_length = _path_length(path)
-    ox, oy = layout.follow_occluder_xy
-    center = (ox, oy, height(ox, oy) + layout.follow_occluder_height_m)
-    radius = layout.follow_occluder_radius_m
-    longest = run = 0
-    lane_clearance = math.inf
-    for index in range(math.ceil(path_length / step_m) + 1):
-        distance = min(path_length, index * step_m)
-        (x, y), direction = _point_at_distance(path, distance)
-        fx = x - layout.follower_horizontal_m * direction[0]
-        fy = y - layout.follower_horizontal_m * direction[1]
-        eye = (fx, fy, height(fx, fy) + layout.follower_altitude_m)
-        target = (x, y, height(x, y) + 1.1)
-        ray = tuple(target[axis] - eye[axis] for axis in range(3))
-        to_center = tuple(center[axis] - eye[axis] for axis in range(3))
-        fraction = max(0.0, min(1.0, sum(to_center[axis] * ray[axis] for axis in range(3))
-                                 / sum(value * value for value in ray)))
-        ray_distance = math.sqrt(sum(
-            (center[axis] - eye[axis] - fraction * ray[axis]) ** 2 for axis in range(3)))
-        if ray_distance <= radius:
-            run += 1
-            longest = max(longest, run)
-        else:
-            run = 0
-        lane_distance = math.sqrt(sum((center[axis] - eye[axis]) ** 2 for axis in range(3)))
-        lane_clearance = min(lane_clearance, lane_distance - radius)
-    duration_s = max(0, longest - 1) * step_m / layout.follow_speed
-    return duration_s, lane_clearance
-
-
-def _catmull_rom(points: list[Point], subdivisions: int = 3) -> tuple[Point, ...]:
-    result: list[Point] = []
-    extended = [points[0], *points, points[-1]]
-    for i in range(1, len(extended) - 2):
-        p0, p1, p2, p3 = extended[i - 1:i + 3]
-        for step in range(subdivisions):
-            t = step / subdivisions
-            t2, t3 = t * t, t * t * t
-            values = []
-            for axis in range(2):
-                values.append(0.5 * ((2 * p1[axis]) + (-p0[axis] + p2[axis]) * t
-                    + (2 * p0[axis] - 5 * p1[axis] + 4 * p2[axis] - p3[axis]) * t2
-                    + (-p0[axis] + 3 * p1[axis] - 3 * p2[axis] + p3[axis]) * t3))
-            result.append((values[0], values[1]))
-    result.append(points[-1])
-    return tuple(result)
-
-
-def _path_length(path: tuple[Point, ...]) -> float:
-    return sum(_distance(a, b) for a, b in zip(path, path[1:]))
-
-
-def _point_at_distance(path: tuple[Point, ...], distance: float) -> tuple[Point, Point]:
-    travelled = 0.0
-    for a, b in zip(path, path[1:]):
-        segment = _distance(a, b)
-        if travelled + segment >= distance:
-            t = (distance - travelled) / segment if segment else 0.0
-            point = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
-            direction = ((b[0] - a[0]) / segment, (b[1] - a[1]) / segment)
-            return point, direction
-        travelled += segment
-    a, b = path[-2:]
-    length = _distance(a, b)
-    return b, ((b[0] - a[0]) / length, (b[1] - a[1]) / length)
-
-
-def _route_slice(path: tuple[Point, ...], start_distance: float, length: float) -> tuple[Point, ...]:
-    end = start_distance + length
-    selected = [_point_at_distance(path, start_distance)[0]]
-    travelled = 0.0
-    for index, point in enumerate(path[1:-1], start=1):
-        travelled += _distance(path[index - 1], point)
-        if start_distance < travelled < end:
-            selected.append(point)
-    selected.append(_point_at_distance(path, end)[0])
-    return tuple(selected)
-
-
-def sample_forest_layout(seed: int, *,
-                         validate: Callable[[ForestLayout], float | None] | None = None
-                         ) -> ForestLayout:
-    rng = random.Random(seed)
-    if validate is None:
-        from sim.worldgen import _validate_candidate
-
-        validate = lambda layout: _validate_candidate("forest", layout)
-    rejections: Counter[str] = Counter()
-    for attempt in range(1, 101):
-        start = (-66.0, rng.uniform(-58, -48))
-        near_home = (rng.uniform(-8, 8), rng.uniform(-8, 8))
-        end = (66.0, rng.uniform(48, 60))
-        controls = [start]
-        for fraction in (0.22, 0.42, 0.61, 0.80):
-            x = start[0] + (end[0] - start[0]) * fraction
-            y = start[1] + (end[1] - start[1]) * fraction + rng.uniform(-9, 9)
-            if abs(x) < 14:
-                y = near_home[1] + rng.uniform(-2, 2)
-            controls.append((x, y))
-        controls.insert(3, near_home)
-        trail = _catmull_rom(controls, 2)
-        if distance_to_path((0.0, 0.0), trail) > 15 or any(
-                abs(x) > 68 or abs(y) > 68 for x, y in trail):
-            rejections["trail geometry"] += 1
-            continue
-        creek_controls = [(-67.0, rng.uniform(42, 56)),
-                          (-34.0, rng.uniform(36, 55)),
-                          (5.0, rng.uniform(30, 50)),
-                          (38.0, rng.uniform(34, 56)),
-                          (67.0, rng.uniform(40, 57))]
-        creek = _catmull_rom(creek_controls, 2)
-        if distance_to_path((0.0, 0.0), creek) < 14:
-            rejections["creek placement"] += 1
-            continue
-        clear = None
-        for _ in range(200):
-            candidate = (rng.uniform(-30, 30), rng.uniform(-40, 48))
-            if (distance_to_path(candidate, trail) >= 14 and distance_to_path(candidate, creek) >= 10
-                    and _distance(candidate, (0, 0)) >= 16):
-                clear = candidate
-                break
-        if clear is None:
-            rejections["clearing placement"] += 1
-            continue
-        camp = None
-        for _ in range(200):
-            candidate = (rng.uniform(-42, 45), rng.uniform(-42, 50))
-            if (distance_to_path(candidate, trail) >= 14 and distance_to_path(candidate, creek) >= 10
-                    and _distance(candidate, (0, 0)) >= 16 and _distance(candidate, clear) >= 28):
-                camp = candidate
-                break
-        if camp is None:
-            rejections["camp placement"] += 1
-            continue
-        nearest = min(range(len(trail)), key=lambda i: _distance(trail[i], (0, 0)))
-        start_i = max(0, nearest - 2)
-        follow = trail[start_i:]
-        if len(follow) < 3 or _path_length(follow) < 48:
-            rejections["follow route too short"] += 1
-            continue
-        follow_start = follow[0]
-        if _distance(follow_start, (0, 0)) > 45:
-            rejections["follow route too short"] += 1
-            continue
-        follow_length = min(52.0, _path_length(follow))
-        follow_route = _route_slice(follow, 0, follow_length)
-        if _path_length(follow_route) < 40:
-            rejections["follow route too short"] += 1
-            continue
-        # A low, compact shrub interrupts the descending camera ray, while its top stays
-        # well below the high follower lane.
-        target_distance = _path_length(follow_route) * rng.uniform(0.40, 0.65)
-        occluder_distance = max(0.0, target_distance - 3.5)
-        occ, direction = _point_at_distance(follow_route, occluder_distance)
-        normal = (-direction[1], direction[0])
-        side = rng.choice((-1.0, 1.0)) * rng.uniform(0.3, 0.95)
-        occluder = (occ[0] + normal[0] * side, occ[1] + normal[1] * side)
-        missing_at = min(_path_length(trail) - 5.0, _path_length(trail) * rng.uniform(0.30, 0.55))
-        near, direction = _point_at_distance(trail, missing_at)
-        normal = (-direction[1], direction[0])
-        offset = rng.uniform(7.0, 12.5) * rng.choice((-1.0, 1.0))
-        missing_xy = (near[0] + normal[0] * offset, near[1] + normal[1] * offset)
-        canopy_dist = rng.uniform(1.8, 3.0)
-        canopy_xy = (missing_xy[0] + normal[0] * math.copysign(canopy_dist, offset),
-                     missing_xy[1] + normal[1] * math.copysign(canopy_dist, offset))
-        if distance_to_path(canopy_xy, trail) < 5.5 or _distance(canopy_xy, (0, 0)) < 7.8:
-            continue
-        # The injured hiker rests in the open clearing so the campaign's scan test has a person
-        # of interest inside its rectangle (an empty meadow can never score detection coverage).
-        injured_xy = (clear[0] + rng.uniform(-3.5, 3.5), clear[1] + rng.uniform(-3.5, 3.5))
-        # A prone casualty in the same tree-free meadow keeps the approach test's lying target
-        # observable (the missing hiker is deliberately hidden under its own canopy).
-        casualty_angle = rng.uniform(-math.pi, math.pi)
-        casualty_distance = rng.uniform(4.0, 8.0)
-        casualty_xy = (injured_xy[0] + casualty_distance * math.cos(casualty_angle),
-                       injured_xy[1] + casualty_distance * math.sin(casualty_angle))
-        # Route users follow compact trail segments and stay inside the geofence.
-        hiker_segments = []
-        for index, speed in enumerate((1.25, 1.0, 1.15), start=1):
-            first = min(len(trail) - 3, nearest + (index - 2) * 4)
-            route = tuple(trail[first:first + 7])
-            if len(route) >= 2:
-                hiker_segments.append(_person(
-                    f"civ_hiker_{index:02d}", "hiker",
-                    ("person_orange", "person_blue_kinematic", "person_green_kinematic")[index - 1],
-                    route[0], 0.0, "route", route=route, speed=speed, mode="pingpong"))
-        ranger_route = tuple(reversed([p for p in trail
-                                       if abs(p[0]) <= 58 and abs(p[1]) <= 58][:8]))
-        family = tuple(_person(f"civ_family_{i:02d}", "family", asset,
-                               (camp[0] + dx, camp[1] + dy), yaw)
-                       for i, (asset, dx, dy, yaw) in enumerate((
-                           ("person_red_kinematic", -2.0, -1.2, 0.0),
-                           ("person_blue_kinematic", -1.0, 1.2, 0.7),
-                           ("person_green_kinematic", 1.3, 1.2, 2.1),
-                           ("person_dark", 2.0, -1.0, 2.8)), 1))
-        follow_speed = 1.25
-        follow_person = _person("civ_hiker_04", "hiker", "person_green_kinematic",
-                                follow_route[0], 0.0, "route", "follow_hiker",
-                                follow_route, follow_speed, "once")
-        clothing = rng.choice(("orange", "dark"))
-        missing_asset = ("person_laying_kinematic" if clothing == "orange"
-                         else "person_laying_dark_kinematic")
-        missing = _person("civ_missing_hiker_01", "missing_hiker", missing_asset,
-                          missing_xy, rng.uniform(-math.pi, math.pi))
-        injured = _person("civ_injured_01", "injured", "person_sitting",
-                          injured_xy, rng.uniform(-math.pi, math.pi))
-        casualty = _person("civ_casualty_01", "casualty", "person_laying_kinematic",
-                           casualty_xy, rng.uniform(-math.pi, math.pi))
-        layout = ForestLayout(
-            seed, False, trail, creek, clear, rng.uniform(13, 19), camp, missing,
-            canopy_xy, injured, tuple(hiker_segments),
-            (_person("civ_ranger_01", "ranger", "person_hivis", ranger_route[0],
-                     0.0, "route", route=ranger_route, speed=1.0, mode="pingpong"),),
-            family, follow_person, occluder, "follow_occlusion_bush", follow_speed,
-            9.0, 7.0, 3.0,
-            rng.randint(185, 300), (8.0, 22.0), (),
-            rng.uniform(0.65, 1.05),
-            (rng.uniform(0.25, 0.55), rng.uniform(0.12, 0.34), rng.uniform(0.08, 0.25)),
-            (rng.uniform(-math.pi, math.pi), rng.uniform(-math.pi, math.pi),
-             rng.uniform(-math.pi, math.pi)),
-            (rng.uniform(0.035, 0.05), rng.uniform(0.03, 0.045),
-             rng.uniform(0.07, 0.095), rng.uniform(0.045, 0.065),
-             rng.uniform(0.012, 0.025)), attempt,
-            follow_occluder_radius_m=1.6, follow_occluder_height_m=4.0, casualty=casualty)
-        # The missing hiker's canopy tree is placed outside the tree loop; reject layouts
-        # where its canopy would hang over the clearing scan corridor.
-        canopy_h = max(8.0, min(22.0, (canopy_xy[0] + canopy_xy[1]) % 14 + 8.0))
-        canopy_base = forest_surface(layout).height(*canopy_xy)
-        canopy_z = canopy_base + canopy_h * 0.72
-        if not clears_clearing_scan(canopy_xy[0], canopy_xy[1], canopy_z - 4.8, canopy_z + 4.8,
-                                    4.8, layout.clearing, layout.clearing_radius):
-            rejections["missing tree over clearing scan"] += 1
-            continue
-        people = layout.people
-        all_points = [p.position for p in people]
-        all_points.extend(point for person in people for point in person.waypoints)
-        if any(abs(x) > GEOFENCE_INSET_M or abs(y) > GEOFENCE_INSET_M for x, y in all_points):
-            rejections["geofence"] += 1
-            continue
-        if not (6 <= distance_to_path(missing_xy, trail) <= 15):
-            rejections["missing hiker offset"] += 1
-            continue
-        if _distance(occluder, follow_start) < 8:
-            rejections["occluder too close to follow start"] += 1
-            continue
-        occlusion_s, lane_clearance = forest_follow_occlusion(layout)
-        if not 2.5 <= occlusion_s <= 4.0:
-            rejections["follow occlusion outside 2.5-4.0 s"] += 1
-            continue
-        if lane_clearance < 2.6:
-            rejections["follow lane clearance"] += 1
-            continue
-        accepted_occlusion = validate(layout)
-        if accepted_occlusion is None:
-            from sim.worldgen.validation import LAST_FAILURES
-
-            rejections["validation"] += 1
-            if LAST_FAILURES:
-                rejections[f"validation: {LAST_FAILURES[0][:80]}"] += 1
-            continue
-        return replace(layout, expected_occlusion_s=accepted_occlusion)
-    top = ", ".join(f"{reason} x{count}" for reason, count in rejections.most_common(4))
-    raise RuntimeError(f"could not sample valid forest layout for seed {seed} after "
-                       f"{sum(rejections.values())} attempts; top rejections: {top}")
-
-
-def _road_grid(rng: random.Random) -> tuple[tuple[float, ...], tuple[float, ...]]:
-    def axis() -> tuple[float, ...]:
-        for _ in range(100):
-            count = rng.randint(3, 5)
-            high = 17.2 if count == 5 else 20.0
-            left, right = -rng.uniform(16.5, high), rng.uniform(16.5, high)
-            if not 33.0 <= right - left <= 40.0:
-                continue
-            extras = count - 2
-            if extras == 1:
-                sides = [rng.choice((-1, 1))]
-            elif extras == 2:
-                sides = [-1, 1]
-                rng.shuffle(sides)
-            else:
-                repeated = rng.choice((-1, 1))
-                sides = [repeated, repeated, -repeated]
-                rng.shuffle(sides)
-            values = [left, right]
-            for index, side in enumerate(sides):
-                same_side_remaining = sum(item == side for item in sides[index + 1:])
-                current = min((v for v in values if v < 0), default=left) if side < 0 else max(v for v in values if v > 0)
-                room = 69.0 - abs(current) - 26.0 * same_side_remaining
-                if room < 26.0:
-                    break
-                gap = rng.uniform(26.0, min(40.0, room))
-                values.append(current - gap if side < 0 else current + gap)
-            else:
-                values.sort()
-                mirror = tuple(-v for v in reversed(values))
-                if (any(abs(v) < 12.0 or abs(v) > 69.0 for v in values)
-                        or any(not 26.0 <= b - a <= 40.0 for a, b in zip(values, values[1:]))
-                        or max(abs(a - b) for a, b in zip(values, mirror)) < 1.0):
-                    continue
-                return tuple(values)
-        raise ValueError("could not sample a non-symmetric 3–5 road axis")
-    return axis(), axis()
-
-
-
-
 HOME_PAD_KEEPOUT_M = 2.0
-
-
-def _off_home_pad(point: Point) -> Point:
-    """Push a standing spot radially out of the drone's take-off/landing pad keep-out."""
-    distance = math.hypot(*point)
-    if distance >= HOME_PAD_KEEPOUT_M:
-        return point
-    angle = math.atan2(point[1], point[0]) if distance > 1e-9 else 0.0
-    return (HOME_PAD_KEEPOUT_M * math.cos(angle), HOME_PAD_KEEPOUT_M * math.sin(angle))
-
-
-def _urban_people(roads_x: tuple[float, ...], roads_y: tuple[float, ...],
-                  crosswalks: tuple[Point, ...], plaza_half: float, park_center: Point,
-                  park_half: float, bus_center: Point, rng: random.Random,
-                  follow_route: tuple[Waypoint, ...]
-                  ) -> tuple[tuple[PersonPlacement, ...], ...]:
-    sidewalk = 5.65
-    safe_x = tuple(x for x in roads_x if abs(x) <= 54.0)
-    safe_y = tuple(y for y in roads_y if abs(y) <= 54.0)
-    assets = ("person_blue_kinematic", "person_green_kinematic", "person_dark", "person_orange", "person_hivis")
-
-    def side_route(axis: str, start: float, end: float, road: float, side: float):
-        if axis == "x":
-            lane = road + side * sidewalk
-            return ((lane, start), (lane, end))
-        lane = road + side * sidewalk
-        return ((start, lane), (end, lane))
-
-    commuters = []
-    for index in range(rng.randint(7, 10)):
-        axis = rng.choice(("x", "y"))
-        roads = safe_x if axis == "x" else safe_y
-        road, side = rng.choice(roads), rng.choice((-1.0, 1.0))
-        start = rng.uniform(-54.0, 54.0)
-        direction = rng.choice((-1.0, 1.0))
-        end = max(-56.0, min(56.0, start + direction * rng.uniform(24.0, 48.0)))
-        if abs(end - start) < 22.0:
-            start, end = end, start
-        route = side_route(axis, start, end, road, side)
-        yaw = math.atan2(route[1][1] - route[0][1], route[1][0] - route[0][0])
-        commuters.append(_person(f"civ_commuter_{index + 1:02d}", "commuter",
-                                 rng.choice(assets), route[0], yaw, "route",
-                                 route=route, speed=rng.uniform(1.1, 1.6), mode="pingpong"))
-
-    crossings = []
-    for index, (cx, cy) in enumerate(crosswalks, 1):
-        direction = rng.choice((-1.0, 1.0))
-        # Zebra crossing over the vertical road just beyond the junction (not through it),
-        # from one sidewalk to the other.
-        lane_y = cy + crosswalk_side(index) * CROSSWALK_OFFSET_M
-        start, end = (cx - SIDEWALK_OFFSET_M, lane_y), (cx + SIDEWALK_OFFSET_M, lane_y)
-        if direction < 0:
-            start, end = end, start
-        crossings.append(_person(f"civ_crossing_{index:02d}", "crossing",
-                                 rng.choice(assets), start, 0.0, "route",
-                                 route=(start, end), speed=1.0, mode="pingpong",
-                                 offset=rng.choice((0.0, 12.0, 20.0))))
-
-    bus_waiting = tuple(_person(
-        f"civ_bus_waiting_{i:02d}", "bus_waiting", rng.choice(assets),
-        # Standing on the open side of the shelter, in front of its bench.
-        (bus_center[0] + rng.uniform(-1.4, 1.4), bus_center[1] + 0.45 + (rng.uniform(0.1, 0.7) - 0.1) * 0.6),
-        rng.uniform(-math.pi, math.pi))
-        for i in range(1, rng.randint(3, 5) + 1))
-
-    joggers = []
-    for index in range(2):
-        axis = rng.choice(("x", "y"))
-        roads = safe_x if axis == "x" else safe_y
-        road, side = rng.choice(roads), rng.choice((-1.0, 1.0))
-        start = rng.uniform(-52.0, 5.0)
-        end = min(54.0, start + rng.uniform(24.0, 42.0))
-        route = side_route(axis, start, end, road, side)
-        yaw = math.atan2(route[1][1] - route[0][1], route[1][0] - route[0][0])
-        joggers.append(_person(f"civ_jogger_{index + 1:02d}", "jogger",
-                               rng.choice(assets), route[0], yaw, "route",
-                               route=route, speed=2.5, mode="pingpong"))
-    follow_yaw = math.atan2(follow_route[1][1] - follow_route[0][1],
-                            follow_route[1][0] - follow_route[0][0])
-    follow = _person("civ_jogger_03", "jogger", "person_red_kinematic",
-                     follow_route[0], follow_yaw, "route", "follow_jogger",
-                     follow_route, 2.5, "once")
-
-    park_sitting = tuple(_person(
-        f"civ_park_sitting_{i:02d}", "park_sitting", "person_sitting",
-        (park_center[0] + rng.uniform(-park_half + 1.5, park_half - 1.5),
-         park_center[1] + rng.uniform(-park_half + 1.5, park_half - 1.5)),
-        rng.uniform(-math.pi, math.pi))
-        for i in range(1, rng.randint(2, 4) + 1))
-
-    crowd_count = rng.randint(8, 16)
-    edge = plaza_half - 1.0
-    red_index = rng.randrange(crowd_count)
-    non_red_indices = [index for index in range(crowd_count) if index != red_index]
-    plaza_crowd = []
-    red_shirt = None
-    for index in range(crowd_count):
-        position = _off_home_pad((rng.uniform(-edge, edge), rng.uniform(-edge, edge)))
-        yaw = rng.uniform(-math.pi, math.pi)
-        model = f"civ_plaza_crowd_{index + 1:02d}"
-        if index == red_index:
-            red_shirt = _person("civ_red_shirt_01", "red_shirt", "person_red_kinematic",
-                                position, yaw)
-            person = red_shirt
-        else:
-            if index == non_red_indices[0]:
-                asset = "person_orange"
-            elif index == non_red_indices[-1]:
-                asset = "person_hivis"
-            else:
-                asset = rng.choice(assets)
-            person = _person(model, "plaza_crowd", asset, position, yaw)
-        plaza_crowd.append(person)
-
-    collapsed = None
-    for _ in range(200):
-        axis = rng.choice(("x", "y"))
-        roads = safe_x if axis == "x" else safe_y
-        road, side = rng.choice(roads), rng.choice((-1.0, 1.0))
-        along = rng.uniform(-54.0, 54.0)
-        point = ((road + side * sidewalk, along) if axis == "x"
-                 else (along, road + side * sidewalk))
-        distance = math.hypot(*point)
-        if 15.0 <= distance <= 45.0:
-            collapsed = _person("civ_collapsed_01", "collapsed",
-                                "person_collapsed_kinematic", point,
-                                rng.uniform(-math.pi, math.pi))
-            break
-    if collapsed is None:
-        raise ValueError("could not sample a sidewalk collapse location")
-    return (tuple(commuters), tuple(crossings), bus_waiting, tuple(joggers), (follow,),
-            park_sitting, tuple(plaza_crowd), red_shirt, collapsed)
 
 
 def canonical_urban_layout(seed: int = 2028) -> UrbanLayout:
@@ -971,285 +667,4 @@ def canonical_urban_layout(seed: int = 2028) -> UrbanLayout:
         follower_horizontal_m=5.0, expected_occlusion_s=8.0 / 2.5)
 
 
-def _consume_legacy_vehicle_draws(rng: random.Random, safe_x: tuple[float, ...],
-                                  safe_y: tuple[float, ...]) -> None:
-    """Advance the layout stream exactly as the retired straight-line vehicle sampler did."""
-    kinds = ["car", "car", "car", "van", "bus", "car"]
-    rng.shuffle(kinds)
-    for _ in kinds[:rng.randint(3, 6)]:
-        turn = rng.random() < 0.25
-        vertical = rng.choice((True, False))
-        rng.choice(safe_x), rng.choice(safe_y)
-        rng.choice((-1.0, 1.0)), rng.choice((-1.0, 1.0))
-        if turn:
-            rng.choice((-56.0, 56.0)), rng.choice((-56.0, 56.0))
-        elif vertical:
-            rng.choice((-56.0, 56.0))
-        else:
-            rng.choice((-56.0, 56.0))
-        rng.uniform(4.0, 8.0), rng.uniform(1.4, 2.0)
 
-
-def sample_traffic(seed: int, attempt: int, roads_x: tuple[float, ...],
-                   roads_y: tuple[float, ...]) -> tuple[VehiclePlacement, ...]:
-    """Circulating right-hand traffic around city blocks, from an independent stream.
-
-    Heavy vehicles use anticlockwise (outer-lane, left-turn) loops, whose corners leave room
-    for their larger turning radius; cars may circulate either way.
-    """
-    from sim.worldgen.seeding import substream
-    from sim.worldgen.vehicles import SAMPLED_TYPES, vehicle_type
-
-    rng = substream(seed, "traffic", str(attempt))
-    xs = [x for x in roads_x if abs(x) <= 54.0]
-    ys = [y for y in roads_y if abs(y) <= 54.0]
-    blocks = [(x0, x1, y0, y1) for x0, x1 in zip(xs, xs[1:]) for y0, y1 in zip(ys, ys[1:])]
-    if not blocks:
-        return ()
-    vehicles: list[VehiclePlacement] = []
-    counts: dict[str, int] = {}
-    for _ in range(rng.randint(3, 7)):
-        type_name = rng.choices(SAMPLED_TYPES, (4, 4, 3, 2, 1, 2, 2, 1))[0]
-        kind = vehicle_type(type_name)
-        clockwise = False if kind.heavy else rng.random() < 0.5
-        x0, x1, y0, y1 = rng.choice(blocks)
-        side = rng.choice(("north", "south", "east", "west"))
-        route = block_loop(x0, x1, y0, y1, clockwise=clockwise, start_side=side)
-        counts[type_name] = counts.get(type_name, 0) + 1
-        speed = round(rng.uniform(*kind.max_speed_m_s), 2)
-        accel = round(rng.uniform(*kind.accel_m_s2), 2)
-        offset = round(rng.uniform(0.0, 20.0), 2)
-        vehicles.append(VehiclePlacement.loop(
-            f"veh_{type_name}_{counts[type_name]:02d}", type_name, route, speed, accel,
-            start_offset_s=offset, variant=rng.randrange(8)))
-    return tuple(vehicles)
-
-
-def _dress_parked(seed: int, attempt: int, parked: list[ParkedCar],
-                  vehicles: tuple[VehiclePlacement, ...]) -> list[ParkedCar]:
-    """Give parked cars sampled types and drop any whose footprint would meet a traffic lane."""
-    from sim.worldgen.seeding import substream
-    from sim.worldgen.vehicles import PARKED_TYPES, vehicle_type
-
-    rng = substream(seed, "parked", str(attempt))
-    lanes = []
-    for vehicle in vehicles:
-        points = [point[:2] for point in vehicle.waypoints] + [vehicle.waypoints[0][:2]]
-        lanes.append((points, vehicle_type(vehicle.type).width_m / 2))
-    dressed = []
-    for car in parked:
-        kind = vehicle_type(rng.choice(PARKED_TYPES))
-        variant = rng.randrange(8)
-        if any(distance_to_path((car.x, car.y), path) < half + kind.width_m / 2 + 0.3
-               for path, half in lanes):
-            continue
-        # Park with the kerb-side flank 0.15 m inside the 4.75 m carriageway edge.
-        shift = (CARRIAGEWAY_HALF_WIDTH_M - 0.15 - kind.width_m / 2) - PARKING_LANE_OFFSET_M
-        right = (math.sin(car.yaw), -math.cos(car.yaw))
-        dressed.append(replace(car, x=car.x + right[0] * shift, y=car.y + right[1] * shift,
-                               type=kind.name, variant=variant))
-    return dressed
-
-
-def sample_urban_layout(seed: int, *,
-                        validate: Callable[[UrbanLayout], float | None] | None = None
-                        ) -> UrbanLayout:
-    rng = random.Random(seed)
-    if validate is None:
-        from sim.worldgen import _validate_candidate
-
-        validate = lambda layout: _validate_candidate("urban", layout)
-    rejections: Counter[str] = Counter()
-    for attempt in range(1, 101):
-        try:
-            roads_x, roads_y = _road_grid(rng)
-        except ValueError:
-            continue
-
-        home_ix = sum(road < 0 for road in roads_x)
-        home_iy = sum(road < 0 for road in roads_y)
-        home_x = (roads_x[home_ix] - roads_x[home_ix - 1]) - 13.1
-        home_y = (roads_y[home_iy] - roads_y[home_iy - 1]) - 13.1
-        plaza_half = rng.uniform(8.0, min(10.0, home_x / 2 - 0.3, home_y / 2 - 0.3))
-        safe_x = tuple(road for road in roads_x if abs(road) <= 54.0)
-        safe_y = tuple(road for road in roads_y if abs(road) <= 54.0)
-        cross_candidates = [(x, y) for x in roads_x if abs(x) <= 52.0
-                            for y in roads_y if abs(y) <= 52.0]
-        if not safe_x or not safe_y or len(cross_candidates) < 2:
-            continue
-        rng.shuffle(cross_candidates)
-        crosswalk_centres = tuple(cross_candidates[:rng.randint(2, min(4, len(cross_candidates)))])
-
-        follow_route: tuple[Point, ...] | None = None
-        for _ in range(100):
-            vertical = rng.choice((True, False))
-            roads, axis = (safe_x, "x") if vertical else (safe_y, "y")
-            road, side = rng.choice(roads), rng.choice((-1.0, 1.0))
-            lane = road + side * 5.65
-            start_along = rng.uniform(-52.0, 52.0)
-            start = (lane, start_along) if vertical else (start_along, lane)
-            if not 20.0 <= math.hypot(*start) <= 45.0:
-                continue
-            directions = [direction for direction in (-1.0, 1.0)
-                          if -58.0 <= start_along + direction * 45.0 <= 58.0]
-            if not directions:
-                continue
-            direction = rng.choice(directions)
-            max_length = min(58.0, 58.0 - direction * start_along)
-            if max_length < 45.0:
-                continue
-            end_along = start_along + direction * rng.uniform(45.0, max_length)
-            end = (lane, end_along) if vertical else (end_along, lane)
-            follow_route = (start, end)
-            break
-        if follow_route is None:
-            continue
-        route_length = _path_length(follow_route)
-        follow_start = follow_route[0]
-        occluder_xy, direction = _point_at_distance(
-            follow_route, route_length * rng.uniform(0.40, 0.60))
-        occluder_yaw = math.atan2(direction[1], direction[0]) - math.pi / 2
-        occluder_kind = "shelter"
-        shelter_length = rng.uniform(7.5, 9.0)
-
-        blocks_x = [(a + 6.55, b - 6.55)
-                    for a, b in zip((-75.0, *roads_x), (*roads_x, 75.0))]
-        blocks_y = [(a + 6.55, b - 6.55)
-                    for a, b in zip((-75.0, *roads_y), (*roads_y, 75.0))]
-        candidates = []
-        for ix, (x0, x1) in enumerate(blocks_x):
-            for iy, (y0, y1) in enumerate(blocks_y):
-                if (ix, iy) == (home_ix, home_iy) or x1 - x0 < 16 or y1 - y0 < 16:
-                    continue
-                center = ((x0 + x1) / 2, (y0 + y1) / 2)
-                if distance_to_path(center, follow_route) >= 10.0:
-                    candidates.append((ix, iy, x0, x1, y0, y1))
-        if not candidates:
-            continue
-        pix, piy, px0, px1, py0, py1 = rng.choice(candidates)
-        park_center = ((px0 + px1) / 2, (py0 + py1) / 2)
-        park_half = rng.uniform(5.5, min(9.0, (px1 - px0) / 2 - 1.0,
-                                         (py1 - py0) / 2 - 1.0))
-        park_trees = []
-        for _ in range(rng.randint(5, 12)):
-            angle = rng.uniform(0.0, 2 * math.pi)
-            radius = (park_half - 1.0) * math.sqrt(rng.random())
-            park_trees.append(ParkTree(park_center[0] + math.cos(angle) * radius,
-                                       park_center[1] + math.sin(angle) * radius,
-                                       rng.uniform(6.0, 10.0)))
-        benches = tuple(Bench(park_center[0] + rng.uniform(-park_half + 1.5, park_half - 1.5),
-                              park_center[1] + rng.uniform(-park_half + 1.5, park_half - 1.5),
-                              rng.uniform(-math.pi, math.pi)) for _ in range(3))
-
-        palette = ((0.66, 0.57, 0.48), (0.58, 0.62, 0.65), (0.70, 0.64, 0.55),
-                   (0.56, 0.63, 0.67), (0.62, 0.67, 0.68), (0.71, 0.66, 0.58))
-        buildings = []
-        for ix, (x0, x1) in enumerate(blocks_x):
-            for iy, (y0, y1) in enumerate(blocks_y):
-                if (ix, iy) in ((home_ix, home_iy), (pix, piy)):
-                    continue
-                width, depth = x1 - x0, y1 - y0
-                if width < 10.0 or depth < 10.0:
-                    continue
-                max_columns = min(2, max(1, int(width // 10)))
-                max_rows = min(2, max(1, int(depth // 10)))
-                lots = rng.randint(1, max_columns * max_rows)
-                columns = min(max_columns, lots)
-                rows = math.ceil(lots / columns)
-                lot_w, lot_h = width / columns, depth / rows
-                for lot in range(lots):
-                    col, row = lot % columns, lot // columns
-                    max_w, max_h = lot_w - 4.0, lot_h - 4.0
-                    sx, sy = rng.uniform(6.0, max_w), rng.uniform(6.0, max_h)
-                    cx = x0 + (col + 0.5) * lot_w + rng.uniform(-0.5, 0.5)
-                    cy = y0 + (row + 0.5) * lot_h + rng.uniform(-0.5, 0.5)
-                    buildings.append(BuildingSpec(cx, cy, sx, sy, rng.uniform(6.0, 34.0),
-                                                  rng.choice(palette)))
-
-        # Lamps stand behind the sidewalk (which spans 4.75–6.55 m from the road centre).
-        lamp_positions = tuple((x + sx * LAMP_OFFSET_M, y + sy * LAMP_OFFSET_M)
-                               for x in roads_x for y in roads_y
-                               for sx, sy in ((-1, -1), (1, -1), (-1, 1), (1, 1)))
-        utility_poles = tuple((x, y) for x in (-65.0, 65.0) for y in (-48.0, -16.0, 16.0, 48.0))
-        trash_bins = []
-        for _ in range(rng.randint(6, 9)):
-            vertical = rng.choice((True, False))
-            roads, axis = (safe_x, "x") if vertical else (safe_y, "y")
-            road, side = rng.choice(roads), rng.choice((-1.0, 1.0))
-            along = rng.uniform(-54.0, 54.0)
-            trash_bins.append((road + side * BIN_OFFSET_M, along) if vertical
-                              else (along, road + side * BIN_OFFSET_M))
-
-        bus_x = roads_x[home_ix] - 10.5  # clear of the perpendicular road's sidewalk
-        # The shelter stands behind the sidewalk (its back wall clear of the walking lanes).
-        bus_y = roads_y[home_iy - 1] + 7.75
-        # The former one-way/turning vehicle draws are consumed unchanged so each seed's parked
-        # cars, people and occluders stay as they were; circulating traffic is sampled from an
-        # independent stream below.
-        _consume_legacy_vehicle_draws(rng, safe_x, safe_y)
-
-        parked = []
-        parked_count = rng.randint(3, 5)
-        for _ in range(parked_count):
-            for _ in range(200):
-                vertical = rng.choice((True, False))
-                roads, axis = (safe_x, "x") if vertical else (safe_y, "y")
-                road, side = rng.choice(roads), rng.choice((-1.0, 1.0))
-                along = rng.uniform(-52.0, 52.0)
-                intersections = roads_y if vertical else roads_x
-                if any(abs(along - cross) < 8.0 for cross in intersections):
-                    continue
-                # Kerbside, facing the traffic of its side of the road.
-                if vertical:
-                    parked.append(ParkedCar(road + side * PARKING_LANE_OFFSET_M, along,
-                                            math.pi / 2 if side > 0 else -math.pi / 2,
-                                            rng.choice(palette)))
-                else:
-                    parked.append(ParkedCar(along, road + side * PARKING_LANE_OFFSET_M,
-                                            math.pi if side > 0 else 0.0, rng.choice(palette)))
-                break
-            else:
-                break
-        if len(parked) != parked_count:
-            continue
-        vehicles = sample_traffic(seed, attempt, roads_x, roads_y)
-        parked = _dress_parked(seed, attempt, parked, vehicles)
-
-        people = _urban_people(roads_x, roads_y, crosswalk_centres, plaza_half,
-                               park_center, park_half, (bus_x, bus_y), rng, follow_route)
-        commuters, crossings, bus_waiting, joggers, follow_arr, sitting, crowd, red, collapsed = people
-        follow = follow_arr[0]
-        if (math.dist(red.position, follow.position) < 25.0
-                or distance_to_path(red.position, follow.waypoints) < 15.0):
-            continue
-        persons = (*commuters, *crossings, *bus_waiting, *joggers, follow,
-                   *sitting, *crowd, collapsed)
-        all_xy = [p.position for p in persons]
-        all_xy.extend(point[:2] for person in persons for point in person.waypoints)
-        all_xy.extend(v.position for v in vehicles)
-        all_xy.extend(point[:2] for v in vehicles for point in v.waypoints)
-        all_xy.extend((car.x, car.y) for car in parked)
-        all_xy.extend(trash_bins)
-        if any(abs(x) > GEOFENCE_INSET_M or abs(y) > GEOFENCE_INSET_M for x, y in all_xy):
-            continue
-
-        layout = UrbanLayout(
-            seed, False, roads_x, roads_y, crosswalk_centres, tuple(buildings), plaza_half,
-            park_center, park_half, tuple(park_trees), benches, lamp_positions, utility_poles,
-            tuple(bin_xy for bin_xy in trash_bins if not _on_sidewalk_or_road(bin_xy, roads_x, roads_y, 0.35)),
-            (bus_x, bus_y), occluder_xy, (3.4, shelter_length),
-            tuple(parked), commuters, crossings, bus_waiting, joggers, follow, sitting, crowd,
-            red, collapsed, tuple(vehicles), 2.5, 9.0, 5.5, 0.0, attempt,
-            follow_occluder_kind=occluder_kind, follow_occluder_yaw=occluder_yaw,
-            lamp_height_m=5.4)
-        accepted_occlusion = validate(layout)
-        if accepted_occlusion is not None:
-            return replace(layout, expected_occlusion_s=accepted_occlusion)
-        from sim.worldgen.validation import LAST_FAILURES
-
-        rejections["validation"] += 1
-        if LAST_FAILURES:
-            rejections[f"validation: {LAST_FAILURES[0][:80]}"] += 1
-    top = ", ".join(f"{reason} x{count}" for reason, count in rejections.most_common(4))
-    raise RuntimeError(f"could not sample valid urban layout for seed {seed} after "
-                       f"{sum(rejections.values())} attempts; top rejections: {top or 'pre-checks'}")

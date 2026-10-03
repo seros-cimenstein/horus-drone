@@ -120,6 +120,21 @@ STANDING_SUBMESHES = (
 )
 SHARED_STANDING_MESH = "model://person_blue/meshes/standing.dae"
 
+# Procedural seated actors use the committed CC0 seated dummy (``assets.ASSETS`` key
+# ``person_sitting_a``: OpenRobotics Rescue Randy Sitting, hi-vis rescue jacket). The visual
+# pose/scale are the registry measurements; the actor keeps the envelope-collision convention
+# (one box bounding the rendered mesh, see ``appearance.SITTING_ENVELOPE``).
+SITTING_MESH = "model://horus_person_sitting_a/meshes/rescue_randy.dae"
+SITTING_MESH_SCALE = 1.6438
+SITTING_MESH_LIFT_M = -1.01533  # mesh base onto z=0 at scale 1
+# Measured with horus.perception.attributes.classify_shirt_colour on drone-view renders of
+# the generated seated actor (12 views, 3-5 m slant, -45/-70 deg pitch): the grey rescue
+# coverall torso is unsaturated, so the classifier reads None in 11/12 views; the hi-vis lime
+# trim read green once (0.96), so green stays a possible reading for uniqueness checks.
+SITTING_SHIRT_COLOUR: str | None = None
+SITTING_POSSIBLE_SHIRT_COLOURS = ("green",)
+SITTING_CLOTHING = "grey rescue coverall with hi-vis trim"
+
 # RGB values preserve the previous generator's shirt colors. Texture basenames
 # deliberately include the model name because Ogre2 caches by filename.
 _PERSON_VARIANTS = {
@@ -134,14 +149,13 @@ _PERSON_VARIANTS = {
 
 def legacy_envelope(asset: str) -> dict[str, float]:
     """Model-frame body envelope of a fixed legacy asset (unscaled standing/lying male mesh)."""
-    from .appearance import SITTING_ENVELOPE
-
     posture = PERSON_ASSETS[asset]["posture"]
     if posture == "sitting":
-        x0, x1 = SITTING_ENVELOPE["forward_m"]
-        half = SITTING_ENVELOPE["half_width_m"]
+        # The canonical primitive ``person_sitting`` figure is frozen with its own envelope;
+        # procedural seated actors use the measured rescue-dummy box from appearance.py.
+        x0, x1, half, top = -0.22, 0.46, 0.22, 1.17
         return {"x_min_m": x0, "x_max_m": x1, "y_min_m": -half, "y_max_m": half,
-                "top_z_m": SITTING_ENVELOPE["height_m"], "torso_z_m": 0.7, "height_m": 1.926}
+                "top_z_m": top, "torso_z_m": 0.7, "height_m": 1.926}
     body = BODIES["male_a"]
     back, front = body["forward_m"]
     if posture == "lying":
@@ -367,22 +381,13 @@ def _accessories(appearance: Appearance, height: float, width: float, *, lying: 
     return "".join(parts)
 
 
-def _sitting_model(asset: str, appearance: Appearance) -> str:
+def _sitting_model(appearance: Appearance) -> str:
+    """The seated actor visual: the measured ``person_sitting_a`` mesh, facing +x, scaled."""
     s, w = appearance.stature_scale, appearance.width_scale
-    torso, legs = _flat(appearance.top.rgb(0)), _flat(TROUSERS[appearance.trousers])
-    skin = _flat(tuple(round(c * k) for c, k in zip((184, 132, 104), appearance.skin_multiplier)))
-    hair = _flat(HAIR[appearance.hair]) if appearance.hair else skin
-    parts = [
-        f'<visual name="torso"><pose>{_xyz(0, 0, 0.66 * s)}</pose><geometry><box><size>{_p(0.43 * w, 0.31 * w, 0.56 * s)}</size></box></geometry>{torso}</visual>',
-        f'<visual name="head"><pose>{_xyz(0, 0, 1.05 * s)}</pose><geometry><sphere><radius>{_p(0.12 * s)}</radius></sphere></geometry>{skin}</visual>',
-        f'<visual name="hair"><pose>{_xyz(-0.02 * s, 0, 1.11 * s)}</pose><geometry><sphere><radius>{_p(0.105 * s)}</radius></sphere></geometry>{hair}</visual>',
-    ]
-    for side in (1, -1):
-        parts.append(f'<visual name="thigh_{side}"><pose>{_p(0.18 * s, side * 0.13 * w, 0.30 * s, 0, math.pi / 2, 0)}</pose>'
-                     f"<geometry><cylinder><radius>{_p(0.09 * w)}</radius><length>{_p(0.46 * s)}</length></cylinder></geometry>{legs}</visual>")
-        parts.append(f'<visual name="shin_{side}"><pose>{_xyz(0.39 * s, side * 0.13 * w, 0.17 * s)}</pose>'
-                     f"<geometry><cylinder><radius>{_p(0.07 * w)}</radius><length>{_p(0.30 * s)}</length></cylinder></geometry>{legs}</visual>")
-    return "".join(parts)
+    scale = (SITTING_MESH_SCALE * w, SITTING_MESH_SCALE * w, SITTING_MESH_SCALE * s)
+    return (f'<visual name="sitting"><pose>{_p(0, 0, SITTING_MESH_LIFT_M * s, 0, 0, FACING_YAW)}</pose>'
+            f"<geometry><mesh><uri>{SITTING_MESH}</uri>"
+            f"<scale>{_p(*scale)}</scale></mesh></geometry></visual>")
 
 
 def actor_model_files(asset: str, appearance: Appearance, posture: str, *,
@@ -403,9 +408,9 @@ def actor_model_files(asset: str, appearance: Appearance, posture: str, *,
     envelope_box = _collision("body_envelope", _xyz(centre_x, 0, envelope["top_z_m"] / 2),
                               f"<box><size>{_p(size_x, size_y, envelope['top_z_m'])}</size></box>")
     if posture == "sitting":
-        body = envelope_box + _sitting_model(asset, appearance)
+        body = envelope_box + _sitting_model(appearance)
         mass, inertia = 75, (7, 7, 7)
-        author = "HORUS"
+        author = "Ian Chen, Cole Biesemeyer (OpenRobotics Rescue Randy Sitting, CC0 1.0)"
     else:
         lying = posture == "lying"
         materials = _body_materials(asset, appearance, textures)
@@ -440,6 +445,7 @@ def actor_model_files(asset: str, appearance: Appearance, posture: str, *,
         f"<gravity>false</gravity><kinematic>true</kinematic>{body}</link></model></sdf>\n")
     files[f"models/{asset}/model.config"] = _model_config(
         asset, f"Generated {posture} civilian: {base['source']} mesh by {base['author']} for standing/lying "
-               f"figures (primitive seated figure otherwise), {appearance.top.style} top; kinematic, no rigged gait.",
+               f"figures (person_sitting_a Rescue Randy mesh with a hi-vis rescue jacket for seated "
+               f"figures), {appearance.top.style} top; kinematic, no rigged gait.",
         author=author)
     return files

@@ -78,7 +78,7 @@ generate_procedural_world() {
       "$([[ -n "${stratum}" ]] && printf ' (forced)' || printf ' (sampled from seed)')" >&2
   fi
   printf '  SDF:       /horus/sim/generated/%s/%s.sdf\n' "${stem}" "${stem}" >&2
-  printf '  Config:    config/horus_%s.yaml (HORUS_CONFIG=/horus/config/horus_%s.yaml in the container)\n' \
+  printf '  Config:    config/horus_procedural_%s.yaml (HORUS_CONFIG=/horus/config/horus_procedural_%s.yaml in the container)\n' \
     "${kind}" "${kind}" >&2
   printf '/horus/sim/generated/%s/%s.sdf\n' "${stem}" "${stem}"
 }

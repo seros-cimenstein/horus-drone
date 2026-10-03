@@ -20,11 +20,18 @@ from sim.worldgen.appearance import Appearance, sample_appearance
 from sim.worldgen.environment import CANONICAL_ENVIRONMENT, Environment, sample_environment
 from sim.worldgen.fauna import animal_envelope, animal_model, sample_individual, species
 from sim.worldgen.layout import (
-    GEOFENCE_INSET_M, HOME_PAD_KEEPOUT_M, ForestLayout, UrbanLayout, distance_to_path,
+    GEOFENCE_INSET_M, HOME_PAD_KEEPOUT_M, URBAN_ARTERIAL_HALF_WIDTH_M,
+    URBAN_SIDEWALK_WIDTH_M, URBAN_STREET_HALF_WIDTH_M, ForestLayout, UrbanLayout,
+    distance_to_path, distance_to_paths,
 )
-from sim.worldgen.people import PERSON_ASSETS, actor_model_files, legacy_envelope
+from sim.worldgen.people import (
+    PERSON_ASSETS, SITTING_CLOTHING, SITTING_POSSIBLE_SHIRT_COLOURS, SITTING_SHIRT_COLOUR,
+    actor_model_files, legacy_envelope,
+)
+from sim.worldgen.meshes import LoftMesh, rotate_xy
+from sim.worldgen.proxy import ProxyShape
+from sim.worldgen.scenery import SceneryInstance, SceneryMesh
 from sim.worldgen.seeding import substream
-from sim.worldgen.sdf import box_geometry, collision, cylinder_geometry, sphere_geometry, static_model, visual
 
 STRATA = ("baseline", "chaotic")
 KEEP_RIGHT_M = 0.4
@@ -41,6 +48,9 @@ class Dressing:
     clutter: list[dict] = field(default_factory=list)
     events: list[dict] = field(default_factory=list)
     asset_prefix: str = ""
+    # Half-extent actor routes/areas must stay inside (procedural worlds: the flight profile
+    # polygon minus a margin; canonical worlds keep the historical 60 m inset).
+    actor_inset_m: float = GEOFENCE_INSET_M
 
     @property
     def canonical(self) -> bool:
@@ -119,7 +129,8 @@ def sample_dressing(kind: str, layout: ForestLayout | UrbanLayout, *, stratum: s
     chosen = _stratum(seed, stratum)
     chaotic = chosen == "chaotic"
     dressing = Dressing(chosen, sample_environment(substream(seed, "environment"), chaotic=chaotic),
-                        asset_prefix=f"h{kind[0]}{seed}_")
+                        asset_prefix=f"h{kind[0]}{seed}_",
+                        actor_inset_m=float(getattr(layout, "actor_inset_m", GEOFENCE_INSET_M)))
     constraints, reserved = _person_constraints(kind, layout, substream(seed, "roles"))
     for person in layout.people:
         rules = constraints.get(person.model, {})
@@ -151,10 +162,19 @@ def dress_person(dressing: Dressing, record: dict) -> dict:
     record["asset"] = person_asset(dressing, record["model"], legacy)
     record["appearance"] = appearance
     record["envelope"] = appearance.envelope(posture)
-    record["shirt_colour_attribute"] = appearance.shirt_colour_attribute
-    record["shirt_colour_source"] = "design_nominal" if appearance.shirt_colour_attribute else "none_indeterminate"
-    record["possible_shirt_colours"] = list(appearance.possible_shirt_colours)
-    record["clothing"] = f"{appearance.top.style}:{'+'.join(appearance.top.colours)}"
+    if posture == "sitting":
+        # Seated actors render the person_sitting_a hi-vis rescue jacket, so the manifest
+        # records what the shirt-colour classifier measured on a rendered drone view of that
+        # asset (see people.SITTING_SHIRT_COLOUR) instead of the sampled standing garment.
+        record["shirt_colour_attribute"] = SITTING_SHIRT_COLOUR
+        record["shirt_colour_source"] = "measured_rendered_asset"
+        record["possible_shirt_colours"] = list(SITTING_POSSIBLE_SHIRT_COLOURS)
+        record["clothing"] = SITTING_CLOTHING
+    else:
+        record["shirt_colour_attribute"] = appearance.shirt_colour_attribute
+        record["shirt_colour_source"] = "design_nominal" if appearance.shirt_colour_attribute else "none_indeterminate"
+        record["possible_shirt_colours"] = list(appearance.possible_shirt_colours)
+        record["clothing"] = f"{appearance.top.style}:{'+'.join(appearance.top.colours)}"
     jogger = record["role"] == "jogger"
     if record.get("waypoints"):
         record["accel"] = JOGGER_ACCEL_M_S2 if jogger else PEDESTRIAN_ACCEL_M_S2
@@ -164,8 +184,8 @@ def dress_person(dressing: Dressing, record: dict) -> dict:
         # that would leave it keep their original out-and-back path.
         if record.get("mode") == "pingpong" and record.get("group", "ambient") == "ambient":
             shifted = keep_right_loop(tuple(record["waypoints"]), KEEP_RIGHT_M)
-            if all(abs(point[0]) <= GEOFENCE_INSET_M and abs(point[1]) <= GEOFENCE_INSET_M
-                   for point in shifted):
+            inset = dressing.actor_inset_m
+            if all(abs(point[0]) <= inset and abs(point[1]) <= inset for point in shifted):
                 record["waypoints"] = shifted
                 record["mode"] = "loop"
     record["radius"] = round(max(record["envelope"]["x_max_m"] - record["envelope"]["x_min_m"],
@@ -175,8 +195,8 @@ def dress_person(dressing: Dressing, record: dict) -> dict:
     # asset name, exactly like the legacy assets.
     PERSON_ASSETS[record["asset"]] = {
         "posture": posture,
-        "shirt_colour_attribute": appearance.shirt_colour_attribute,
-        "possible_shirt_colours": list(appearance.possible_shirt_colours),
+        "shirt_colour_attribute": record["shirt_colour_attribute"],
+        "possible_shirt_colours": list(record["possible_shirt_colours"]),
     }
     return record
 
@@ -224,7 +244,7 @@ def add_fauna(dressing: Dressing, kind: str, layout: Any, people: list[dict],
             gap=[1.2, round(rng.uniform(1.8, 2.6), 2)],
             speed=round(min(species("dog").max_speed_m_s, leader["speed"] * 1.6), 2))
     for area_name, polygon in areas.items():
-        if kind == "forest" and area_name == "meadow":
+        if kind == "forest" and area_name.startswith("meadow"):
             herd, bird, count_range = "deer", "crow", ((1, 2), (2, 4))
         elif area_name == "plaza":
             herd, bird, count_range = None, "pigeon", ((0, 0), (3, 7) if chaotic else (2, 5))
@@ -232,16 +252,52 @@ def add_fauna(dressing: Dressing, kind: str, layout: Any, people: list[dict],
             herd, bird, count_range = "cat", None, ((1, 1), (0, 0))
         else:
             continue
+        centre = (sum(p[0] for p in polygon) / len(polygon), sum(p[1] for p in polygon) / len(polygon))
+        placed: list[tuple[float, float, float]] = []
         for name, (low, high) in ((herd, count_range[0]), (bird, count_range[1])):
             if name is None:
                 continue
             for index in range(rng.randint(low, high)):
                 model = f"ani_{name}_{sum(a['species'] == name for a in animals) + 1:02d}"
-                centre = (sum(p[0] for p in polygon) / len(polygon), sum(p[1] for p in polygon) / len(polygon))
                 speed = round(rng.uniform(*species(name).walk_m_s), 2)
                 add(model, name, centre, rng.uniform(-math.pi, math.pi), behavior="wander",
                     area=[list(point) for point in polygon], speed=speed,
                     pause=[1.0, 6.0] if name in ("deer", "cat") else [0.5, 3.0], avoid=True)
+                record = animals[-1]
+                record["position"] = _free_spawn(centre, polygon, record["envelope"], placed)
+    return animals
+
+
+def _free_spawn(centre: tuple[float, float], polygon: list[tuple[float, float]], envelope: dict,
+                placed: list[tuple[float, float, float]]) -> tuple[float, float]:
+    """A spawn point in the area whose envelope circle clears every animal already placed there.
+
+    Kinematic envelopes that start interpenetrating generate contact constraints every physics
+    step, which stalls dartsim, so herds and flocks are laid out on rings around the area centre.
+    """
+    radius = max(math.hypot(x, y) for x in (envelope["x_min_m"], envelope["x_max_m"])
+                 for y in (envelope["y_min_m"], envelope["y_max_m"]))
+    inradius = min(_point_segment(centre, a, b) for a, b in zip(polygon, polygon[1:] + polygon[:1]))
+    step = 2 * radius + 0.4
+    candidates = [centre]
+    ring = 1
+    while ring * step + radius <= inradius:
+        count = max(6, int(2 * math.pi * ring))
+        candidates += [(centre[0] + ring * step * math.cos(2 * math.pi * k / count),
+                        centre[1] + ring * step * math.sin(2 * math.pi * k / count)) for k in range(count)]
+        ring += 1
+    for x, y in candidates:
+        if all(math.hypot(x - px, y - py) >= radius + pr + 0.3 for px, py, pr in placed):
+            placed.append((x, y, radius))
+            return (round(x, 4), round(y, 4))
+    raise ValueError(f"no non-overlapping spawn point for an animal in area around {centre}")
+
+
+def _point_segment(point: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length2 = dx * dx + dy * dy
+    t = 0.0 if length2 == 0 else max(0.0, min(1.0, ((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / length2))
+    return math.hypot(point[0] - (a[0] + t * dx), point[1] - (a[1] + t * dy))
     return animals
 
 
@@ -253,10 +309,17 @@ def animal_models(animals: list[dict], height) -> list[str]:
 def fauna_areas(kind: str, layout: Any) -> dict[str, list[tuple[float, float]]]:
     """Obstacle-free wander polygons (validated against real geometry before acceptance)."""
     if kind == "forest":
-        cx, cy = layout.clearing
-        r = layout.clearing_radius * 0.6
-        return {"meadow": [(cx + r * math.cos(a), cy + r * math.sin(a))
-                           for a in (i * math.pi / 4 for i in range(8))]}
+        # Generated 1.2 km forests have several clearings; graze the first two (open,
+        # tree-free meadow, validated by the sampler's clearing exclusion).
+        clearings = getattr(layout, "clearings", ()) or (
+            (layout.clearing[0], layout.clearing[1], layout.clearing_radius),)
+        areas: dict[str, list[tuple[float, float]]] = {}
+        for index, (cx, cy, radius) in enumerate(clearings[:2]):
+            r = radius * 0.6
+            name = "meadow" if index == 0 else f"meadow_{index + 1}"
+            areas[name] = [(cx + r * math.cos(a), cy + r * math.sin(a))
+                           for a in (i * math.pi / 4 for i in range(8))]
+        return areas
     half = layout.plaza_half_size - 1.0
     # The landing pad sits at the plaza centre; keep wandering animals north of the pad's
     # keep-out instead of letting them graze on the pad collision.
@@ -275,8 +338,38 @@ def fauna_areas(kind: str, layout: Any) -> dict[str, list[tuple[float, float]]]:
     return areas
 
 
+def _forest_clutter_clear(layout: Any, point: tuple[float, float], size: float) -> bool:
+    """True when forest clutter at ``point`` clears trails, creeks, clearings, camps and the
+    mission people (the missing hiker's canopy and the follow occluder included)."""
+    trails = getattr(layout, "trails", ()) or (layout.trail,)
+    creeks = getattr(layout, "creeks", ()) or (layout.creek,)
+    clearings = getattr(layout, "clearings", ()) or (
+        (layout.clearing[0], layout.clearing[1], layout.clearing_radius),)
+    camps = getattr(layout, "camps", ()) or (layout.camp,)
+    if distance_to_paths(point, trails) < size + 3.5:
+        return False
+    if distance_to_paths(point, creeks) < size + 2.5:
+        return False
+    if any(math.hypot(point[0] - cx, point[1] - cy) < radius + size + 2.0
+           for cx, cy, radius in clearings):
+        return False
+    if any(math.hypot(point[0] - cx, point[1] - cy) < 15.0 + size for cx, cy in camps):
+        return False
+    if math.hypot(point[0] - layout.follow_occluder_xy[0], point[1] - layout.follow_occluder_xy[1]) \
+            < size + 4.0:
+        return False
+    for person in layout.people:
+        if math.hypot(point[0] - person.position[0], point[1] - person.position[1]) < size + 8.0:
+            return False
+    return True
+
+
 def add_clutter(dressing: Dressing, kind: str, layout: Any, agents: list[dict], height) -> list[str]:
-    """Static clutter with collisions, kept clear of every actor route, area and the home pad."""
+    """Static clutter kept clear of every actor route, area and the home pad.
+
+    Procedural forest clutter becomes scenery (``clutter_scenery`` converts these items into
+    instanced rocks and textured meshes); urban clutter still emits primitive model SDFs.
+    """
     if dressing.canonical:
         return []
     rng = substream(layout.seed, "clutter")
@@ -299,70 +392,289 @@ def add_clutter(dressing: Dressing, kind: str, layout: Any, agents: list[dict], 
     count = rng.randint(10, 16) if chaotic else rng.randint(5, 10)
     kinds = (("stump", "boulder", "deadfall", "cairn") if kind == "forest"
              else ("planter", "bollard", "cone", "bike_rack", "crate_stack"))
+    map_half = float(getattr(layout, "map", None).half_m)
+    half = map_half - 45.0
+    city = getattr(layout, "city", None)
     for _ in range(count * 30):
         if len(placed) >= count:
             break
         item = rng.choice(kinds)
-        x, y = rng.uniform(-56, 56), rng.uniform(-56, 56)
+        x, y = rng.uniform(-half, half), rng.uniform(-half, half)
         size = {"stump": 0.45, "boulder": rng.uniform(0.5, 1.1), "deadfall": 2.4, "cairn": 0.5,
                 "planter": 0.7, "bollard": 0.2, "cone": 0.25, "bike_rack": 1.0, "crate_stack": 0.8}[item]
         if math.hypot(x, y) < 12 or not _clear_of((x, y), paths, size + 0.9):
             continue
+        if kind == "forest" and not _forest_clutter_clear(layout, (x, y), size):
+            continue
         if kind == "urban" and any(abs(x - b.x) < b.sx / 2 + size + 0.5 and abs(y - b.y) < b.sy / 2 + size + 0.5
                                    for b in layout.buildings):
             continue
-        if kind == "urban" and any(abs(x - road) < 4.9 + size for road in layout.roads_x) \
-                or kind == "urban" and any(abs(y - road) < 4.9 + size for road in layout.roads_y):
+        if kind == "urban" and city is not None:
+            # Wider arterials need the road's own half width; keep clutter off the pavement
+            # and out of every plaza and park (the mission crowds live there).
+            clearance = size + 0.6 + URBAN_SIDEWALK_WIDTH_M
+            if any(abs(x - road) < clearance + (URBAN_ARTERIAL_HALF_WIDTH_M
+                                                if road in city.arterial_roads_x
+                                                else URBAN_STREET_HALF_WIDTH_M)
+                   for road in layout.roads_x):
+                continue
+            if any(abs(y - road) < clearance + (URBAN_ARTERIAL_HALF_WIDTH_M
+                                                if road in city.arterial_roads_y
+                                                else URBAN_STREET_HALF_WIDTH_M)
+                   for road in layout.roads_y):
+                continue
+            if any(math.hypot(x - plaza.x, y - plaza.y) < plaza.half_size + size + 1.0
+                   for plaza in city.plazas):
+                continue
+            if any(math.hypot(x - park.x, y - park.y) < park.half_size + size + 1.0
+                   for park in city.parks):
+                continue
+        elif kind == "urban" and (any(abs(x - road) < 4.9 + size for road in layout.roads_x)
+                                  or any(abs(y - road) < 4.9 + size for road in layout.roads_y)):
             continue
         if any(math.hypot(x - other["x"], y - other["y"]) < size + other["size"] + 0.5 for other in placed):
             continue
         yaw = rng.uniform(-math.pi, math.pi)
         placed.append({"name": f"clutter_{item}_{len(placed) + 1:02d}", "kind": item, "x": round(x, 3),
-                       "y": round(y, 3), "yaw": round(yaw, 3), "size": round(size, 3)})
+                       "y": round(y, 3), "z": round(height(x, y), 3), "yaw": round(yaw, 3),
+                       "size": round(size, 3)})
     dressing.clutter = placed
-    return [static_model(item["name"], _clutter_sdf(item, height(item["x"], item["y"]))) for item in placed]
+    # Placement only: callers emit the pieces via ``clutter_scenery`` into their scenery tiles.
+    return []
 
 
-def _clutter_sdf(item: dict, z: float) -> str:
-    x, y, yaw, size, kind = item["x"], item["y"], item["yaw"], item["size"], item["kind"]
-    parts: list[str] = []
+def _mesh_piece(name: str, texture: str, mesh: LoftMesh,
+                proxies: list[ProxyShape]) -> SceneryMesh:
+    """A world-space ``SceneryMesh`` from a loft mesh (texture doubles as the material name)."""
+    positions, normals, uvs, faces = mesh.triangles()
+    return SceneryMesh(name, texture, tuple(positions), tuple(normals), tuple(uvs), tuple(faces),
+                       proxies=tuple(proxies), texture=texture)
 
-    def solid(name: str, dx: float, dy: float, dz: float, geometry: str, rgb) -> None:
-        c, s = math.cos(yaw), math.sin(yaw)
-        px, py = x + dx * c - dy * s, y + dx * s + dy * c
-        parts.append(visual(name, px, py, z + dz, yaw, geometry, rgb))
-        parts.append(collision(f"{name}_collision", px, py, z + dz, yaw, geometry))
 
-    if kind == "stump":
-        solid("stump", 0, 0, 0.3, cylinder_geometry(size, 0.6), (0.36, 0.24, 0.14))
-    elif kind == "boulder":
-        solid("boulder", 0, 0, size * 0.55, sphere_geometry(size), (0.40, 0.39, 0.36))
-    elif kind == "deadfall":
-        parts_pose = f"{x:.3f} {y:.3f} {z + 0.3:.3f} {math.pi / 2:.4f} 0 {yaw:.3f}"
-        geometry = cylinder_geometry(0.25, size * 2)
-        parts.append(f'<visual name="deadfall"><pose>{parts_pose}</pose><geometry>{geometry}</geometry>'
-                     "<material><ambient>0.32 0.22 0.14 1</ambient><diffuse>0.32 0.22 0.14 1</diffuse></material></visual>")
-        parts.append(f'<collision name="deadfall_collision"><pose>{parts_pose}</pose><geometry>{geometry}</geometry></collision>')
-    elif kind == "cairn":
-        for level, radius in enumerate((0.45, 0.33, 0.22)):
-            solid(f"cairn_{level}", 0, 0, 0.2 + level * 0.3, sphere_geometry(radius), (0.52, 0.50, 0.46))
-    elif kind == "planter":
-        solid("planter_box", 0, 0, 0.35, box_geometry(1.2, 1.2, 0.7), (0.55, 0.52, 0.47))
-        solid("planter_shrub", 0, 0, 1.0, sphere_geometry(0.55), (0.25, 0.42, 0.20))
-    elif kind == "bollard":
-        solid("bollard", 0, 0, 0.5, cylinder_geometry(0.12, 1.0), (0.2, 0.2, 0.22))
-    elif kind == "cone":
-        solid("cone", 0, 0, 0.36, "<cone><radius>0.18</radius><length>0.72</length></cone>", (0.95, 0.42, 0.08))
-    elif kind == "bike_rack":
-        solid("bike_rack_rail", 0, 0, 0.75, box_geometry(2.0, 0.06, 0.06), (0.55, 0.57, 0.6))
-        for side in (-0.9, 0.9):
-            solid(f"bike_rack_post_{side:+.0f}", side, 0, 0.37, box_geometry(0.06, 0.06, 0.74), (0.55, 0.57, 0.6))
-    elif kind == "crate_stack":
-        solid("crate_low", 0, 0, 0.3, box_geometry(0.9, 0.7, 0.6), (0.62, 0.48, 0.30))
-        solid("crate_high", 0.1, 0.05, 0.85, box_geometry(0.7, 0.6, 0.5), (0.58, 0.44, 0.28))
-    else:
-        raise ValueError(f"unknown clutter {kind!r}")
-    return "".join(parts)
+def deadfall_mesh(name: str, x: float, y: float, z: float, yaw: float, *, length: float,
+                  radius: float = 0.25) -> SceneryMesh:
+    """A bark-textured fallen log along the item yaw, with one box proxy."""
+    mesh = LoftMesh()
+    dx, dy = rotate_xy(length / 2, 0.0, yaw)
+    mesh.add_tube([(x - dx, y - dy, z + radius), (x + dx, y + dy, z + radius)],
+                  [(radius, radius), (radius, radius)], segments=10, tile_m=0.45)
+    proxy = ProxyShape("box", (x, y, z + radius, 0.0, 0.0, yaw), (length, 2 * radius, 2 * radius))
+    return _mesh_piece(name, "bark", mesh, [proxy])
+
+
+def shrub_mesh(name: str, x: float, y: float, z: float, *, height: float, crown_radius: float,
+               base_radius: float, seed: int = 0) -> SceneryMesh:
+    """A dense bush: narrow base, wide irregular top, foliage-textured loft plus crown blobs.
+
+    Two cylinder proxies (narrow lower, wide upper) keep the collision budget cheap; a
+    follow-hiker occluder uses 4-5 m of height with a 0.5-0.9 m base and a 2-3 m crown.
+    """
+    rng = random.Random(seed)
+    mesh = LoftMesh()
+    sections = 7
+    points, radii = [], []
+    for index in range(sections):
+        t = index / (sections - 1)
+        blend = t * t * (3.0 - 2.0 * t)
+        radius = base_radius + (crown_radius - base_radius) * blend
+        radius *= 0.88 + 0.24 * rng.random()
+        points.append((x + (rng.random() - 0.5) * crown_radius * 0.12,
+                       y + (rng.random() - 0.5) * crown_radius * 0.12,
+                       z + 0.05 + (height - 0.05) * t))
+        radii.append((radius, radius * (0.85 + 0.3 * rng.random())))
+    mesh.add_tube(points, radii, segments=10, tile_m=0.6)
+    for _ in range(3):
+        blob = crown_radius * (0.30 + 0.18 * rng.random())
+        center_z = z + height * (0.50 + 0.30 * rng.random())
+        center_z = min(center_z, z + height - blob * 0.8)
+        mesh.add_ellipsoid((x + (rng.random() - 0.5) * crown_radius * 1.1,
+                            y + (rng.random() - 0.5) * crown_radius * 1.1, center_z),
+                           (blob, blob, blob * 0.8), segments=10, rings=4, tile_m=0.6)
+    # Wobbled rings can tilt; clamp every vertex into the declared envelope.
+    mesh.positions = [(px, py, min(max(pz, z), z + height)) for px, py, pz in mesh.positions]
+    proxies = [ProxyShape("cylinder", (x, y, z + height * 0.22, 0.0, 0.0, 0.0),
+                          (base_radius * 1.3, height * 0.45)),
+               ProxyShape("cylinder", (x, y, z + height * 0.72, 0.0, 0.0, 0.0),
+                          (crown_radius * 1.1, height * 0.6))]
+    return _mesh_piece(name, "foliage", mesh, proxies)
+
+
+def _stump_mesh(name: str, x: float, y: float, z: float, yaw: float, size: float) -> SceneryMesh:
+    mesh = LoftMesh()
+    mesh.add_tube([(x, y, z), (x, y, z + 0.42), (x, y, z + 0.6)],
+                  [(size, size), (size * 1.05, size * 1.05), (size * 0.92, size * 0.92)],
+                  segments=12, tile_m=0.4)
+    return _mesh_piece(name, "bark", mesh,
+                       [ProxyShape("cylinder", (x, y, z + 0.3, 0.0, 0.0, 0.0), (size, 0.6))])
+
+
+def _bollard_mesh(name: str, x: float, y: float, z: float, yaw: float, size: float) -> SceneryMesh:
+    mesh = LoftMesh()
+    radius = 0.12
+    mesh.add_tube([(x, y, z), (x, y, z + 0.9), (x, y, z + 0.97)],
+                  [(radius, radius), (radius * 1.05, radius * 1.05), (radius * 0.55, radius * 0.55)],
+                  segments=10, tile_m=0.5)
+    mesh.add_ellipsoid((x, y, z + 0.97), (radius * 0.55, radius * 0.55, radius * 0.55),
+                       segments=10, rings=3, tile_m=0.5)
+    return _mesh_piece(name, "metal_paint", mesh,
+                       [ProxyShape("cylinder", (x, y, z + 0.5, 0.0, 0.0, 0.0), (radius * 1.15, 1.0))])
+
+
+def _cone_mesh(name: str, x: float, y: float, z: float, yaw: float, size: float) -> SceneryMesh:
+    mesh = LoftMesh()
+    mesh.add_box((x, y, z + 0.015), (0.36, 0.36, 0.03), yaw=yaw, tile_m=0.36)
+    # The texture's reflective band sits at v 0.44-0.62; v spans the cone height once.
+    mesh.add_tube([(x, y, z + 0.03), (x, y, z + 0.40), (x, y, z + 0.72)],
+                  [(0.16, 0.16), (0.085, 0.085), (0.02, 0.02)], segments=12, tile_m=0.72)
+    return _mesh_piece(name, "traffic_cone", mesh,
+                       [ProxyShape("cylinder", (x, y, z + 0.38, 0.0, 0.0, 0.0), (0.19, 0.76))])
+
+
+def _bike_rack_mesh(name: str, x: float, y: float, z: float, yaw: float, size: float) -> SceneryMesh:
+    mesh = LoftMesh()
+    mesh.add_box((x, y, z + 0.75), (2.0, 0.06, 0.06), yaw=yaw, tile_m=1.0)
+    proxies = [ProxyShape("box", (x, y, z + 0.75, 0.0, 0.0, yaw), (2.0, 0.12, 0.12))]
+    for side in (-0.9, 0.9):
+        px, py = rotate_xy(side, 0.0, yaw)
+        mesh.add_box((x + px, y + py, z + 0.37), (0.06, 0.06, 0.74), yaw=yaw, tile_m=0.5)
+        proxies.append(ProxyShape("box", (x + px, y + py, z + 0.37, 0.0, 0.0, yaw),
+                                  (0.10, 0.10, 0.74)))
+    return _mesh_piece(name, "metal_paint", mesh, proxies)
+
+
+def _planter_meshes(name: str, x: float, y: float, z: float, yaw: float,
+                    size: float) -> list[SceneryMesh]:
+    box = LoftMesh()
+    box.add_box((x, y, z + 0.35), (1.2, 1.2, 0.7), yaw=yaw, tile_m=0.5)
+    box.add_box((x, y, z + 0.71), (1.24, 1.24, 0.06), yaw=yaw, tile_m=0.5)
+    shrub = shrub_mesh(f"{name}_shrub", x, y, z + 0.74, height=0.85, crown_radius=0.55,
+                       base_radius=0.3, seed=sum(map(ord, name)))
+    return [_mesh_piece(name, "rock", box,
+                        [ProxyShape("box", (x, y, z + 0.38, 0.0, 0.0, yaw), (1.3, 1.3, 0.76))]),
+            shrub]
+
+
+def _crate_stack_mesh(name: str, x: float, y: float, z: float, yaw: float,
+                      size: float) -> SceneryMesh:
+    mesh = LoftMesh()
+    mesh.add_box((x, y, z + 0.3), (0.9, 0.7, 0.6), yaw=yaw, tile_m=0.45)
+    dx, dy = rotate_xy(0.1, 0.05, yaw)
+    mesh.add_box((x + dx, y + dy, z + 0.85), (0.7, 0.6, 0.5), yaw=yaw + 0.35, tile_m=0.45)
+    proxies = [ProxyShape("box", (x, y, z + 0.3, 0.0, 0.0, yaw), (0.9, 0.7, 0.6)),
+               ProxyShape("box", (x + dx, y + dy, z + 0.85, 0.0, 0.0, yaw + 0.35), (0.7, 0.6, 0.5))]
+    return _mesh_piece(name, "wood_planks", mesh, proxies)
+
+
+def clutter_scenery(kind: str, items: list[dict]) -> tuple[list[SceneryInstance], list[SceneryMesh]]:
+    """Scenery pieces for sampled clutter items (placement stays in ``add_clutter``).
+
+    ``kind`` is ``"forest"`` or ``"urban"``; ``items`` are the ``{"name", "kind", "x", "y",
+    "yaw", "size", "z"}`` dicts from ``add_clutter``. Boulders and cairns become ``rock_a``
+    instances; the rest are textured loft meshes from ``scene_textures``.
+    """
+    if kind not in ("forest", "urban"):
+        raise ValueError(f"unknown clutter kind {kind!r}")
+    instances: list[SceneryInstance] = []
+    meshes: list[SceneryMesh] = []
+    for item in items:
+        name, x, y, yaw, size = item["name"], item["x"], item["y"], item["yaw"], item["size"]
+        z = float(item.get("z", 0.0))
+        ckind = item["kind"]
+        if ckind == "boulder":
+            instances.append(SceneryInstance("rock_a", x, y, z, yaw, scale=round(size / 0.7889, 4)))
+        elif ckind == "cairn":
+            scale = size / 0.5
+            for level, (rock_scale, lift) in enumerate(((0.65, 0.0), (0.48, 0.40), (0.34, 0.70))):
+                instances.append(SceneryInstance("rock_a", x, y, z + lift * scale,
+                                                 yaw + level * 0.7, scale=round(rock_scale * scale, 4)))
+        elif ckind == "stump":
+            meshes.append(_stump_mesh(name, x, y, z, yaw, size))
+        elif ckind == "deadfall":
+            meshes.append(deadfall_mesh(name, x, y, z, yaw, length=size * 2))
+        elif ckind == "bollard":
+            meshes.append(_bollard_mesh(name, x, y, z, yaw, size))
+        elif ckind == "cone":
+            meshes.append(_cone_mesh(name, x, y, z, yaw, size))
+        elif ckind == "bike_rack":
+            meshes.append(_bike_rack_mesh(name, x, y, z, yaw, size))
+        elif ckind == "planter":
+            meshes.extend(_planter_meshes(name, x, y, z, yaw, size))
+        elif ckind == "crate_stack":
+            meshes.append(_crate_stack_mesh(name, x, y, z, yaw, size))
+        else:
+            raise ValueError(f"unknown clutter {ckind!r}")
+    return instances, meshes
+
+
+def _tent_mesh(name: str, x: float, y: float, z: float, yaw: float, *, length: float = 2.8,
+               width: float = 1.8, height: float = 1.15) -> SceneryMesh:
+    """A ridge tent (two roof panels, two triangular ends) with a box proxy."""
+    mesh = LoftMesh()
+    half_l, half_w = length / 2, width / 2
+
+    def point(lx: float, ly: float, lz: float) -> tuple[float, float, float]:
+        dx, dy = rotate_xy(lx, ly, yaw)
+        return (x + dx, y + dy, z + lz)
+
+    slope = math.hypot(half_w, height)
+    for side in (1, -1):
+        outward = rotate_xy(0.0, float(side), yaw)
+        mesh.add_quad([point(-half_l, side * half_w, 0.0), point(half_l, side * half_w, 0.0),
+                       point(half_l, 0.0, height), point(-half_l, 0.0, height)],
+                      outward=(outward[0], outward[1], half_w), u_repeat=length, v_repeat=slope)
+    for end, outward in ((-half_l, (-1.0, 0.0)), (half_l, (1.0, 0.0))):
+        direction = rotate_xy(outward[0], outward[1], yaw)
+        mesh.add_triangle([point(end, -half_w, 0.0), point(end, half_w, 0.0),
+                           point(end, 0.0, height)], outward=(direction[0], direction[1], 0.2),
+                          u_repeat=width, v_repeat=height)
+    proxy = ProxyShape("box", (x, y, z + height / 2, 0.0, 0.0, yaw), (length, width, height))
+    return _mesh_piece(name, "tent_fabric", mesh, [proxy])
+
+
+def _picnic_table_mesh(name: str, x: float, y: float, z: float, yaw: float) -> SceneryMesh:
+    mesh = LoftMesh()
+    proxies: list[ProxyShape] = []
+
+    def box(lx: float, ly: float, lz: float, size: tuple[float, float, float]) -> None:
+        dx, dy = rotate_xy(lx, ly, yaw)
+        mesh.add_box((x + dx, y + dy, z + lz), size, yaw=yaw, tile_m=0.5)
+        proxies.append(ProxyShape("box", (x + dx, y + dy, z + lz, 0.0, 0.0, yaw), size))
+
+    box(0.0, 0.0, 0.75, (1.8, 0.8, 0.06))
+    for side in (-0.62, 0.62):
+        box(0.0, side, 0.45, (1.8, 0.28, 0.05))
+    for lx in (-0.7, 0.7):
+        box(lx, 0.0, 0.36, (0.08, 0.7, 0.72))
+    return _mesh_piece(name, "wood_planks", mesh, proxies)
+
+
+def camp_scenery(camp_xy: tuple[float, float], ground_z: float, *,
+                 seed: int) -> tuple[list[SceneryInstance], list[SceneryMesh]]:
+    """Camp dressing in world coordinates (positions match the historic primitive campsite).
+
+    Two ridge tents at ``(cx, cy +/- 1.1)``, a stone fire ring with a pit at ``(cx - 3.7,
+    cy + 0.1)`` and a picnic table at ``(cx + 4.1, cy + 1.0)``.
+    """
+    cx, cy = camp_xy
+    rng = random.Random(seed)
+    instances: list[SceneryInstance] = []
+    meshes: list[SceneryMesh] = []
+    for index, (oy, yaw) in enumerate(((-1.1, 0.0), (1.1, math.pi))):
+        meshes.append(_tent_mesh(f"camp_tent_{index + 1}", cx, cy + oy, ground_z, yaw,
+                                 length=round(rng.uniform(2.6, 3.0), 2)))
+    for index in range(9):
+        angle = 2.0 * math.pi * index / 9
+        instances.append(SceneryInstance("rock_a", cx - 3.7 + 0.78 * math.cos(angle),
+                                         cy + 0.1 + 0.78 * math.sin(angle), ground_z, angle,
+                                         scale=0.30))
+    pit = LoftMesh()
+    pit.add_tube([(cx - 3.7, cy + 0.1, ground_z + 0.02), (cx - 3.7, cy + 0.1, ground_z + 0.15)],
+                 [(0.45, 0.45), (0.42, 0.42)], segments=12, tile_m=0.5)
+    meshes.append(_mesh_piece("camp_fire_pit", "bark", pit,
+                              [ProxyShape("cylinder", (cx - 3.7, cy + 0.1, ground_z + 0.08,
+                                                       0.0, 0.0, 0.0), (0.45, 0.16))]))
+    meshes.append(_picnic_table_mesh("camp_table", cx + 4.1, cy + 1.0, ground_z, 0.0))
+    return instances, meshes
 
 
 # Sim-time disturbance schedule. Every event keeps the agent within its declared speed cap and

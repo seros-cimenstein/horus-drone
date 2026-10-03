@@ -1,0 +1,1 @@
+Written by sim/scripts/derive_procedural_airframe.py; wrapper mirroring horus_iris_outdoor.

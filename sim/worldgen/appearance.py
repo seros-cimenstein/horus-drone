@@ -69,8 +69,10 @@ BODIES = {
                  "source": "OpenRobotics Casual female v4 (CC0 1.0)"},
 }
 TORSO_FRACTION = 0.58  # HORUS's standing torso point (1.1 m) on the 1.9 m reference body
-# Seated primitive figure envelope: forward extent, half width, top.
-SITTING_ENVELOPE = {"forward_m": (-0.22, 0.46), "half_width_m": 0.22, "height_m": 1.17}
+# Measured bounds of the seated Rescue Randy mesh in the actor frame (faces +x): the legs
+# extend forward and the torso sits off the origin, so the box is asymmetric in both axes.
+# Used by ``Appearance.envelope("sitting")`` (x/y scale with width, top with stature).
+SITTING_ENVELOPE = {"x": (-0.500, 1.174), "y": (-0.777, 0.451), "height_m": 1.1997}
 
 
 @dataclass(frozen=True)
@@ -108,10 +110,12 @@ class Appearance:
             if any(kind == "backpack" for kind, _colour in self.accessories):
                 x0 = back * w - 0.18
             torso = height * TORSO_FRACTION
+            y0, y1 = -half, half
         elif posture == "sitting":
             env = SITTING_ENVELOPE
-            x0, x1 = env["forward_m"][0] * w, env["forward_m"][1] * s
-            half, top, torso = env["half_width_m"] * w, env["height_m"] * s, 0.7 * s
+            x0, x1 = env["x"][0] * w, env["x"][1] * w
+            y0, y1 = env["y"][0] * w, env["y"][1] * w
+            top, torso = env["height_m"] * s, 0.7 * s
         elif posture == "lying":
             # Face-down along the model y axis; depth is the body's front-to-back extent.
             half_length = height / 2
@@ -121,8 +125,8 @@ class Appearance:
                     "height_m": round(height, 3)}
         else:
             raise ValueError(f"unknown posture {posture!r}")
-        return {"x_min_m": round(x0, 3), "x_max_m": round(x1, 3), "y_min_m": round(-half, 3),
-                "y_max_m": round(half, 3), "top_z_m": round(top, 3), "torso_z_m": round(torso, 3),
+        return {"x_min_m": round(x0, 3), "x_max_m": round(x1, 3), "y_min_m": round(y0, 3),
+                "y_max_m": round(y1, 3), "top_z_m": round(top, 3), "torso_z_m": round(torso, 3),
                 "height_m": round(height, 3)}
 
     def manifest(self) -> dict:

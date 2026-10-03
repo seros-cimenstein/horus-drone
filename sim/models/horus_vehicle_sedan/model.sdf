@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="horus_vehicle_sedan">
+    <static>true</static>
+    <link name="link">
+      <visual name="sedan">
+        <pose>0.04 0 0.0065 0 0 0</pose>
+        <geometry><mesh><uri>model://horus_vehicle_sedan/meshes/Hybrid.obj</uri><scale>0.01 0.01 0.01</scale></mesh></geometry>
+      </visual>
+      <collision name="proxy_0_box">
+        <pose>0 0 0.7685 0 0 0</pose>
+        <geometry><box><size>4.6183 2.0124 1.537</size></box></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>

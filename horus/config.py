@@ -31,6 +31,12 @@ class ExecutorSettings:
     control_hz: float = 15.0
     command_ttl_s: float = 30.0
     max_speed_m_s: float = 1.0
+    # Altitude-gated cruise speed for open transit legs: the horizontal speed limit is
+    # ``cruise_speed_m_s`` while both the current altitude above home and the commanded target
+    # altitude are at/above ``cruise_min_altitude_m``, and ``max_speed_m_s`` anywhere below it.
+    # None (or 0) disables the gate and keeps every leg at ``max_speed_m_s``.
+    cruise_speed_m_s: float | None = None
+    cruise_min_altitude_m: float | None = None
     max_vertical_speed_m_s: float = 0.5
     max_distance_m: float = 8.0
     min_altitude_m: float = 0.5
@@ -124,6 +130,37 @@ class ExecutorSettings:
         ):
             raise ValueError("forward_tof_vertical_half_fov_deg must be between 0 and 45 degrees")
         object.__setattr__(self, "forward_tof_vertical_half_fov_deg", beam)
+
+        cruise_value = self.cruise_speed_m_s
+        if cruise_value is not None and (
+            isinstance(cruise_value, bool)
+            or not isinstance(cruise_value, (int, float))
+            or not math.isfinite(cruise_value)
+            or cruise_value < 0.0
+        ):
+            raise ValueError("cruise_speed_m_s must be a finite non-negative number or null")
+        cruise = None if cruise_value in (None, 0, 0.0) else float(cruise_value)
+        if cruise is None:
+            if self.cruise_min_altitude_m is not None:
+                raise ValueError("cruise_min_altitude_m requires cruise_speed_m_s")
+        else:
+            if cruise <= self.max_speed_m_s:
+                raise ValueError("cruise_speed_m_s must exceed max_speed_m_s")
+            gate_value = self.cruise_min_altitude_m
+            if (
+                gate_value is None
+                or isinstance(gate_value, bool)
+                or not isinstance(gate_value, (int, float))
+                or not math.isfinite(gate_value)
+            ):
+                raise ValueError("cruise_speed_m_s requires a finite cruise_min_altitude_m")
+            gate = float(gate_value)
+            if not self.min_altitude_m <= gate <= self.max_altitude_m:
+                raise ValueError(
+                    "cruise_min_altitude_m must lie within [min_altitude_m, max_altitude_m]"
+                )
+            object.__setattr__(self, "cruise_min_altitude_m", gate)
+        object.__setattr__(self, "cruise_speed_m_s", cruise)
 
         polygon = self.geofence_polygon_ned
         if polygon is None:
