@@ -47,6 +47,17 @@ class ExecutorSettings:
     target_match_threshold: float = 0.72
     camera_horizontal_fov_deg: float = 114.59155902616465
     default_gimbal_pitch_deg: float = 0.0
+    # Ground-plane monocular range: the ray through the box's ground-contact row is intersected
+    # with the ground plane. Below this ray depression a small camera-pitch error dominates the
+    # intersection, so the estimate is refused instead of returned (10 deg keeps it bounded).
+    min_ground_range_depression_deg: float = 10.0
+    # The payload's forward lidars (sim/models/horus_sensor_payload/model.sdf) are single-ray
+    # beams mounted level with the airframe: zero vertical field of view, so they only measure
+    # what sits on the vehicle's horizontal plane at flight altitude. A target whose ray leaves
+    # that plane by more than this half-angle (0 deg plus a margin for attitude jitter) must not
+    # use the forward ToF: outdoors at -45 deg gimbal pitch the beam flies over the person and
+    # returns whatever is behind it.
+    forward_tof_vertical_half_fov_deg: float = 5.0
     link_loss_rth_delay_s: float = 30.0
     # Wall-clock freshness limit for pose, heading, forward-ToF and camera-frame samples driving
     # motion. Real flight keeps the default; the flight link requests the control messages at
@@ -85,6 +96,34 @@ class ExecutorSettings:
                 "default_gimbal_pitch_deg must be between -90 and 45 degrees"
             )
         object.__setattr__(self, "default_gimbal_pitch_deg", pitch)
+        depression_value = self.min_ground_range_depression_deg
+        try:
+            depression = float(depression_value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "min_ground_range_depression_deg must be between 0 and 90 degrees"
+            ) from exc
+        if (
+            isinstance(depression_value, bool)
+            or not math.isfinite(depression)
+            or not 0.0 < depression < 90.0
+        ):
+            raise ValueError("min_ground_range_depression_deg must be between 0 and 90 degrees")
+        object.__setattr__(self, "min_ground_range_depression_deg", depression)
+        beam_value = self.forward_tof_vertical_half_fov_deg
+        try:
+            beam = float(beam_value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "forward_tof_vertical_half_fov_deg must be between 0 and 45 degrees"
+            ) from exc
+        if (
+            isinstance(beam_value, bool)
+            or not math.isfinite(beam)
+            or not 0.0 <= beam <= 45.0
+        ):
+            raise ValueError("forward_tof_vertical_half_fov_deg must be between 0 and 45 degrees")
+        object.__setattr__(self, "forward_tof_vertical_half_fov_deg", beam)
 
         polygon = self.geofence_polygon_ned
         if polygon is None:

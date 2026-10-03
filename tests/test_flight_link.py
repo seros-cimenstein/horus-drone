@@ -243,6 +243,29 @@ def test_system_time_exposes_sitl_boot_clock():
     assert link.telemetry().as_dict()["time_boot_ms"] == 12345
 
 
+def test_downward_rangefinder_is_exposed_as_ground_distance():
+    link = MavlinkFlightLink(FlightSettings(), connection=FakeConnection())
+
+    link._consume(
+        SimpleNamespace(
+            get_type=lambda: "DISTANCE_SENSOR",
+            current_distance=615,
+            min_distance=10,
+            max_distance=4000,
+            orientation=25,
+        )
+    )
+
+    telemetry = link.telemetry()
+
+    # Orientation 25 is the downward rangefinder, not a horizontal proximity sector.
+    assert telemetry.proximity == ()
+    assert telemetry.ground_distance is not None
+    assert telemetry.ground_distance.distance_m == pytest.approx(6.15)
+    assert telemetry.ground_distance.orientation == 25
+    assert telemetry.as_dict()["ground_distance"]["distance_m"] == pytest.approx(6.15)
+
+
 def test_heading_and_range_ages_are_not_refreshed_by_other_telemetry(monkeypatch):
     clock = [100.0]
     monkeypatch.setattr(time, "monotonic", lambda: clock[0])

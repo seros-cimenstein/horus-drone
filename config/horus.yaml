@@ -43,6 +43,14 @@ executor:
   target_match_threshold: 0.72
   camera_horizontal_fov_deg: 114.59155902616465
   default_gimbal_pitch_deg: 0.0
+  # The payload's forward lidars are single-ray beams level with the airframe (zero vertical FOV,
+  # sim/models/horus_sensor_payload/model.sdf), so they only measure what sits on the flight
+  # plane; a target whose ray leaves it by more than this half-angle skips the forward ToF and
+  # lets the ground-plane estimate decide.
+  forward_tof_vertical_half_fov_deg: 5.0
+  # Ground-plane monocular range: rays shallower than this depression are refused (a small
+  # camera-pitch error dominates the ground intersection there).
+  min_ground_range_depression_deg: 10.0
   link_loss_rth_delay_s: 30.0
   # Wall-clock freshness limit for pose/heading/range/frame samples that drive motion; the flight
   # link requests the control messages at 20 Hz autopilot time so this holds at low sim RTF.
