@@ -670,9 +670,15 @@ class PerceptionSystem:
             # Propellers and other configured regions are never targets.
             if self.ignore_regions and _bbox_in_ignore_region(item.bbox, width, height, self.ignore_regions):
                 continue
-            label = item.label.strip() if item.label else ""
-            if not label:
-                label = vocabulary[0]
+            span = item.label.strip() if item.label else ""
+            # The grounder returns the matched text span: with a multi-phrase vocabulary it
+            # repeats the term ("person person person") or is a fragment of it ("ground" from
+            # "person lying on the ground"). Collapse it onto the configured term, which names
+            # the seed for selection and display; the raw span stays on the candidate row so the
+            # commander can see what the grounder actually matched. A grounder label never
+            # grants person evidence by itself (the executor keeps refusing person-height range
+            # for an open-vocabulary-only target; pass target_size_m for a prone target).
+            label = _matched_vocabulary_term(span, vocabulary) or span or vocabulary[0]
             try:
                 compensator = BoxCompensator(item.bbox, self.buffer.frames_after(frame_id)[0])
             except (StaleFrameError, RuntimeError, ValueError):
@@ -708,6 +714,7 @@ class PerceptionSystem:
                         label=label,
                         confidence=item.confidence,
                         source="open_vocab",
+                        attributes={"grounder_span": span} if span else None,
                     )
                 except (RuntimeError, ValueError):
                     return None
@@ -725,6 +732,7 @@ class PerceptionSystem:
                     f"Open-vocabulary object detected: {label}",
                     id=candidate.id,
                     label=label,
+                    span=span or label,
                     score=candidate.confidence,
                 )
         with self._lock:
@@ -1099,6 +1107,26 @@ def _normalize_vocabulary(terms: Sequence[str]) -> tuple[str, ...]:
     if len(normalized) > 16:
         raise ValueError("vocabulary may contain at most 16 distinct terms")
     return tuple(normalized)
+
+
+def _matched_vocabulary_term(span: str, vocabulary: Sequence[str]) -> str | None:
+    """Map a grounder span onto the configured term it came from, or ``None``.
+
+    The grounder returns the matched text span, which with a multi-phrase vocabulary can repeat
+    the term ("person person person") or be a fragment of it ("ground" from "person lying on the
+    ground"). Content tokens (longer than three characters) are compared and the term sharing
+    the most of them wins; ties go to the earlier vocabulary term.
+    """
+    span_tokens = {token for token in span.casefold().split() if len(token) > 3}
+    if not span_tokens:
+        return None
+    best: tuple[int, int, str] | None = None
+    for index, term in enumerate(vocabulary):
+        term_tokens = {token for token in term.casefold().split() if len(token) > 3}
+        shared = len(span_tokens & term_tokens)
+        if shared and (best is None or shared > best[0]):
+            best = (shared, -index, term)
+    return None if best is None else best[2]
 
 
 _SEED_DEDUPE_OVERLAP = 0.5
