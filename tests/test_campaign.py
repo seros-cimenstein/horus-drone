@@ -697,6 +697,82 @@ def test_skipped_hazard_trials_are_not_counted_as_product_attempts():
     assert "| urban | hazard invalid trials skipped | 1 |" in report
 
 
+def test_grounder_status_is_aggregated_and_rendered_per_kind():
+    episodes = [
+        {
+            "kind": "forest", "seed": 1, "world": "horus_forest_p1", "status": "passed", "tests": {},
+            "grounder": {"active": True, "model": "grounding-dino-tiny", "detail": "health probe ok"},
+        },
+        {
+            "kind": "forest", "seed": 2, "world": "horus_forest_p2", "status": "passed", "tests": {},
+            "grounder": {"active": False, "model": None, "detail": "URLError: connection refused"},
+        },
+        {
+            "kind": "urban", "seed": 3, "world": "horus_urban_p1", "status": "passed", "tests": {},
+            "grounder": {"active": True, "model": "grounding-dino-tiny", "detail": "health probe ok"},
+        },
+    ]
+
+    aggregate = aggregate_campaign(episodes)
+
+    assert aggregate["by_kind"]["forest"]["metrics"]["grounder"] == {
+        "active": 1, "total": 2, "models": ["grounding-dino-tiny"],
+    }
+    assert aggregate["by_kind"]["urban"]["metrics"]["grounder"] == {
+        "active": 1, "total": 1, "models": ["grounding-dino-tiny"],
+    }
+    report = render_summary_markdown({
+        "episode_count": len(episodes), "episodes": episodes, "aggregate": aggregate,
+    })
+    assert "Grounder: 2/3 episodes active (grounding-dino-tiny)" in report
+    assert "| forest | grounder active episodes | 1/2 (grounding-dino-tiny) |" in report
+    assert "| urban | grounder active episodes | 1/1 (grounding-dino-tiny) |" in report
+    assert "Grounder: not recorded" in render_summary_markdown({
+        "episode_count": 1, "episodes": [{"kind": "forest", "seed": 9}],
+        "aggregate": aggregate_campaign([{"kind": "forest", "seed": 9}]),
+    })
+
+
+def test_probe_grounder_never_raises_and_reports_health():
+    import json
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from sim.scripts.campaign_episode import probe_grounder
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = json.dumps({"ok": True, "model": "grounding-dino-tiny"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status = probe_grounder(f"http://127.0.0.1:{server.server_port}/health")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5.0)
+
+    assert status["active"] is True and status["model"] == "grounding-dino-tiny"
+    assert status["detail"]
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    absent = probe_grounder(f"http://127.0.0.1:{port}/health", timeout_s=0.5)
+    assert absent["active"] is False and absent["model"] is None and absent["detail"]
+
+
 def test_camera_pose_aggregates_measured_per_vantage_samples_and_renders_summary():
     episode = {
         "kind": "urban",
@@ -978,3 +1054,33 @@ def test_hazard_trial_searches_for_a_real_collision_course():
     assert result["passed"] is False and result["status"] == "skipped"
     assert result["reason"].startswith("no static obstacle offers a collision course")
     assert result["obstacles_considered"] == ["tree_low"]
+
+
+def test_grounder_status_counts_a_late_service_as_active():
+    # The start probe runs before the service has loaded and can be refused; the episode must
+    # still report the grounder as active when the end probe answers.
+    from sim.scripts.campaign_episode import _grounder_status
+
+    refused = {"active": False, "model": None, "detail": "URLError: connection refused"}
+    active = {"active": True, "model": "IDEA-Research/grounding-dino-tiny", "detail": None}
+
+    merged = _grounder_status(refused, active)
+    assert merged["active"] is True and merged["model"] == "IDEA-Research/grounding-dino-tiny"
+    assert merged["detail"] is None and merged["start"] == refused and merged["end"] == active
+
+    merged = _grounder_status(active, refused)
+    assert merged["active"] is True and merged["model"] == "IDEA-Research/grounding-dino-tiny"
+
+    merged = _grounder_status(refused, refused)
+    assert merged["active"] is False and "connection refused" in merged["detail"]
+    assert merged["decided_by"] == ["no_signal"]
+
+    # The MCP pipeline's own status decides when both probes missed a service that was serving.
+    merged = _grounder_status(refused, refused, {"status": "ok", "model": "IDEA-Research/grounding-dino-tiny"})
+    assert merged["active"] is True and merged["decided_by"] == ["mcp_pipeline"]
+    assert merged["model"] == "IDEA-Research/grounding-dino-tiny"
+
+    # Observed open-vocabulary candidates are evidence the service answered during the episode.
+    merged = _grounder_status(refused, refused, {"status": "unavailable"}, open_vocab_candidates=7)
+    assert merged["active"] is True and merged["decided_by"] == ["open_vocab_candidates"]
+    assert merged["open_vocab_candidates"] == 7
