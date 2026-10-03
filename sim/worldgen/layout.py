@@ -141,11 +141,15 @@ class ForestLayout:
     attempts: int = 1
     follow_occluder_radius_m: float = 1.8
     follow_occluder_height_m: float = 2.3
+    # A prone casualty in the open: the approach test targets a lying person, and a person under
+    # a canopy (the missing hiker) is not observable from the transit-altitude vantages.
+    casualty: PersonPlacement | None = None
 
     @property
     def people(self) -> tuple[PersonPlacement, ...]:
         return (*self.hiker_routes, *self.ranger_routes, *self.family_positions,
-                self.missing_hiker, self.injured_person, self.follow_hiker)
+                self.missing_hiker, self.injured_person, self.follow_hiker,
+                *((self.casualty,) if self.casualty is not None else ()))
 
 
 @dataclass(frozen=True)
@@ -285,6 +289,8 @@ def canonical_forest_layout(seed: int = 2027) -> ForestLayout:
         # score. (13, -43) sat under tree_conifer_canopy_collision_163 with no clear descent.
         injured_person=_person("civ_injured_01", "injured", "person_sitting",
                                (-6.0, 30.0), 1.2),
+        casualty=_person("civ_casualty_01", "casualty", "person_laying_kinematic",
+                         (-9.5, 33.5), 2.4),
         hiker_routes=hiker_routes, ranger_routes=ranger, family_positions=family,
         follow_hiker=_person("civ_hiker_04", "hiker", "person_green_kinematic",
                              follow_route[0], 0.5, "route", "follow_hiker",
@@ -367,7 +373,8 @@ CLEARING_SCAN_ALTITUDE_M = 10.0
 CLEARING_SCAN_MARGIN_M = 3.0
 # People the forest planner must frame from a vantage: no canopy may cover their descent
 # column, and every walker route keeps body clearance from canopy envelopes.
-FOREST_VANTAGE_ROLES = ("missing_hiker", "injured")
+# Roles whose descent column must stay canopy-free: each needs a vantage the planner can use.
+FOREST_VANTAGE_ROLES = ("missing_hiker", "injured", "casualty")
 
 
 def clearing_scan_rectangle(centre: Point, clearing_radius: float) -> tuple[float, float, float]:
@@ -595,6 +602,12 @@ def sample_forest_layout(seed: int, *,
         # The injured hiker rests in the open clearing so the campaign's scan test has a person
         # of interest inside its rectangle (an empty meadow can never score detection coverage).
         injured_xy = (clear[0] + rng.uniform(-3.5, 3.5), clear[1] + rng.uniform(-3.5, 3.5))
+        # A prone casualty in the same tree-free meadow keeps the approach test's lying target
+        # observable (the missing hiker is deliberately hidden under its own canopy).
+        casualty_angle = rng.uniform(-math.pi, math.pi)
+        casualty_distance = rng.uniform(4.0, 8.0)
+        casualty_xy = (injured_xy[0] + casualty_distance * math.cos(casualty_angle),
+                       injured_xy[1] + casualty_distance * math.sin(casualty_angle))
         # Route users follow compact trail segments and stay inside the geofence.
         hiker_segments = []
         for index, speed in enumerate((1.25, 1.0, 1.15), start=1):
@@ -625,6 +638,8 @@ def sample_forest_layout(seed: int, *,
                           missing_xy, rng.uniform(-math.pi, math.pi))
         injured = _person("civ_injured_01", "injured", "person_sitting",
                           injured_xy, rng.uniform(-math.pi, math.pi))
+        casualty = _person("civ_casualty_01", "casualty", "person_laying_kinematic",
+                           casualty_xy, rng.uniform(-math.pi, math.pi))
         layout = ForestLayout(
             seed, False, trail, creek, clear, rng.uniform(13, 19), camp, missing,
             canopy_xy, injured, tuple(hiker_segments),
@@ -640,7 +655,7 @@ def sample_forest_layout(seed: int, *,
             (rng.uniform(0.035, 0.05), rng.uniform(0.03, 0.045),
              rng.uniform(0.07, 0.095), rng.uniform(0.045, 0.065),
              rng.uniform(0.012, 0.025)), attempt,
-            follow_occluder_radius_m=1.6, follow_occluder_height_m=4.0)
+            follow_occluder_radius_m=1.6, follow_occluder_height_m=4.0, casualty=casualty)
         # The missing hiker's canopy tree is placed outside the tree loop; reject layouts
         # where its canopy would hang over the clearing scan corridor.
         canopy_h = max(8.0, min(22.0, (canopy_xy[0] + canopy_xy[1]) % 14 + 8.0))

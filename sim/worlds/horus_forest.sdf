@@ -27,6 +27,7 @@
 <include><uri>model://person_laying_kinematic</uri><name>civ_missing_hiker_01</name><pose>-42 20 0.7019 0 0 0.4</pose></include>
 <include><uri>model://person_sitting</uri><name>civ_injured_01</name><pose>-6 30 0.5765 0 0 1.2</pose></include>
 <include><uri>model://person_green_kinematic</uri><name>civ_hiker_04</name><pose>-16 -18 0.4922 0 0 0.5</pose></include>
+<include><uri>model://person_laying_kinematic</uri><name>civ_casualty_01</name><pose>-9.5 33.5 0.5624 0 0 2.4</pose></include>
 <model name="home_apriltag_pad">
       <static>true</static><pose>0 0 0 0 0 0</pose>
       <link name="pad">

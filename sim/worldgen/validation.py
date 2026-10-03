@@ -19,9 +19,13 @@ from typing import Any
 from sim.worldgen.geometry import CollisionWorld, load_collisions
 from sim.worldgen.paths import FilletedPath
 from sim.worldgen.plan import (
-    Camera, Ground, cruise_legs, legs_clearance, person_point, plan_follow, plan_vantage,
+    Camera, Ground, column_clearance, cruise_legs, legs_clearance, person_point, plan_follow,
+    plan_vantage,
 )
 
+# The campaign's posture-targeted tests need a target the detector can actually see; recall is
+# good inside roughly this slant band, so a planned vantage beyond it is not an observable target.
+OBSERVABLE_SLANT_MAX_M = 12.0
 STANDING_CLEARANCE_M = 0.1
 VEHICLE_CLEARANCE_M = 0.3
 ANIMAL_CLEARANCE_M = 0.05
@@ -432,7 +436,9 @@ def world_report(world: CollisionWorld, ground: Ground, manifest: dict[str, Any]
                 failures.append(f"{other['model']} may also read {sorted(target_reads)} at the follow stage")
 
     kind = manifest["kind"]
-    roles = ("missing_hiker", "injured") if kind == "forest" else ("red_shirt", "collapsed")
+    from sim.worldgen.layout import FOREST_VANTAGE_ROLES
+
+    roles = FOREST_VANTAGE_ROLES if kind == "forest" else ("red_shirt", "collapsed")
     for index, role in enumerate(roles):
         person = next((p for p in manifest["people"] if p["role"] == role), None)
         if person is None:
@@ -447,4 +453,31 @@ def world_report(world: CollisionWorld, ground: Ground, manifest: dict[str, Any]
         legs = cruise_legs((0.0, 0.0, 0.0), vantage.eye, vantage.heading_deg, transit)
         if legs_clearance(world, (0.0, 0.0, 3.5), legs) < 1.5:
             failures.append(f"transit to {person['model']} vantage is unsafe")
+
+    # The posture-targeted tests (approach, orbit) need a prone target they can see: they take
+    # the first available posture (lying, then sitting), so that posture must have at least one
+    # person with open sky above them and a planned vantage inside the good-slant band. The
+    # canopy-hidden missing hiker stays in the world for the search mission but cannot be the
+    # only lying person.
+    for posture in ("lying", "sitting"):
+        candidates = [person for person in manifest.get("people", [])
+                      if person.get("posture") == posture]
+        if not candidates:
+            continue
+        observable: list[str] = []
+        for person in candidates:
+            point = person_point(person, ground, posture)
+            column = column_clearance(world, point[0], point[1], point[2] + 0.5, transit, 0.6)
+            if column < 2.0:
+                continue
+            vantage = plan_vantage(world, ground, camera, person["model"], point,
+                                   random.Random(manifest["seed"] * 31 + len(observable)),
+                                   transit_alt=transit)
+            if vantage is None or vantage.slant_m > OBSERVABLE_SLANT_MAX_M:
+                continue
+            observable.append(person["model"])
+        if not observable:
+            failures.append(f"no observable {posture} person (clear sky and a vantage within "
+                            f"{OBSERVABLE_SLANT_MAX_M:g} m slant)")
+        break  # only the first available posture is what the posture-targeted tests pick
     return {"failures": failures, "occlusion_s": plan.occluded_s, "clearances": clearances}
