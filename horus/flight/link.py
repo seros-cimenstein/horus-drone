@@ -104,6 +104,8 @@ class Telemetry:
     attitude_updated_monotonic: float | None = None
     # Monotonic receive time of the latest SYSTEM_TIME (``time_boot_ms`` is autopilot/SITL time).
     time_boot_updated_monotonic: float | None = None
+    # Downward rangefinder reading (DISTANCE_SENSOR orientation 25): height above ground.
+    ground_distance: DistanceSensor | None = None
 
     def as_dict(self, now: float | None = None) -> dict[str, Any]:
         monotonic = time.monotonic() if now is None else now
@@ -127,6 +129,7 @@ class Telemetry:
             "battery_voltage_v": self.battery_voltage_v,
             "heading_deg": self.heading_deg,
             "proximity": [asdict(sensor) for sensor in self.proximity],
+            "ground_distance": None if self.ground_distance is None else asdict(self.ground_distance),
             # Status text is deliberately an untrusted quoted value at API boundaries.
             "statustext": list(self.statustext),
             "heartbeat_age_s": (
@@ -173,6 +176,7 @@ class MavlinkFlightLink:
         self._proximity: dict[int, DistanceSensor] = {}
         self._statustext: list[str] = []
         self._mount_status: MountStatus | None = None
+        self._ground_distance: DistanceSensor | None = None
         self._last_received_monotonic = time.monotonic()
         self._last_observed_at = datetime.now(timezone.utc).isoformat()
 
@@ -370,6 +374,12 @@ class MavlinkFlightLink:
                     self._proximity[orientation] = DistanceSensor(
                         orientation, current, minimum, maximum, self._last_observed_at, now
                     )
+                elif orientation == 25 and minimum <= current <= maximum:
+                    # Downward rangefinder (RNGFND1_ORIENT 25): the measured height above ground
+                    # used by the ground-plane monocular range estimate.
+                    self._ground_distance = DistanceSensor(
+                        orientation, current, minimum, maximum, self._last_observed_at, now
+                    )
             elif kind == "MOUNT_STATUS":
                 self._mount_status = MountStatus(
                     int(message.target_system),
@@ -425,6 +435,7 @@ class MavlinkFlightLink:
                 self._vehicle_pitch_deg,
                 self._attitude_updated_monotonic,
                 self._time_boot_updated_monotonic,
+                self._ground_distance,
             )
 
     def heartbeat_ok(self, max_age_s: float = 3.0) -> bool:

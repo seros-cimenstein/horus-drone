@@ -763,6 +763,56 @@ def test_approach_ranges_non_person_from_forward_tof_when_centered():
     executor.close()
 
 
+def test_forward_tof_is_skipped_when_the_beam_misses_the_target_outdoors():
+    # Outdoor geometry: -45 deg gimbal, 6.15 m up, the target ~5 m ahead and far below the beam.
+    # A fresh forward reading (a trunk on the flight plane) must not be used for the target.
+    box = _logged_approach_box(horizontal_m=4.97, altitude_m=6.15)
+    flight = FakeFlight(Pose(0.0, 0.0, 6.15))
+    flight._telemetry.proximity = (_front_tof(3.0),)
+    executor = HorusExecutor(
+        flight,
+        _settings(
+            camera_horizontal_fov_deg=84.0,
+            target_height_m=1.9,
+            default_gimbal_pitch_deg=-45.0,
+            max_distance_m=20.0,
+        ),
+        perception=_LoggedGeometryTarget(box),
+        autostart=False,
+    )
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 2.0}, ttl_s=5.0)["task_id"]
+
+    for _ in range(4):
+        executor.tick()
+
+    tracking = executor.get_task_status(task_id)["tracking"]
+    assert tracking["range_source"] == "ground_plane"
+    assert tracking["range_m"] > 5.0  # not the 3.24 m beam reading
+    executor.close()
+
+
+def test_forward_tof_is_used_for_a_level_target_indoors():
+    # Indoors the gimbal is level and the vehicle flies near person height, so the single-ray
+    # beam and the target ray coincide and the measured range stays the first choice.
+    flight = FakeFlight(Pose(0.0, 0.0, 2.0))
+    flight._telemetry.proximity = (_front_tof(3.0),)
+    executor = HorusExecutor(
+        flight,
+        _settings(camera_horizontal_fov_deg=84.0, target_height_m=1.9, default_gimbal_pitch_deg=0.0),
+        perception=_LoggedGeometryTarget([300, 200, 330, 280], class_name="chair", class_id=None),
+        autostart=False,
+    )
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 1.0}, ttl_s=5.0)["task_id"]
+
+    for _ in range(4):
+        executor.tick()
+
+    tracking = executor.get_task_status(task_id)["tracking"]
+    assert tracking["range_source"] == "forward_tof"
+    assert tracking["range_m"] == 3.24
+    executor.close()
+
+
 def test_approach_yaws_before_translating_when_target_is_off_center():
     flight = FakeFlight()
     flight._telemetry.proximity = (_front_tof(),)
@@ -940,6 +990,86 @@ def test_target_skill_reports_an_appearance_mismatch_as_its_own_cause():
     executor.close()
 
 
+def test_approach_completes_at_the_standoff_and_does_not_chase():
+    # One-shot by design: the skill closes to the commanded standoff and then holds; it never
+    # keeps station on a target that walks away afterwards (the campaign must assert the minimum
+    # range reached plus task completion, not the final range).
+    target = _IntermittentTarget()
+    flight = FakeFlight()
+    executor = HorusExecutor(flight, _settings(), perception=target, autostart=False)
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 5.0}, ttl_s=5.0)["task_id"]
+
+    executor.tick()
+
+    status = executor.get_task_status(task_id)
+    assert status["status"] == "succeeded"
+    assert flight.commands[-1] == ("hold",)
+
+    # The target keeps moving after the standoff: no new motion commands are issued.
+    target.candidate = {**_INTERMITTENT_CANDIDATE, "id": 9, "bbox": [200, 10, 230, 60]}
+    executor.tick()
+
+    assert executor.get_task_status(task_id)["status"] == "succeeded"
+    assert not [
+        command for command in flight.commands
+        if command[0] == "velocity" and (command[1], command[2]) != (0.0, 0.0)
+    ]
+    executor.close()
+
+
+class _OrbitTarget:
+    """Perception double: a validated person 8 m out and 20 deg right of the heading."""
+
+    def __init__(self, bearing_rad: float = math.radians(20.0), distance_m: float = 8.0):
+        self.bearing_rad = bearing_rad
+        self.distance_m = distance_m
+
+    def validate_candidate(self, candidate_id):
+        return {
+            "id": candidate_id,
+            "bbox": [400, 100, 440, 220],
+            "frame_width": 640,
+            "class_name": "person",
+            "class_id": 0,
+            "bearing_rad": self.bearing_rad,
+            "distance_m": self.distance_m,
+            "confidence": 0.9,
+        }
+
+
+def test_orbit_faces_the_target_while_circling():
+    # Koko orbit trials: the vehicle translated without yawing, so the target left the camera's
+    # field of view, was lost, and the orbit held one circle point (a -0.5 deg heading sweep).
+    # The orbit must keep the person framed like follow and approach do.
+    flight = FakeFlight()
+    executor = HorusExecutor(
+        flight,
+        _settings(camera_horizontal_fov_deg=84.0),
+        perception=_OrbitTarget(),
+        autostart=False,
+    )
+    task_id = executor.submit_skill("orbit", {"id": 7, "radius_m": 6.0}, ttl_s=5.0)["task_id"]
+
+    for _ in range(4):
+        executor.tick()
+
+    motion = [
+        command for command in flight.commands
+        if command[0] == "velocity" and (command[1], command[2]) != (0.0, 0.0)
+    ]
+    assert motion
+    north, east, _down, yaw = motion[-1][1:5]
+    assert math.isclose(yaw, 20.0, abs_tol=1e-6)
+    # Radial component toward the target (8 m out vs a 6 m radius) plus a tangential component.
+    bearing = math.radians(20.0)
+    radial = north * math.cos(bearing) + east * math.sin(bearing)
+    tangent = -north * math.sin(bearing) + east * math.cos(bearing)
+    assert radial > 0.0
+    assert abs(tangent) > 0.2
+    assert executor.get_task_status(task_id)["status"] == "running"
+    executor.close()
+
+
 def test_target_skill_hold_is_bounded_by_the_task_ttl_when_the_target_never_returns():
     target = _IntermittentTarget()
     flight = FakeFlight()
@@ -1078,6 +1208,410 @@ def test_approach_refuses_a_mislabeled_target_without_person_evidence():
         if command[0] == "velocity" and (command[1], command[2]) != (0.0, 0.0)
     ]
     executor.close()
+
+
+class _GrounderPersonSeed:
+    """An open-vocabulary person seed; the detector has not labelled it person."""
+
+    def __init__(self, *, detector_evidence: bool = False):
+        self.detector_evidence = detector_evidence
+
+    def validate_candidate(self, candidate_id):
+        candidate = {
+            "id": candidate_id,
+            "bbox": [330, 100, 370, 236],
+            "frame_width": 640,
+            "class_name": "person" if self.detector_evidence else "person lying on the ground",
+            "class_id": None,
+            "source": "open_vocab",
+            "confidence": 0.42,
+        }
+        if self.detector_evidence:
+            candidate["person_evidence"] = True
+        return candidate
+
+
+def test_grounder_seed_ranges_from_the_ground_plane_without_a_declared_size():
+    # The round-2 rule still holds for the *person-height* source (see the test below), but the
+    # ground-plane estimate is a geometric measurement of where the object is, so it does not
+    # need to know the target is a person: a grounder-only person seed with the camera geometry
+    # available ranges normally instead of refusing.
+    box = _logged_approach_box(horizontal_m=4.97, altitude_m=6.15)
+    flight = FakeFlight(Pose(0.0, 0.0, 6.15))
+    executor = HorusExecutor(
+        flight,
+        _settings(
+            camera_horizontal_fov_deg=84.0,
+            target_height_m=1.9,
+            default_gimbal_pitch_deg=-45.0,
+            max_distance_m=20.0,
+        ),
+        perception=_LoggedGeometryTarget(box, class_name="person lying on the ground", class_id=None),
+        autostart=False,
+    )
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 2.0}, ttl_s=5.0)["task_id"]
+
+    for _ in range(4):
+        executor.tick()
+
+    tracking = executor.get_task_status(task_id)["tracking"]
+    assert tracking["range_source"] == "ground_plane"
+    executor.close()
+
+
+def test_approach_refuses_person_height_for_a_grounder_only_person_seed():
+    # A text-grounding seed is a guess: ranged from the 1.7 m person height, a false seed would
+    # fly closer than the commanded standoff, and a prone body's box is not 1.7 m tall anyway.
+    # (This fixture carries no frame size, so the ground-plane source is unavailable and the
+    # person-height refusal is what is asserted; see the test above for the geometric source.)
+    flight = FakeFlight()
+    executor = HorusExecutor(
+        flight,
+        _settings(camera_horizontal_fov_deg=90.0, target_height_m=1.7),
+        perception=_GrounderPersonSeed(),
+        autostart=False,
+    )
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 1.0}, ttl_s=5.0)["task_id"]
+
+    executor.tick()
+
+    status = executor.get_task_status(task_id)
+    assert status["status"] == "failed"
+    assert "calibrated target range" in status["error"]
+    assert "person lying on the ground" in status["error"]
+    assert "target_size_m" in status["error"]
+    assert not [
+        command for command in flight.commands
+        if command[0] == "velocity" and (command[1], command[2]) != (0.0, 0.0)
+    ]
+    executor.close()
+
+
+def test_approach_uses_the_declared_target_size_for_a_grounder_person_seed():
+    flight = FakeFlight()
+    executor = HorusExecutor(
+        flight,
+        _settings(camera_horizontal_fov_deg=90.0, target_height_m=1.7),
+        perception=_GrounderPersonSeed(),
+        autostart=False,
+    )
+    task_id = executor.submit_skill(
+        "approach", {"id": 7, "dist_m": 1.0, "target_size_m": 0.4}, ttl_s=5.0
+    )["task_id"]
+
+    executor.tick()
+
+    tracking = executor.get_task_status(task_id)["tracking"]
+    assert tracking["range_source"] == "target_size"
+    assert math.isclose(tracking["range_m"], 0.4 * 320.0 / 136.0, rel_tol=1e-6)
+    executor.close()
+
+
+def test_approach_uses_person_height_once_the_detector_labels_a_grounder_seed():
+    flight = FakeFlight()
+    executor = HorusExecutor(
+        flight,
+        _settings(camera_horizontal_fov_deg=90.0, target_height_m=1.7),
+        perception=_GrounderPersonSeed(detector_evidence=True),
+        autostart=False,
+    )
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 1.0}, ttl_s=5.0)["task_id"]
+
+    executor.tick()
+
+    tracking = executor.get_task_status(task_id)["tracking"]
+    assert tracking["range_source"] == "person_height"
+    assert math.isclose(tracking["range_m"], 4.0, rel_tol=1e-6)
+    assert "person evidence" in tracking["range_source_note"]
+    executor.close()
+
+
+class _LoggedGeometryTarget:
+    """A person box from the verify-forest-15178 approach geometry, with frame size for ranging."""
+
+    def __init__(self, box, *, frame=(640, 480), class_name="person", class_id=0):
+        self.box = list(box)
+        self.frame = frame
+        self.class_name = class_name
+        self.class_id = class_id
+
+    def validate_candidate(self, candidate_id):
+        return {
+            "id": candidate_id,
+            "bbox": list(self.box),
+            "frame_width": self.frame[0],
+            "frame_height": self.frame[1],
+            "class_name": self.class_name,
+            "class_id": self.class_id,
+            "confidence": 0.8,
+        }
+
+
+def _logged_approach_box(*, horizontal_m, altitude_m, pitch_deg=-45.0, person_height_m=1.9,
+                         width=640, height=480, hfov_deg=84.0):
+    """Project a standing person (feet on the ground, head at ``person_height_m``)."""
+    f = width / (2.0 * math.tan(math.radians(hfov_deg) / 2.0))
+    theta = math.radians(-pitch_deg)  # optical-axis depression, positive downwards
+
+    def row(drop_m: float) -> float:
+        angle = math.atan2(drop_m, horizontal_m) - theta
+        return height / 2.0 + f * math.tan(angle)
+
+    return [280.0, row(altitude_m - person_height_m), 310.0, row(altitude_m)]
+
+
+def test_approach_ranges_from_the_ground_plane_at_the_logged_forest_geometry():
+    # verify-forest-15178: altitude 6.15 m, camera pitch -45 deg, the target 4.97 m ahead.
+    # The configured person height read 12.36 m there (2.5x high, foreshortened box); the
+    # ground-plane ray must land on the true camera-to-torso distance so arrival is detected.
+    box = _logged_approach_box(horizontal_m=4.97, altitude_m=6.15)
+    flight = FakeFlight(Pose(0.0, 0.0, 6.15))
+    executor = HorusExecutor(
+        flight,
+        _settings(
+            camera_horizontal_fov_deg=84.0,
+            target_height_m=1.9,
+            default_gimbal_pitch_deg=-45.0,
+            max_distance_m=20.0,
+        ),
+        perception=_LoggedGeometryTarget(box),
+        autostart=False,
+    )
+    true_slant = math.hypot(4.97, 6.15 - 1.12)
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": true_slant + 0.4}, ttl_s=5.0)["task_id"]
+
+    for _ in range(4):  # guided/arm precede the first ranging tick
+        executor.tick()
+
+    status = executor.get_task_status(task_id)
+    tracking = status["tracking"]
+    assert tracking["range_source"] == "ground_plane"
+    assert abs(tracking["range_m"] - true_slant) / true_slant < 0.1
+    horizontal = float(tracking["range_source_note"].split(":")[-1].split(" m horizontal")[0])
+    assert abs(horizontal - 4.97) / 4.97 < 0.05
+    # Arrival is now detectable: the estimate is inside the standoff+tolerance on the first tick.
+    assert status["status"] == "succeeded"
+    executor.close()
+
+
+def test_ground_plane_range_holds_close_in_where_the_person_height_estimate_fails():
+    # The same camera nearly overhead: 1.5 m horizontal, 6.15 m up. The true camera-to-torso is
+    # 5.27 m; the configured person height would read 14.4 m here (a 2.7x over-estimate), so the
+    # approach could never detect arrival.
+    box = _logged_approach_box(horizontal_m=1.5, altitude_m=6.15)
+    flight = FakeFlight(Pose(0.0, 0.0, 6.15))
+    executor = HorusExecutor(
+        flight,
+        _settings(
+            camera_horizontal_fov_deg=84.0,
+            target_height_m=1.9,
+            default_gimbal_pitch_deg=-45.0,
+            max_distance_m=20.0,
+        ),
+        perception=_LoggedGeometryTarget(box),
+        autostart=False,
+    )
+    true_slant = math.hypot(1.5, 6.15 - 1.12)
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 5.5}, ttl_s=5.0)["task_id"]
+
+    for _ in range(4):
+        executor.tick()
+
+    status = executor.get_task_status(task_id)
+    tracking = status["tracking"]
+    assert tracking["range_source"] == "ground_plane"
+    assert abs(tracking["range_m"] - true_slant) / true_slant < 0.05
+    assert status["status"] == "succeeded"
+    executor.close()
+
+
+def test_orbit_uses_the_ground_plane_range_at_the_logged_geometry():
+    box = _logged_approach_box(horizontal_m=8.0, altitude_m=9.5)
+    flight = FakeFlight(Pose(0.0, 0.0, 9.5))
+    executor = HorusExecutor(
+        flight,
+        _settings(
+            camera_horizontal_fov_deg=84.0,
+            target_height_m=1.9,
+            default_gimbal_pitch_deg=-45.0,
+            max_distance_m=20.0,
+        ),
+        perception=_LoggedGeometryTarget(box),
+        autostart=False,
+    )
+    task_id = executor.submit_skill("orbit", {"id": 7, "radius_m": 6.0}, ttl_s=5.0)["task_id"]
+
+    executor.tick()
+
+    tracking = executor.get_task_status(task_id)["tracking"]
+    assert tracking["range_source"] == "ground_plane"
+    true_slant = math.hypot(8.0, 9.5 - 1.12)
+    assert abs(tracking["range_m"] - true_slant) / true_slant < 0.1
+    executor.close()
+
+
+def test_ground_plane_bearing_compensates_for_the_camera_pitch():
+    # A 10 deg image bearing is ~15 deg on the ground at a -45 deg pitch (sim/README's own
+    # example): the translation and yaw must use the ground bearing, not the image one.
+    box = _logged_approach_box(horizontal_m=4.97, altitude_m=6.15)
+    box[0], box[2] = 368.0, 397.0  # centre column 10 deg right of the optical axis
+    flight = FakeFlight(Pose(0.0, 0.0, 6.15))
+    executor = HorusExecutor(
+        flight,
+        _settings(
+            camera_horizontal_fov_deg=84.0,
+            target_height_m=1.9,
+            default_gimbal_pitch_deg=-45.0,
+            max_distance_m=20.0,
+        ),
+        perception=_LoggedGeometryTarget(box),
+        autostart=False,
+    )
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 2.0}, ttl_s=5.0)["task_id"]
+
+    for _ in range(4):
+        executor.tick()
+
+    motion = [
+        command for command in flight.commands
+        if command[0] == "velocity" and (command[1], command[2]) != (0.0, 0.0)
+    ]
+    assert motion
+    north, east = motion[-1][1], motion[-1][2]
+    ground_bearing_deg = math.degrees(math.atan2(east, north))
+    assert 13.0 < ground_bearing_deg < 18.0  # image bearing is 10 deg; ground is ~15.6 deg
+    assert executor.get_task_status(task_id)["status"] == "running"
+    executor.close()
+
+
+def test_ground_plane_range_is_refused_for_a_shallow_ray():
+    # A level camera looking at a person 40 m out: the ray depression is ~3 deg, where a small
+    # pitch error dominates, so the ground-plane estimate is refused and the person height stays
+    # the fallback (which is accurate at a level camera).
+    box = _logged_approach_box(horizontal_m=40.0, altitude_m=2.0, pitch_deg=0.0)
+    flight = FakeFlight(Pose(0.0, 0.0, 2.0))
+    executor = HorusExecutor(
+        flight,
+        _settings(camera_horizontal_fov_deg=84.0, target_height_m=1.9, default_gimbal_pitch_deg=0.0),
+        perception=_LoggedGeometryTarget(box),
+        autostart=False,
+    )
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 5.0}, ttl_s=5.0)["task_id"]
+
+    executor.tick()
+
+    tracking = executor.get_task_status(task_id)["tracking"]
+    assert tracking["range_source"] == "person_height"
+    assert abs(tracking["range_m"] - 40.0) / 40.0 < 0.3
+    executor.close()
+
+
+def test_fresh_downward_rangefinder_height_overrides_the_pose_altitude():
+    from types import SimpleNamespace
+
+    box = _logged_approach_box(horizontal_m=4.97, altitude_m=6.15)
+    flight = FakeFlight(Pose(0.0, 0.0, 6.15))
+    flight._telemetry.ground_distance = SimpleNamespace(
+        orientation=25, distance_m=9.0, min_distance_m=0.1, max_distance_m=40.0,
+        updated_monotonic=time.monotonic(),
+    )
+    executor = HorusExecutor(
+        flight,
+        _settings(camera_horizontal_fov_deg=84.0, target_height_m=1.9, default_gimbal_pitch_deg=-45.0),
+        perception=_LoggedGeometryTarget(box),
+        autostart=False,
+    )
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 5.0}, ttl_s=5.0)["task_id"]
+
+    executor.tick()
+
+    tracking = executor.get_task_status(task_id)["tracking"]
+    assert tracking["range_source"] == "ground_plane"
+    assert "9.00 m above ground" in tracking["range_source_note"]
+    executor.close()
+
+
+def test_saturated_downward_rangefinder_falls_back_to_the_pose_altitude():
+    # Koko runs koko-verify-forest/urban-15178: the payload's downward lidar saturates at its 4 m
+    # maximum, and that saturation was used as the height, so every ground-plane estimate read
+    # short (the forest approach "succeeded" 5.39 m from a target 37.7 m away). A reading at the
+    # bound must fall back to the pose altitude.
+    from types import SimpleNamespace
+
+    box = _logged_approach_box(horizontal_m=20.0, altitude_m=9.5)
+    flight = FakeFlight(Pose(0.0, 0.0, 9.5))
+    flight._telemetry.ground_distance = SimpleNamespace(
+        orientation=25, distance_m=4.0, min_distance_m=0.1, max_distance_m=4.0,
+        updated_monotonic=time.monotonic(),
+    )
+    executor = HorusExecutor(
+        flight,
+        _settings(
+            camera_horizontal_fov_deg=84.0,
+            target_height_m=1.9,
+            default_gimbal_pitch_deg=-45.0,
+            max_distance_m=40.0,
+        ),
+        perception=_LoggedGeometryTarget(box),
+        autostart=False,
+    )
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 2.0}, ttl_s=5.0)["task_id"]
+
+    for _ in range(4):
+        executor.tick()
+
+    tracking = executor.get_task_status(task_id)["tracking"]
+    assert tracking["range_source"] == "ground_plane"
+    assert "9.50 m above ground" in tracking["range_source_note"]
+    true_slant = math.hypot(20.0, 9.5 - 1.12)
+    assert abs(tracking["range_m"] - true_slant) / true_slant < 0.1
+    executor.close()
+
+
+def test_camera_pitch_is_earth_frame_and_ignores_the_vehicle_pitch():
+    # ArduPilot reports mount/gimbal pitch in the earth frame (MOUNT_ORIENTATION.pitch is
+    # "Pitch in global frame"; GIMBAL_DEVICE_ATTITUDE_STATUS carries an earth-frame quaternion)
+    # and FlightLink.set_gimbal_pitch_yaw documents its pitch as earth-frame, so a 10 deg
+    # nose-down cruise attitude must not be added: that would shift the ground-plane range.
+    from types import SimpleNamespace
+
+    box = _logged_approach_box(horizontal_m=10.0, altitude_m=6.0)
+    true_slant = math.hypot(10.0, 6.0 - 1.12)
+    settings = _settings(
+        camera_horizontal_fov_deg=84.0,
+        target_height_m=1.9,
+        default_gimbal_pitch_deg=-45.0,
+        max_distance_m=40.0,
+    )
+
+    # Fresh mount telemetry: the reported earth-frame pitch is used as-is.
+    flight = FakeFlight(Pose(0.0, 0.0, 6.0))
+    flight._telemetry.mount_status = SimpleNamespace(pitch_deg=-45.0, updated_monotonic=time.monotonic())
+    flight._telemetry.vehicle_pitch_deg = -10.0
+    executor = HorusExecutor(
+        flight, settings, perception=_LoggedGeometryTarget(box), autostart=False
+    )
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 2.0}, ttl_s=5.0)["task_id"]
+    for _ in range(4):
+        executor.tick()
+    tracking = executor.get_task_status(task_id)["tracking"]
+    assert "pitch -45.0 deg" in tracking["range_source_note"]
+    assert abs(tracking["range_m"] - true_slant) / true_slant < 0.1
+    executor.close()
+
+    # Configured fallback: also earth-frame, so the vehicle pitch is still not added.
+    fallback_flight = FakeFlight(Pose(0.0, 0.0, 6.0))
+    fallback_flight._telemetry.vehicle_pitch_deg = -10.0
+    fallback = HorusExecutor(
+        fallback_flight, settings, perception=_LoggedGeometryTarget(box), autostart=False
+    )
+    fallback_id = fallback.submit_skill("approach", {"id": 7, "dist_m": 2.0}, ttl_s=5.0)["task_id"]
+    for _ in range(4):
+        fallback.tick()
+    fallback_tracking = fallback.get_task_status(fallback_id)["tracking"]
+    assert "pitch -45.0 deg" in fallback_tracking["range_source_note"]
+    assert abs(fallback_tracking["range_m"] - true_slant) / true_slant < 0.1
+    fallback.close()
 
 
 def test_approach_still_refuses_when_no_target_height_is_configured():

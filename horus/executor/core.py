@@ -1213,13 +1213,37 @@ class HorusExecutor:
             return size_m * focal_px / pixels if pixels > 1.0 else None
 
         range_note: str | None = None
+        # Ground-plane geometry: with a known height above ground, camera pitch and frame height,
+        # the ray through the box's ground-contact row intersects the ground plane. It is
+        # posture-agnostic and measured accurate (1% median error on 52 logged campaign boxes
+        # against the true camera-to-torso slant, versus +24% median for the configured person
+        # height), so it also replaces the image-only bearing for translation and the ToF gate.
+        ground_geometry = self._ground_plane_geometry(box, candidate)
+        if ground_geometry is not None:
+            bearing = ground_geometry[1]
         # A fresh measured forward ToF range outranks every assumed-height estimate: an assumed
         # height can be wrong by the object's true size, while the ToF measures the distance to
-        # what is actually ahead inside the 8 deg bearing gate.
-        if range_m is None and abs(bearing) <= math.radians(8.0):
+        # what is actually ahead inside the 8 deg bearing gate. It is only usable when the
+        # target's ray stays on the beam's plane (see _forward_tof_applies): a single-ray lidar
+        # at flight altitude otherwise returns whatever is behind a target that is below it.
+        if (
+            range_m is None
+            and abs(bearing) <= math.radians(8.0)
+            and self._forward_tof_applies(box, candidate)
+        ):
             range_m = self._forward_proximity_range()
             if range_m is not None:
                 range_source = "forward_tof"
+        # The ground-plane estimate outranks the size-based estimates: the operator's declared
+        # size is a height, and a prone or foreshortened box is not the object's height, so
+        # size-based ranges are posture-dependent while the ground-plane ray is not.
+        if range_m is None and ground_geometry is not None:
+            range_m = ground_geometry[0]
+            range_source = "ground_plane"
+            range_note = (
+                f"ground-plane ray from {ground_geometry[3]:.2f} m above ground at "
+                f"pitch {ground_geometry[4]:.1f} deg: {ground_geometry[2]:.2f} m horizontal"
+            )
         # target_size_m is the operator's declared height for this specific target.
         if range_m is None and target_size_m is not None:
             range_m = size_range(target_size_m, vertical=True)
@@ -1234,7 +1258,14 @@ class HorusExecutor:
         # evidence keeps refusing below, and its error names the label so the operator can pass
         # target_size_m. Any disagreement is recorded in tracking and logged, never silent.
         attributes = self._value(candidate, "attributes")
-        label_is_person = class_name == "person" or class_id == 0
+        source = str(self._value(candidate, "source") or "")
+        # An open-vocabulary ("grounder") seed may name a person for selection and display, but
+        # a text-grounding guess is not a detector person: ranged from the 1.7 m person height a
+        # false seed (bush, rock) would fly the vehicle closer than the commanded standoff, and a
+        # prone body's box height is not a standing person's anyway. Such a target therefore keeps
+        # refusing below (the error names the label) until the operator passes target_size_m, or
+        # until the detector labels the track person or the shirt-colour vote adds evidence.
+        label_is_person = (class_name == "person" or class_id == 0) and source != "open_vocab"
         person_evidence = bool(self._value(candidate, "person_evidence", False)) or (
             # shirt_colour is classified only for person-class detections (perception pipeline).
             isinstance(attributes, Mapping) and attributes.get("shirt_colour") is not None
@@ -1294,6 +1325,200 @@ class HorusExecutor:
         if self._candidate(target_id) is None:
             return f"tracked target {target_id!r} is not visible in the current frame"
         return f"tracked target {target_id!r} failed appearance-embedding revalidation"
+
+    def _height_above_ground(self) -> float | None:
+        """Measured downward range when fresh and unsaturated, else the pose altitude above home.
+
+        ``up_m`` is relative to the home point, so over terrain relief the flat-ground
+        assumption is approximate; the payload's downward rangefinder (orientation 25) is
+        preferred whenever it is fresh and in range. A reading at or near the sensor's maximum
+        (or minimum) is not a measurement - the outdoor payload saturates at 4.0 m - and must
+        fall back to the pose altitude instead of reporting the saturation as the height.
+        """
+        telemetry = self._telemetry()
+        now = time.monotonic()
+        ground = getattr(telemetry, "ground_distance", None)
+        if ground is not None:
+            updated = self._value(ground, "updated_monotonic")
+            distance = self._value(ground, "distance_m")
+            minimum = self._value(ground, "min_distance_m")
+            maximum = self._value(ground, "max_distance_m")
+            values = (distance, minimum, maximum)
+            if (
+                updated is not None
+                and now - float(updated) <= self.settings.telemetry_max_age_s
+                and all(
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(float(value))
+                    for value in values
+                )
+            ):
+                distance, minimum, maximum = (float(value) for value in values)
+                # A reading at the bound means "at least max" / "at most min", not a height.
+                margin = max(0.05, 0.02 * maximum)
+                if minimum + margin < distance < maximum - margin:
+                    return distance
+        pose = getattr(telemetry, "pose", None)
+        altitude = None if pose is None else self._value(pose, "up_m")
+        if (
+            isinstance(altitude, (int, float))
+            and not isinstance(altitude, bool)
+            and math.isfinite(float(altitude))
+            and float(altitude) > 0.0
+        ):
+            return float(altitude)
+        return None
+
+    def _camera_pitch_deg(self) -> float | None:
+        """Fresh mount pitch when available, else the configured default.
+
+        Both are earth-frame pitch angles, so the vehicle's own attitude must NOT be added:
+        ArduPilot reports the mount/gimbal attitude in the earth frame (MOUNT_ORIENTATION.pitch
+        is documented "in global frame" and the modern GIMBAL_DEVICE_ATTITUDE_STATUS carries an
+        earth-frame quaternion, with its flags only distinguishing the yaw frame), and
+        ``FlightLink.set_gimbal_pitch_yaw`` documents its pitch argument as earth-frame too.
+        Copter pitches 5-15 deg nose-down at cruise, so adding it would shift the ground-plane
+        range by that much of depression.
+        """
+        telemetry = self._telemetry()
+        now = time.monotonic()
+        mount = getattr(telemetry, "mount_status", None)
+        if mount is not None:
+            updated = getattr(mount, "updated_monotonic", None)
+            pitch = getattr(mount, "pitch_deg", None)
+            if (
+                updated is not None
+                and pitch is not None
+                and now - float(updated) <= self.settings.telemetry_max_age_s
+                and math.isfinite(float(pitch))
+            ):
+                return float(pitch)
+        return float(self.settings.default_gimbal_pitch_deg)
+
+    def _target_ray_depression_deg(self, box: Any, candidate: Any) -> float | None:
+        """Depression of the ray through the box centre in the vehicle frame, or None.
+
+        Needs only the camera pitch, the frame height and the box row, so it also gates the
+        forward ToF where the ground-plane estimate itself is unavailable.
+        """
+        frame_height = self._value(candidate, "frame_height")
+        if frame_height is None or box is None:
+            return None
+        try:
+            image_height = float(frame_height)
+            image_width = float(self._value(candidate, "frame_width", 640.0))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if image_height <= 0.0 or image_width <= 0.0:
+            return None
+        pitch_deg = self._camera_pitch_deg()
+        if pitch_deg is None:
+            return None
+        if isinstance(box, Mapping):
+            y1 = float(box.get("y1", box.get("top")))
+            y2 = float(box.get("y2", box.get("bottom")))
+        else:
+            y1, y2 = float(box[1]), float(box[3])
+        if not all(math.isfinite(value) for value in (y1, y2)):
+            return None
+        hfov = math.radians(float(self._value(
+            candidate, "horizontal_fov_deg", self.settings.camera_horizontal_fov_deg
+        )))
+        focal_px = image_width / (2.0 * math.tan(hfov / 2.0))
+        theta = math.radians(-pitch_deg)
+        vertical = ((y1 + y2) * 0.5 - image_height * 0.5) / focal_px
+        down = vertical * math.cos(theta) + math.sin(theta)
+        north = math.cos(theta) - vertical * math.sin(theta)
+        if abs(north) < 1e-9 and abs(down) < 1e-9:
+            return None
+        return math.degrees(math.atan2(down, abs(north)))
+
+    def _forward_tof_applies(self, box: Any, candidate: Any) -> bool:
+        """Whether the single-ray forward lidar can measure this target at all.
+
+        The payload's forward lidars are mounted level with the airframe and have a zero vertical
+        field of view, so they return the first surface on the vehicle's horizontal plane at
+        flight altitude: indoors (level gimbal, vehicle near person height) that is the target,
+        outdoors at -45 deg the beam passes over the person and measures a trunk or building
+        behind it. Without the frame geometry to place the ray the historical bearing-only gate
+        is kept.
+        """
+        depression = self._target_ray_depression_deg(box, candidate)
+        if depression is None:
+            return True
+        return abs(depression) <= self.settings.forward_tof_vertical_half_fov_deg
+
+    def _ground_plane_geometry(
+        self, box: Any, candidate: Any
+    ) -> tuple[float, float, float, float, float] | None:
+        """(camera-to-target slant, ground bearing, horizontal, height, pitch) from the ground plane.
+
+        The ray through the box's ground-contact row (the bottom edge for an upright target, the
+        centre row for a prone target, i.e. a box wider than it is tall) is intersected with the
+        ground plane at the measured height above ground. This is posture-agnostic: on 52 logged
+        campaign boxes it tracks the true camera-to-torso slant to a 1% median error, while the
+        configured person height (blind to the camera pitch's foreshortening) is +24% median and
+        +65% at p90. Refuses when the ray is too shallow (a small pitch error dominates) or when
+        the height, frame height or camera pitch is unknown.
+        """
+        frame_height = self._value(candidate, "frame_height")
+        if frame_height is None:
+            return None
+        try:
+            image_height = float(frame_height)
+            image_width = float(self._value(candidate, "frame_width", 640.0))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if image_height <= 0.0 or image_width <= 0.0:
+            return None
+        height_above_ground = self._height_above_ground()
+        pitch_deg = self._camera_pitch_deg()
+        if height_above_ground is None or pitch_deg is None:
+            return None
+        if isinstance(box, Mapping):
+            x1 = float(box.get("x1", box.get("left")))
+            y1 = float(box.get("y1", box.get("top")))
+            x2 = float(box.get("x2", box.get("right")))
+            y2 = float(box.get("y2", box.get("bottom")))
+        else:
+            x1, y1, x2, y2 = (float(value) for value in box)
+        if not all(math.isfinite(value) for value in (x1, y1, x2, y2)) or x2 <= x1 or y2 <= y1:
+            return None
+        hfov = math.radians(float(self._value(
+            candidate, "horizontal_fov_deg", self.settings.camera_horizontal_fov_deg
+        )))
+        focal_px = image_width / (2.0 * math.tan(hfov / 2.0))
+        theta = math.radians(-pitch_deg)  # optical-axis depression, positive downwards
+        prone = (y2 - y1) < (x2 - x1)
+
+        def ray(row: float) -> tuple[float, float, float]:
+            vertical = (row - image_height * 0.5) / focal_px
+            horizontal_px = ((x1 + x2) * 0.5 - image_width * 0.5) / focal_px
+            return (
+                math.cos(theta) - vertical * math.sin(theta),
+                horizontal_px,
+                vertical * math.cos(theta) + math.sin(theta),
+            )
+
+        contact = ray((y1 + y2) * 0.5 if prone else y2)
+        north, east, down = contact
+        if down <= 0.0:
+            return None
+        depression_deg = math.degrees(math.atan2(down, math.hypot(north, east)))
+        if depression_deg < self.settings.min_ground_range_depression_deg:
+            return None
+        slant_to_ground = height_above_ground / down
+        horizontal = math.hypot(north, east) * slant_to_ground
+        torso_north, _torso_east, torso_down = ray((y1 + y2) * 0.5)
+        if torso_north > 1e-9:
+            torso_height = max(0.0, height_above_ground - horizontal * (torso_down / torso_north))
+            slant = math.hypot(horizontal, height_above_ground - torso_height)
+        else:
+            slant = slant_to_ground
+        if not math.isfinite(slant) or slant <= 0.0:
+            return None
+        return slant, math.atan2(east, north), horizontal, height_above_ground, pitch_deg
 
     def _forward_proximity_range(self) -> float | None:
         telemetry = self._telemetry()
@@ -1380,8 +1605,13 @@ class HorusExecutor:
             if not task._range_note_warned:
                 task._range_note_warned = True
                 logger.warning(
-                    "%s target=%s: %s (a non-person target needs target_size_m)",
-                    task.skill, task.arguments["id"], range_note,
+                    "%s target=%s: %s%s",
+                    task.skill,
+                    task.arguments["id"],
+                    range_note,
+                    " (a non-person target needs target_size_m)"
+                    if range_source == "person_height"
+                    else "",
                 )
         else:
             task.tracking.pop("range_source_note", None)
@@ -1430,7 +1660,7 @@ class HorusExecutor:
             return False
         if task.skill == "orbit":
             radius = float(task.executed_target["radius_m"])
-            self._orbit_velocity(heading, distance, radius)
+            self._orbit_velocity(heading, distance, radius, yaw_deg=facing_deg)
             return False
         raise RuntimeError(f"unsupported target skill {task.skill}")
 
@@ -1530,7 +1760,9 @@ class HorusExecutor:
             yaw_deg=yaw_deg,
         )
 
-    def _orbit_velocity(self, bearing: float, distance: float, radius: float) -> None:
+    def _orbit_velocity(
+        self, bearing: float, distance: float, radius: float, *, yaw_deg: float | None = None
+    ) -> None:
         radial_speed = min(self.settings.max_speed_m_s * 0.5, abs(distance - radius) * 0.5)
         radial_sign = 1.0 if distance > radius else -1.0
         tangent_speed = min(self.settings.max_speed_m_s * 0.5, max(0.2, radius * 0.35))
@@ -1544,7 +1776,12 @@ class HorusExecutor:
         if magnitude > self.settings.max_speed_m_s:
             north *= self.settings.max_speed_m_s / magnitude
             east *= self.settings.max_speed_m_s / magnitude
-        self._command(self.flight.set_velocity_ned, north, east, 0.0)
+        # Face the target while circling, like follow and approach: without the yaw the vehicle
+        # translates sideways out of its own camera's field of view, the detector loses the
+        # target, and the orbit ratchets between circling and holding (Koko orbit trials: the
+        # vehicle held one circle point with a -0.5 deg heading sweep and the target never
+        # gained a second reference view).
+        self._command(self.flight.set_velocity_ned, north, east, 0.0, yaw_deg=yaw_deg)
 
     def _command_zero_velocity(self) -> None:
         self._command(self.flight.set_velocity_ned, 0.0, 0.0, 0.0)
