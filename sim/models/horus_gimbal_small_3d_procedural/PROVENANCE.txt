@@ -1,2 +1,3 @@
 Derived by sim/scripts/derive_procedural_airframe.py from horus_gimbal_small_3d_outdoor.
-Change: yaw/roll/pitch arm mesh collisions replaced by their mesh-bound boxes.
+Change: yaw/roll/pitch arm mesh collisions replaced by their mesh-bound boxes; camera
+update rate 5 Hz (generated-world render budget).

@@ -1,4 +1,5 @@
 Derived by sim/scripts/derive_procedural_airframe.py from horus_sensor_payload.
 Change: the six single-beam proximity_* ToF sensors are replaced by one 8-beam
 proximity_ring gpu_lidar at the payload origin (beams every 45 degrees from -180 to
-135, same 10 Hz and 0.05-4.0 m range); range_down, links and inertial are unchanged.
+135, 0.05-4.0 m range); ring and range_down run at 5 Hz (generated-world
+render budget); links and inertial are unchanged.
