@@ -78,14 +78,15 @@ def test_scan_conversion_uses_nearest_valid_return_and_mavlink_units():
     ) == (1234, 10, 1000, 225, 9, 3)
 
 
-def test_clear_scan_reports_maximum_range_but_invalid_only_scan_is_omitted():
+def test_clear_scan_reports_beyond_maximum_range_but_invalid_only_scan_is_omitted():
     clear = _Scan(0.2, 8.0, (float("inf"), 9.0))
     invalid = _Scan(0.2, 8.0, (float("nan"), 0.1, float("-inf")))
 
     reading = laser_scan_to_distance_sensor(clear, time_boot_ms=0)
 
     assert reading is not None
-    assert reading.current_distance == reading.max_distance == 800
+    # One centimetre past max_distance: ArduPilot treats min <= d <= max as an obstacle.
+    assert reading.current_distance == reading.max_distance + 1 == 801
     assert laser_scan_to_distance_sensor(invalid, time_boot_ms=1) is None
 
 
@@ -290,10 +291,10 @@ def test_ring_treats_no_return_and_out_of_range_beams_like_the_single_beam_path(
         _ring_scan((float("inf"), 9.0, float("nan"), float("-inf"), 2.0, float("nan"), 0.01, 4.0)),
         time_boot_ms=11)
 
-    # +inf and > range_max are clear (max range); NaN, -inf and < range_min emit nothing; a
-    # return at range_max is a real measurement and is offset-compensated like any other.
+    # +inf and > range_max are clear (one past max range); NaN, -inf and < range_min emit
+    # nothing; a return at range_max is a real measurement and is offset-compensated.
     assert [(reading.orientation, reading.sensor_id, reading.current_distance)
-            for reading in readings] == [(4, 3, 400), (3, 7, 400), (0, 0, 176), (5, 8, 368)]
+            for reading in readings] == [(4, 3, 401), (3, 7, 401), (0, 0, 176), (5, 8, 368)]
 
 
 def test_ring_skips_beams_that_miss_the_45_degree_directions():
