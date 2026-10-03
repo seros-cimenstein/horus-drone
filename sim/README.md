@@ -64,7 +64,7 @@ running `pip` against the bind mount. Dependency or entry-point changes require
 rebuilding the image. It provides `horus`, `horus-mcp`, `horus-mcp-call`,
 `horus-commander-serve`, `horus-gz-bridge`, and `horus-tof-bridge` entry points.
 
-Optional text-grounding weights are kept outside the image. Run `docker exec horus-sim bash /horus/scripts/setup_grounder.sh` inside the sim container to create `/horus/models/grounder-venv` and cache model weights in `/horus/models/hf`; no image rebuild is needed. `start_sim.sh` starts the service on loopback port 8100 before MCP when the venv is installed. Logs are in `/horus/sim/logs/horus-grounder.log`, and a missing venv is non-fatal.
+Optional text-grounding weights are kept outside the image. Run `docker exec horus-sim bash /horus/scripts/setup_grounder.sh` inside the sim container to create `/horus/models/grounder-venv` and cache model weights in `/horus/models/hf`; no image rebuild is needed. `start_sim.sh` starts the service on loopback port 8100 before MCP when the venv is installed. Logs are in `/horus/sim/logs/horus-grounder.log`, and a missing venv is non-fatal. When huggingface.co is unreachable, copy an `HF_HOME` cache from another machine — the `hub/models--IDEA-Research--grounding-dino-tiny` and `hub/models--google--owlv2-base-patch16-ensemble` directories, whose `model.safetensors` sha256s are pinned in the root README — and set `HORUS_GROUNDER_HF_CACHE` to it, which the setup reads with `HF_HUB_OFFLINE=1`. `HF_ENDPOINT=<mirror-url>` works only for a mirror that serves the full Hub file metadata (`Content-Length` and `X-Repo-Commit`) required by `huggingface_hub` 0.36.2; a mirror that omits either header fails with a message naming both options.
 
 ## Outdoor forest and urban worlds
 
@@ -146,11 +146,17 @@ The outdoor camera is 640×480 with an 84° horizontal FOV. Outdoor SITL uses
 a −45° neutral gimbal, and `take_off` applies the outdoor config's
 `default_gimbal_pitch_deg: -45`; the indoor default remains 0°. A stage frame at
 6.8 m AGL showed one green-shirt hiker (`check_detections.py`, confidence 0.283;
-shirt-colour confidence 0.782). The executor's range and bearing calculations
-still use FOV alone and do not compensate for mount pitch.
-For a centred 1.9 m upright person at 10 m AGL, the range formula yields about 18.1 m versus
-14.14 m slant range; a 10° image bearing corresponds to about 14° on the ground.
-Treat those range and bearing outputs as uncalibrated at the default pitch.
+shirt-colour confidence 0.782). The executor now ranges targets from the ground
+plane: the ray through the box's ground-contact row is intersected with the
+ground plane using the measured height above ground (the downward rangefinder,
+otherwise the pose altitude above home) and the camera pitch (fresh
+`MOUNT_STATUS`, otherwise `default_gimbal_pitch_deg`), which also yields the true
+ground bearing instead of the image-only one. On 52 logged campaign boxes this
+tracks the true camera-to-torso slant to a 1% median error, against +24% median
+and +65% p90 for the FOV-only person-height formula, so the previous
+"uncalibrated at the default pitch" caveat no longer applies to the executor.
+Rays shallower than `min_ground_range_depression_deg` (10°) are refused, and a
+candidate's own `bearing` attribute stays image-relative.
 
 The S9 mission rejects a 10 m raster across the western forest rectangle because
 its tree-canopy collisions make every leg unsafe; it instead follows the open
@@ -284,8 +290,14 @@ service is absent locally (`Grounder not started: runtime venv is absent at
 /horus/models/grounder-venv`). `scripts/setup_grounder.sh` creates the venv from
 PyPI plus the PyTorch CPU index and then downloads the two HuggingFace
 checkpoints into `/horus/models/hf`; this workstation cannot reach
-huggingface.co, so copy that cache from a host where the setup succeeded and
-re-run the script there. `scripts/koko/remote_up.sh` only checks for an existing
+huggingface.co. `hf-mirror.com` redirects non-mainland IPs back to
+huggingface.co, and `hf-mirror.net` serves the checkpoint files but omits Hub
+metadata `huggingface_hub` requires, so the working route here is the copied
+cache: fetch the same files from ModelScope's mirror of the two repos (their
+`X-Linked-Etag` sha256 matches the Hub's LFS hashes) into an `HF_HOME` layout,
+then run the setup with `HORUS_GROUNDER_HF_CACHE` pointing at it (offline,
+`HF_HUB_OFFLINE=1`).
+`scripts/koko/remote_up.sh` only checks for an existing
 venv and continues without text grounding when it is absent.
 
 ### Split laptop/Koko deployment
