@@ -182,8 +182,10 @@ def laser_scan_to_distance_sensor(
     ``radial_offset_m`` is the distance from the lidar's origin to the face of the sensor the
     scan stands in for (a ring beam replacing a single-beam ToF). It is subtracted from a
     measured return and the result clamped to the sensor's [min, max] centimetre range, so
-    readings keep the old face-to-obstacle meaning. Clear and no-return beams are treated
-    exactly as in the single-beam path (a clear beam reports the maximum range).
+    readings keep the old face-to-obstacle meaning. Clear beams (+inf or beyond range_max) report
+    one centimetre past ``max_distance``: ArduPilot's MAVLink proximity backend stores any reading
+    with ``min <= distance <= max`` as an obstacle, so a clear beam at exactly the maximum range
+    put a phantom obstacle 4 m away in every sector and throttled/deflected guided velocity.
     """
     if isinstance(orientation, bool) or not isinstance(orientation, int) or orientation not in SUPPORTED_ORIENTATIONS:
         raise ValueError("orientation must be a MAVLink horizontal value 0..7 or downward PITCH_270 value 25")
@@ -235,7 +237,7 @@ def laser_scan_to_distance_sensor(
     if nearest_m is None:
         if not has_clear_beam:
             return None
-        current_distance = max_distance
+        current_distance = min(max_distance + 1, max_centimeters)
     else:
         current_distance = int(round(min(nearest_m - radial_offset_m, max_centimeters / 100) * 100))
         current_distance = max(min_distance, min(max_distance, current_distance))
