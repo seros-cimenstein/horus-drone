@@ -55,3 +55,43 @@ Claude sees). No behavior change.
 Outcome: kept. No failed calls in three runs (baseline: 1 in three runs, the `point` call), which is
 too few events to call a measured improvement. S6 never calls `scan`, so the scan parameter fix is
 exercised in the Stage 2 scan check below, not here. Mission time is unchanged within noise.
+
+## Step 2c: commander effort high -> medium (measured, then reverted)
+
+Change tested: `commander.claude_effort: high -> medium`, `claude_model: opus` unchanged. Three runs
+were planned; three more were added after run 2 missed the success rule.
+
+| Run | Wall s | RTF | Perception fps | Frame ms | Tool calls | Failed calls | Model turn avg s | Model turn max s | Tool round-trip avg s | Tool round-trip max s | Success | Home before commanded | Landing error m |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| step2c-run1 | 48.8 | 0.906 | 5.01 | 117.0 | 36 | 0 | 1.1 | 7.4 | 0.2 | 4.2 | yes | no | 0.033 |
+| step2c-run2 | 85.0 | 0.948 | 5.0 | 117.1 | 38 | 1 | 2.0 | 11.2 | 0.2 | 5.0 | no | no | 0.029 |
+| step2c-run3 | 55.1 | 0.854 | 5.0 | 127.7 | 27 | 0 | 1.7 | 8.6 | 0.2 | 4.7 | yes | no | 0.023 |
+| step2c-run4 | 56.2 | 0.809 | 4.97 | 133.6 | 36 | 0 | 1.4 | 9.0 | 0.3 | 6.1 | yes | no | 0.028 |
+| step2c-run5 | 62.2 | 0.785 | 4.86 | 143.2 | 29 | 0 | 1.8 | 12.0 | 0.3 | 6.2 | yes | no | 0.005 |
+| step2c-run6 | 57.4 | 0.825 | 5.02 | 131.1 | 30 | 0 | 1.6 | 9.7 | 0.3 | 5.2 | yes | no | 0.022 |
+| **median** | **56.8** | **0.839** | **5.0** | **129.4** | **33.0** | **0.0** | **1.65** | **9.35** | **0.25** | **5.1** | 5/6 yes | 0/6 yes | **0.026** |
+
+Outcome: reverted to `high`, because the keep rule was "the mission still succeeds with no extra
+failed calls" and run 2 did not meet it.
+
+What the numbers show:
+
+- Faster: median 56.8 s against 68.7 s for step 2b, and the longest thinking pause dropped from
+  8-25 s to 7-12 s. Medium effort makes more, shorter calls (median 33 tool calls against 29).
+- Run 2 missed the success rule narrowly: the drone travelled 0.40 m (rule: at least 0.5 m) and came
+  within 1.99 m of the red-shirt person (rule: at most 2.0 m).
+- In run 2 Claude picked the right person every time. The `approach` skill rejected it three times in
+  a row with "failed appearance-embedding revalidation", and the fourth attempt reported success
+  without moving. The same revalidation failure appears in 9 of the 12 runs before this step, at
+  high effort too (one or two per run), so it is a property of the approach skill, not of the effort
+  setting.
+- The one failed call was `point` with a text description, rejected because the optional
+  `grounding` extra is not installed. It was not a wrong-parameter error.
+
+So the evidence that medium effort lowers quality is one marginal miss in six, with a cause that is
+visible at high effort as well. That is not enough to say medium is worse, and not enough to say it
+is safe. It is worth re-testing once the approach skill's revalidation failures are understood.
+
+Every S6 run so far passes its success rule only narrowly (travel 0.52-0.69 m against a 0.5 m
+threshold; closest approach 1.7-1.9 m against the requested 1.5 m), which makes the success column
+sensitive to this flake at any effort level.
