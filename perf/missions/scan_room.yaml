@@ -1,0 +1,6 @@
+name: perf-scan-room
+# Stage 2 check: the request that stalled on the south-east cabinet waypoint before the scan
+# progress check existed.
+steps:
+  - text: >-
+      Scan the room and tell me who you see.
