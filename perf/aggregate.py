@@ -25,7 +25,11 @@ COLUMNS = (
     ("Model turn max s", lambda s: _get(s, "commander", "model_turn_s", "max")),
     ("Tool round-trip avg s", lambda s: _get(s, "commander", "tool_round_trip_s", "avg")),
     ("Tool round-trip max s", lambda s: _get(s, "commander", "tool_round_trip_s", "max")),
-    ("Success", lambda s: s.get("s6_correct_target", s["mission_return_code"] == 0 and not s["commander"]["timed_out"])),
+    ("Success", lambda s: s.get(
+        "s6_correct_target",
+        s["mission_return_code"] == 0 and not s["commander"]["timed_out"] and not s.get("crash"),
+    )),
+    ("Crash", lambda s: bool(s.get("crash"))),
     ("Home before commanded", lambda s: s["ground_truth"].get("landed_before_commanded")),
     ("Landing error m", lambda s: s["ground_truth"]["landing_error_m"]),
 )

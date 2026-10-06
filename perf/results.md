@@ -92,6 +92,72 @@ So the evidence that medium effort lowers quality is one marginal miss in six, w
 visible at high effort as well. That is not enough to say medium is worse, and not enough to say it
 is safe. It is worth re-testing once the approach skill's revalidation failures are understood.
 
+## Stage 2: scan progress check (and two follow-up fixes)
+
+Check mission: `perf/missions/scan_room.yaml` ("Scan the room and tell me who you see."), same
+harness, effort `high`, hold delay 120 s. In every run Claude asked for the full flight envelope
+(north -2.8..2.8, east -3.8..3.8 at 1.5 m, 8 waypoints). "Crash" is ArduPilot's own crash-disarm
+status text; "closest person" is Gazebo ground truth while airborne, ignoring the person on the bed.
+
+| Code | Run | Wall s | Scan task outcome | Skipped waypoints | Crash | Closest person m |
+|---|---|---|---|---|---|---|
+| Before (no progress check) | scan-before-run1 | 240.2 | `expired` after 177 s, blocked at the cabinet | none | no | 2.26 |
+| Progress check only | scan-after-run1 | 174.2 | `succeeded` after 131 s | 1, 6, 7 | yes | 0.22 |
+| Progress check only | scan-after-run2 | 167.3 | `succeeded` after 128 s | 1, 7 | yes | 0.14 |
+| Progress check only | scan-after-run3 | 163.9 | `succeeded` after 122 s | 1, 6, 7 | yes | 0.10 |
+| + disarm failure, + face travel | scan-fixed-run1 | 236.2 | `failed` after 155 s (vehicle disarmed) | 0, 1, 6 | yes | 0.25 |
+| + disarm failure, + face travel | scan-fixed-run2 | 215.1 | `failed` after 131 s (vehicle disarmed) | 0, 1, 4, 6 | yes | 0.30 |
+| + disarm failure, + face travel | scan-fixed-run3 | 207.1 | `succeeded` after 138 s | 1, 4, 6, 7 | no | 0.19 |
+
+In the two `scan-fixed` crash runs Claude first submitted a scan without `ttl_s`, which expired at the
+30 s default, and then re-submitted it; the times above are for the second scan.
+
+### What was built
+
+- **Progress check** (`horus/executor/core.py`, scan loop): a waypoint is skipped when the distance to
+  it has not dropped by `scan_progress_threshold_m` (0.15 m) within `scan_progress_timeout_s` (15 s).
+  Each skip is logged with waypoint, vehicle position, remaining distance and time, and listed in the
+  task's `skipped_waypoints`. A scan that skips every waypoint fails early. Both settings are in
+  `config/horus.yaml`.
+- **Disarm failure**: a scan whose vehicle is disarmed fails with a clear error instead of recording
+  the remaining waypoints as skipped.
+- **Face travel**: before each leg the vehicle turns toward the waypoint and holds that heading
+  while flying, so the forward proximity sensor points along the path.
+
+### What the runs show
+
+- **The stall is fixed.** The south-east cabinet waypoint (index 1) is skipped after 15 s in all six
+  runs with the check, with the reason logged. Before, the scan sat there until its 180 s limit.
+- **The progress check alone exposed a collision.** With the stall gone the scan flies its remaining
+  legs, which the old code never reached. On the last leg, west along the north side, the vehicle
+  flew into the standing red-shirt person and ArduPilot crash-disarmed it, in 3 of 3 runs. The scan
+  then reported `succeeded`, counting the crashed vehicle as one more skipped waypoint.
+- **The disarm failure works.** In both later crash runs the scan ended `failed` with
+  "scan vehicle is disarmed at waypoint 8/8 ..." instead of `succeeded`.
+- **Facing the direction of travel is not enough to stop the collision.** The vehicle did turn to
+  face west (heading 274-277 degrees) before the last leg, and still crashed in 2 of 3 runs; in the
+  third it passed 0.19 m from the same person without a crash report. The autopilot log of
+  scan-fixed-run1 shows why: the forward proximity reading flickered between about 1.2 m and 3 m
+  while closing on the person (1.24, 1.93, 2.49, 2.95 m in the last seconds). Avoidance slowed the
+  vehicle from 0.8 to 0.15 m/s while the reading was short, then released when it went long again,
+  and the vehicle hit the person with the sensor reading 2.9 m.
+- **Cause, as far as the logs show.** Each proximity sensor in `sim/models/horus_sensor_payload` is a
+  single ray (one sample, zero beam width). At 1.5 m altitude that ray meets a 1.9 m person near the
+  neck, so small pitch changes move it on and off the body. A wide obstacle such as the cabinet or a
+  wall is detected steadily; a person is not. This is a simulator sensor property, which Stage 2 was
+  told not to change.
+- **More waypoints are skipped with the heading fix** (3-4 against 2-3), because the forward sensor
+  now reports walls and furniture ahead that previously went unseen. Skips cost about 15 s each.
+- **Time.** The request took 164-174 s with the progress check alone and 207-236 s with all fixes,
+  against 240 s before. The scan task itself takes 122-155 s against 177 s.
+
+### Tests
+
+158 tests pass in the sim image (143 before Stage 2, 15 new). One existing test,
+`test_take_off_retries_arming_after_prearm_rejection`, fails on any code when the machine has been up
+for less than about 16 minutes: it submits a task with a 30 s lifetime and then pins the clock to
+1000 s. It is unrelated to this work and was left unchanged.
+
 Every S6 run so far passes its success rule only narrowly (travel 0.52-0.69 m against a 0.5 m
 threshold; closest approach 1.7-1.9 m against the requested 1.5 m), which makes the success column
 sensitive to this flake at any effort level.

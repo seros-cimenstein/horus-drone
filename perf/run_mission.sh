@@ -79,6 +79,15 @@ until "${venv}/bin/horus-mcp-call" get_state > "${out}/final_state.json" 2>/dev/
   (( SECONDS < deadline )) || break
   sleep 3
 done
+# The MCP event log cuts tool results at 500 characters, so save each scan task's full status.
+mcp_run_dir="$(sed 's#^/horus/##' runs/horus/current-run 2>/dev/null || true)"
+if [[ -n "${mcp_run_dir}" && -f "${mcp_run_dir}/events.jsonl" ]]; then
+  cp "${mcp_run_dir}/events.jsonl" "${out}/mcp_events.jsonl"
+  while IFS= read -r task_id; do
+    "${venv}/bin/horus-mcp-call" get_task_status --args "{\"task_id\": \"${task_id}\"}" \
+      > "${out}/scan_task_${task_id}.json" 2>/dev/null || true
+  done < <(grep '"tool":"scan"' "${out}/mcp_events.jsonl" | grep -o 'task_id\\":\\"[0-9a-f]*' | grep -o '[0-9a-f]*$' | sort -u)
+fi
 : > "${out}/rtf.stop"
 docker exec "${container}" pkill -INT -f gt_trace.py || true
 sleep 1

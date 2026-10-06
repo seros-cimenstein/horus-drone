@@ -175,8 +175,13 @@ def main(run_dir: str) -> None:
     started, ended = float(window["started"]), float(window["ended"])
     config = yaml.safe_load((out / "horus.yaml").read_text())
     armed = None
+    crash = None
     try:
-        armed = json.loads((out / "final_state.json").read_text())["vehicle"]["armed"]
+        final_state = (out / "final_state.json").read_text()
+        # ArduPilot reports a crash check as STATUSTEXT, e.g. "Crash: Disarming: AngErr=52>30".
+        found = re.search(r"Crash: [^\"\\]*", final_state)
+        crash = found.group(0) if found else None
+        armed = json.loads(final_state)["vehicle"]["armed"]
     except Exception:
         pass
     events = _jsonl(out / "events.jsonl")
@@ -206,6 +211,7 @@ def main(run_dir: str) -> None:
         "commander": commander(events),
         "ground_truth": truth,
         "landed_disarmed": armed is False,
+        "crash": crash,
     }
     if "S6" in window["mission"]:
         closest = truth["closest_airborne_distance_m"]
@@ -237,6 +243,8 @@ def main(run_dir: str) -> None:
         f"- Commander timed out: {cmd['timed_out']}",
         f"- Landed and disarmed: {summary['landed_disarmed']}; landing error: {truth['landing_error_m']} m",
         f"- Returned home by hold timeout before the commander asked: {truth['landed_before_commanded']}",
+        f"- Autopilot crash report: {summary['crash']}",
+        f"- Closest airborne distance to each person: {truth['closest_airborne_distance_m']}",
     ]
     if "s6_correct_target" in summary:
         lines.append(
