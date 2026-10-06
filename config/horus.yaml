@@ -41,7 +41,7 @@ executor:
   target_height_m: 1.9
   target_match_threshold: 0.72
   camera_horizontal_fov_deg: 114.59155902616465
-  link_loss_rth_delay_s: 30.0
+  link_loss_rth_delay_s: 120.0
 perception:
   enabled: true
   point_compensation_enabled: true
