@@ -531,6 +531,11 @@ def create_mcp(
         ``{"north_min_m": -2, "north_max_m": 2, "east_min_m": -3, "east_max_m": 3,
         "altitude_m": 1.5}``.
         The executor clamps area, altitude, speed, and distance to configured limits.
+        The vehicle turns to face each leg before flying it, so its forward proximity sensor
+        looks along the path. A waypoint it cannot make progress toward (for example one blocked
+        by obstacle avoidance) is skipped after executor.scan_progress_timeout_s and listed in the
+        task's ``skipped_waypoints``; a scan that skips every waypoint, or whose vehicle is
+        disarmed, fails.
         ``ttl_s`` optionally sets the task lifetime in seconds; inspect get_task_status
         for asynchronous completion, expiry, and requested versus executed bounds.
         """

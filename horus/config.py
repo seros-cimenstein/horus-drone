@@ -39,6 +39,8 @@ class ExecutorSettings:
     geofence_polygon_ned: tuple[tuple[float, float], ...] | None = None
     geofence_margin_m: float = 0.0
     arrival_tolerance_m: float = 0.25
+    scan_progress_threshold_m: float = 0.15
+    scan_progress_timeout_s: float = 15.0
     follow_distance_m: float = 2.0
     target_width_m: float | None = None
     # Known target height (m) for monocular range from the detection box height; people ~1.7 m.
