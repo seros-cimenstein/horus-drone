@@ -34,6 +34,9 @@ executor:
   # 0.1 m half wall + 1.0 m + 0.1 m slack; a smaller inset makes edge targets unreachable.
   geofence_margin_m: 1.2
   arrival_tolerance_m: 0.25
+  # Skip a scan waypoint after this much time without threshold-sized progress.
+  scan_progress_threshold_m: 0.15
+  scan_progress_timeout_s: 15.0
   follow_distance_m: 2.0
   target_width_m: null
   # Monocular range from box height. The simulated people (MakeHuman mesh) are 1.90 m tall;

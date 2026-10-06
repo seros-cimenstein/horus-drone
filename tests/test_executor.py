@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import time
 
+import pytest
+
 from horus.config import ExecutorSettings
 from horus.executor import ExecutorState, HorusExecutor
 from horus.flight import Pose
@@ -26,6 +28,7 @@ class FakeFlight:
     def __init__(self, pose: Pose = Pose(0.0, 0.0, 2.0)):
         self._telemetry = FakeTelemetry(pose)
         self.commands = []
+        self.follow_yaw_commands = False
 
     def telemetry(self):
         return self._telemetry
@@ -41,6 +44,8 @@ class FakeFlight:
 
     def set_velocity_ned(self, north, east, down, yaw_deg=None):
         self.commands.append(("velocity", north, east, down) if yaw_deg is None else ("velocity", north, east, down, yaw_deg))
+        if yaw_deg is not None and self.follow_yaw_commands:
+            self._telemetry.heading_deg = yaw_deg
 
     def hold(self):
         self.commands.append(("hold",))
@@ -73,6 +78,322 @@ def _settings(**overrides):
     return ExecutorSettings(**values)
 
 
+def _scan_area():
+    return {
+        "north_min_m": 0.0,
+        "north_max_m": 0.5,
+        "east_min_m": 0.0,
+        "east_max_m": 0.5,
+        "altitude_m": 2.0,
+        "spacing_m": 0.5,
+    }
+
+
+def _set_flight_pose(flight, pose):
+    flight._telemetry.pose = pose
+    flight._telemetry.pose_updated_monotonic = time.monotonic()
+
+
+def _armed_scan_flight(pose=Pose(0.0, 0.0, 2.0), *, follow_yaw=True):
+    flight = FakeFlight(pose)
+    flight._telemetry.armed = True
+    flight.follow_yaw_commands = follow_yaw
+    return flight
+
+
+def test_scan_reaches_every_waypoint_without_skips():
+    flight = _armed_scan_flight()
+    executor = HorusExecutor(flight, _settings(), autostart=False)
+    task = executor.submit_skill("scan", {"area": _scan_area()}, ttl_s=300.0)
+    task_id = task["task_id"]
+
+    assert task["skipped_waypoints"] == []
+    executor.tick()
+    for waypoint in task["executed_target"][1:]:
+        _set_flight_pose(
+            flight,
+            Pose(waypoint["north_m"], waypoint["east_m"], waypoint["up_m"]),
+        )
+        executor.tick()
+
+    status = executor.get_task_status(task_id)
+    assert status["status"] == "succeeded"
+    assert status["skipped_waypoints"] == []
+    assert status["result"]["skipped_waypoints"] == []
+    executor.close()
+
+
+def test_scan_skips_stuck_waypoint_and_continues(monkeypatch, caplog):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    flight = _armed_scan_flight()
+    executor = HorusExecutor(flight, _settings(), autostart=False)
+    task = executor.submit_skill("scan", {"area": _scan_area()}, ttl_s=300.0)
+    task_id = task["task_id"]
+    waypoints = task["executed_target"]
+
+    executor.tick()  # Reach waypoint zero and begin moving toward waypoint one.
+    clock[0] += 1.0
+    _set_flight_pose(flight, Pose(0.0, 0.0, 2.0))
+    executor.tick()  # Start the no-progress timer for waypoint one.
+    assert executor.get_task_status(task_id)["skipped_waypoints"] == []
+
+    clock[0] += 15.0
+    _set_flight_pose(flight, Pose(0.0, 0.0, 2.0))
+    executor.tick()
+
+    status = executor.get_task_status(task_id)
+    assert status["status"] == "running"
+    assert len(status["skipped_waypoints"]) == 1
+    skipped = status["skipped_waypoints"][0]
+    assert skipped["index"] == 1
+    assert skipped["waypoint"] == waypoints[1]
+    assert skipped["vehicle_pose"] == {"north_m": 0.0, "east_m": 0.0, "up_m": 2.0}
+    assert skipped["distance_m"] == 0.5
+    assert skipped["stuck_s"] == 15.0
+    assert "no progress" in skipped["reason"]
+    assert "obstacle avoidance" in skipped["reason"]
+    assert task_id in caplog.text
+    assert "waypoint 1" in caplog.text
+    assert any(command == ("velocity", 0.0, 0.0, 0.0) for command in flight.commands)
+
+    for waypoint in waypoints[2:]:
+        _set_flight_pose(
+            flight,
+            Pose(waypoint["north_m"], waypoint["east_m"], waypoint["up_m"]),
+        )
+        executor.tick()
+
+    final = executor.get_task_status(task_id)
+    assert final["status"] == "succeeded"
+    assert final["result"]["skipped_waypoints"] == final["skipped_waypoints"]
+    executor.close()
+
+
+def test_scan_slow_progress_resets_timeout_without_skipping(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    flight = _armed_scan_flight()
+    executor = HorusExecutor(flight, _settings(), autostart=False)
+    task = executor.submit_skill("scan", {"area": _scan_area()}, ttl_s=300.0)
+    task_id = task["task_id"]
+    executor.tick()
+
+    for _ in range(100):
+        internal_task = executor._tasks[task_id]
+        if internal_task.status != "running":
+            break
+        target = internal_task._waypoints[internal_task._waypoint_index]
+        current = flight._telemetry.pose
+        north_delta = target.north_m - current.north_m
+        east_delta = target.east_m - current.east_m
+        horizontal = math.hypot(north_delta, east_delta)
+        step = min(0.1, horizontal)
+        if horizontal > 0.0:
+            pose = Pose(
+                current.north_m + north_delta * step / horizontal,
+                current.east_m + east_delta * step / horizontal,
+                target.up_m,
+            )
+        else:
+            pose = target
+        clock[0] += 5.0
+        _set_flight_pose(flight, pose)
+        executor.tick()
+
+    status = executor.get_task_status(task_id)
+    assert status["status"] == "succeeded"
+    assert status["skipped_waypoints"] == []
+    assert clock[0] - 1000.0 > 15.0
+    executor.close()
+
+
+def test_scan_fails_early_when_every_waypoint_is_unreachable(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    flight = _armed_scan_flight(Pose(0.0, -1.0, 2.0))
+    executor = HorusExecutor(flight, _settings(), autostart=False)
+    task = executor.submit_skill("scan", {"area": _scan_area()}, ttl_s=600.0)
+    task_id = task["task_id"]
+
+    for _ in range(2 * len(task["executed_target"]) + 1):
+        executor.tick()
+        if executor.get_task_status(task_id)["status"] != "running":
+            break
+        clock[0] += 15.0
+        _set_flight_pose(flight, flight._telemetry.pose)
+
+    status = executor.get_task_status(task_id)
+    assert status["status"] == "failed"
+    assert "all 4 waypoints" in status["error"]
+    assert "no progress toward any waypoint" in status["error"]
+    assert "obstacle avoidance" in status["error"]
+    assert len(status["skipped_waypoints"]) == 4
+    assert status["result"]["skipped_waypoints"] == status["skipped_waypoints"]
+    assert clock[0] - 1000.0 < 600.0
+    executor.close()
+
+
+def test_scan_fails_disarmed_and_preserves_earlier_skips(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    flight = _armed_scan_flight()
+    executor = HorusExecutor(flight, _settings(scan_progress_timeout_s=2.0), autostart=False)
+    task_id = executor.submit_skill("scan", {"area": _scan_area()}, ttl_s=300.0)["task_id"]
+
+    executor.tick()
+    clock[0] += 0.1
+    _set_flight_pose(flight, flight._telemetry.pose)
+    executor.tick()
+    clock[0] += 2.0
+    _set_flight_pose(flight, flight._telemetry.pose)
+    executor.tick()
+    running = executor.get_task_status(task_id)
+    assert running["status"] == "running"
+    assert len(running["skipped_waypoints"]) == 1
+
+    flight._telemetry.armed = False
+    executor.tick()
+
+    status = executor.get_task_status(task_id)
+    assert status["status"] == "failed"
+    assert "disarmed" in status["error"]
+    assert "waypoint 3/4" in status["error"]
+    assert "index 2" in status["error"]
+    assert "north=0.000, east=0.000, up=2.000" in status["error"]
+    assert "crash" in status["error"] and "never took off" in status["error"]
+    assert len(status["skipped_waypoints"]) == 1
+    assert status["result"]["skipped_waypoints"] == status["skipped_waypoints"]
+    executor.close()
+
+
+def test_scan_turns_before_translation_and_keeps_yaw_on_translation():
+    flight = _armed_scan_flight(follow_yaw=False)
+    executor = HorusExecutor(
+        flight, _settings(scan_progress_timeout_s=2.0), autostart=False
+    )
+    task = executor.submit_skill("scan", {"area": _scan_area()}, ttl_s=300.0)
+
+    executor.tick()
+    assert flight.commands[-1] == ("velocity", 0.0, 0.0, 0.0, 90.0)
+    assert not any(
+        command[0] == "velocity" and any(abs(value) > 0.0 for value in command[1:4])
+        for command in flight.commands
+    )
+
+    flight._telemetry.heading_deg = 86.0
+    executor.tick()
+    translation = flight.commands[-1]
+    assert translation[0] == "velocity"
+    assert translation[1:4] == (0.0, 0.5, 0.0)
+    assert translation[4] == 90.0
+
+    _set_flight_pose(flight, Pose(0.0, 0.2, 2.0))
+    executor.tick()
+    assert flight.commands[-1] == ("velocity", 0.0, 0.3, 0.0, 90.0)
+    executor.close()
+
+
+def test_scan_without_usable_heading_translates_with_leg_bearing():
+    flight = _armed_scan_flight()
+    flight._telemetry.heading_deg = None
+    executor = HorusExecutor(flight, _settings(), autostart=False)
+    executor.submit_skill("scan", {"area": _scan_area()}, ttl_s=300.0)
+
+    executor.tick()
+
+    assert flight.commands[-1] == ("velocity", 0.0, 0.5, 0.0, 90.0)
+    executor.close()
+
+
+def test_scan_turn_time_does_not_count_as_no_progress(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    flight = _armed_scan_flight(follow_yaw=False)
+    executor = HorusExecutor(
+        flight, _settings(scan_progress_timeout_s=2.0), autostart=False
+    )
+    task_id = executor.submit_skill("scan", {"area": _scan_area()}, ttl_s=300.0)["task_id"]
+
+    executor.tick()
+    clock[0] += 1.5
+    _set_flight_pose(flight, flight._telemetry.pose)
+    executor.tick()
+    assert executor.get_task_status(task_id)["skipped_waypoints"] == []
+
+    flight._telemetry.heading_deg = 90.0
+    executor.tick()
+    clock[0] += 1.5
+    _set_flight_pose(flight, flight._telemetry.pose)
+    executor.tick()
+
+    status = executor.get_task_status(task_id)
+    assert status["status"] == "running"
+    assert status["skipped_waypoints"] == []
+    executor.close()
+
+
+def test_scan_turn_timeout_skips_waypoint_with_turn_reason(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    flight = _armed_scan_flight(follow_yaw=False)
+    executor = HorusExecutor(
+        flight, _settings(scan_progress_timeout_s=2.0), autostart=False
+    )
+    task_id = executor.submit_skill("scan", {"area": _scan_area()}, ttl_s=300.0)["task_id"]
+
+    executor.tick()
+    clock[0] += 2.0
+    _set_flight_pose(flight, flight._telemetry.pose)
+    executor.tick()
+
+    status = executor.get_task_status(task_id)
+    assert status["status"] == "running"
+    assert len(status["skipped_waypoints"]) == 1
+    assert status["skipped_waypoints"][0]["index"] == 1
+    assert "could not turn toward waypoint" in status["skipped_waypoints"][0]["reason"]
+    executor.close()
+
+
+def test_scan_turn_skips_count_toward_all_waypoints_failure(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    flight = _armed_scan_flight(Pose(0.0, -1.0, 2.0), follow_yaw=False)
+    executor = HorusExecutor(
+        flight, _settings(scan_progress_timeout_s=2.0), autostart=False
+    )
+    task_id = executor.submit_skill("scan", {"area": _scan_area()}, ttl_s=300.0)["task_id"]
+
+    for _ in range(2 * len(executor.get_task_status(task_id)["executed_target"]) + 1):
+        executor.tick()
+        if executor.get_task_status(task_id)["status"] != "running":
+            break
+        clock[0] += 2.0
+        _set_flight_pose(flight, flight._telemetry.pose)
+
+    status = executor.get_task_status(task_id)
+    assert status["status"] == "failed"
+    assert len(status["skipped_waypoints"]) == 4
+    assert all("could not turn toward waypoint" in skip["reason"] for skip in status["skipped_waypoints"])
+    assert "skipped all 4 waypoints" in status["error"]
+    assert status["result"]["skipped_waypoints"] == status["skipped_waypoints"]
+    executor.close()
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("scan_progress_threshold_m", 0.0),
+        ("scan_progress_threshold_m", -0.1),
+        ("scan_progress_timeout_s", 0.0),
+        ("scan_progress_timeout_s", -0.1),
+    ],
+)
+def test_scan_progress_settings_must_be_positive(setting, value):
+    with pytest.raises(ValueError, match="scan progress"):
+        HorusExecutor(FakeFlight(), _settings(**{setting: value}), autostart=False)
+
+
 def test_goto_completes_only_at_measured_target_and_enters_guided_hold():
     flight = FakeFlight()
     executor = HorusExecutor(flight, _settings(), autostart=False)
@@ -86,6 +407,28 @@ def test_goto_completes_only_at_measured_target_and_enters_guided_hold():
     assert executor.state == ExecutorState.HOLDING
     assert ("guided",) in flight.commands
     assert ("hold",) in flight.commands
+    executor.close()
+
+
+def test_goto_only_passes_yaw_when_heading_was_requested():
+    flight = FakeFlight()
+    executor = HorusExecutor(flight, _settings(), autostart=False)
+    executor.submit_skill(
+        "goto", {"pose": {"north_m": 1.0, "east_m": 0.0, "up_m": 2.0}}
+    )
+    executor.tick()
+    assert flight.commands[-1] == ("velocity", 1.0, 0.0, 0.0)
+    assert not any(len(command) == 5 for command in flight.commands if command[0] == "velocity")
+    executor.close()
+
+    flight = FakeFlight()
+    executor = HorusExecutor(flight, _settings(), autostart=False)
+    executor.submit_skill(
+        "goto",
+        {"pose": {"north_m": 0.0, "east_m": 0.0, "up_m": 2.0}, "heading_deg": 45.0},
+    )
+    executor.tick()
+    assert flight.commands[-1] == ("velocity", 0.0, 0.0, 0.0, 45.0)
     executor.close()
 
 

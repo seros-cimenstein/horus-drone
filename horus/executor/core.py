@@ -253,6 +253,10 @@ class SkillTask:
     _phase: str = "start"
     _waypoints: list[Pose] = field(default_factory=list)
     _waypoint_index: int = 0
+    skipped_waypoints: list[dict[str, Any]] = field(default_factory=list)
+    _scan_progress_reference_distance_m: float | None = None
+    _scan_progress_since_monotonic: float | None = None
+    _scan_turn_since_monotonic: float | None = None
     _target_pose: Pose | None = None
     _arm_requested_monotonic: float = 0.0
     tracking: dict[str, Any] = field(default_factory=dict)
@@ -292,6 +296,8 @@ class HorusExecutor:
             settings.geofence_radius_m,
             settings.geofence_margin_m,
             settings.arrival_tolerance_m,
+            settings.scan_progress_threshold_m,
+            settings.scan_progress_timeout_s,
             settings.camera_horizontal_fov_deg,
             settings.target_match_threshold,
             settings.link_loss_rth_delay_s,
@@ -310,6 +316,8 @@ class HorusExecutor:
             raise ValueError("command_ttl_s and max_speed_m_s must be positive")
         if settings.max_vertical_speed_m_s <= 0 or settings.arrival_tolerance_m <= 0:
             raise ValueError("vertical speed and arrival tolerance must be positive")
+        if settings.scan_progress_threshold_m <= 0 or settings.scan_progress_timeout_s <= 0:
+            raise ValueError("scan progress threshold and timeout must be positive")
         if settings.geofence_radius_m < 0.5 or settings.max_distance_m < 0.5:
             raise ValueError("geofence_radius_m and max_distance_m must be at least 0.5 m")
         if settings.min_altitude_m < 0 or settings.max_altitude_m < settings.min_altitude_m:
@@ -737,18 +745,180 @@ class HorusExecutor:
             return arrived
         if task.skill == "scan":
             while task._waypoint_index < len(task._waypoints):
-                target, reasons = self._clamp_pose(task._waypoints[task._waypoint_index])
+                waypoint_index = task._waypoint_index
+                target, reasons = self._clamp_pose(task._waypoints[waypoint_index])
                 if reasons:
                     task.clamp_reason = "; ".join(filter(None, [task.clamp_reason, *reasons]))
-                    task._waypoints[task._waypoint_index] = target
-                if self._goto_step(target):
+                    task._waypoints[waypoint_index] = target
+
+                telemetry = self._telemetry()
+                current = self._current_pose()
+                if getattr(telemetry, "armed", None) is False:
+                    position = "unavailable" if current is None else (
+                        f"north={current.north_m:.3f}, east={current.east_m:.3f}, "
+                        f"up={current.up_m:.3f}"
+                    )
+                    raise RuntimeError(
+                        f"scan vehicle is disarmed at waypoint {waypoint_index + 1}/"
+                        f"{len(task._waypoints)} (index {waypoint_index}), vehicle position "
+                        f"{position}; "
+                        "possible crash or vehicle never took off"
+                    )
+                if current is None:
+                    raise RuntimeError("local vehicle pose unavailable; refusing open-loop movement")
+                pose_updated = getattr(telemetry, "pose_updated_monotonic", None)
+                age = math.inf if pose_updated is None else max(
+                    0.0, time.monotonic() - float(pose_updated)
+                )
+                if age > 1.5:
+                    raise RuntimeError(f"vehicle pose is stale ({age:.2f}s); entering hold")
+
+                horizontal = math.hypot(
+                    target.north_m - current.north_m,
+                    target.east_m - current.east_m,
+                )
+                vertical = abs(target.up_m - current.up_m)
+                if (
+                    horizontal <= self.settings.arrival_tolerance_m
+                    and vertical <= self.settings.arrival_tolerance_m
+                ):
+                    self._command_zero_velocity()
                     task._waypoint_index += 1
+                    task._scan_progress_reference_distance_m = None
+                    task._scan_progress_since_monotonic = None
+                    task._scan_turn_since_monotonic = None
                     continue
+
+                north = target.north_m - current.north_m
+                east = target.east_m - current.east_m
+                bearing = (
+                    math.degrees(math.atan2(east, north)) % 360.0
+                    if horizontal > 1e-6
+                    else None
+                )
+                now = time.monotonic()
+                if horizontal > self.settings.arrival_tolerance_m and bearing is not None:
+                    heading_value = getattr(telemetry, "heading_deg", None)
+                    try:
+                        heading = float(heading_value)
+                    except (TypeError, ValueError, OverflowError):
+                        heading = math.nan
+                    if math.isfinite(heading):
+                        heading_error = (bearing - heading + 180.0) % 360.0 - 180.0
+                        if abs(heading_error) > self.HEADING_TOLERANCE_DEG:
+                            if task._scan_turn_since_monotonic is None:
+                                task._scan_turn_since_monotonic = now
+                                task._scan_progress_reference_distance_m = None
+                                task._scan_progress_since_monotonic = None
+                            elif (
+                                now - task._scan_turn_since_monotonic
+                                >= self.settings.scan_progress_timeout_s
+                            ):
+                                turn_s = now - task._scan_turn_since_monotonic
+                                reason = (
+                                    f"could not turn toward waypoint within {turn_s:.1f} s"
+                                )
+                                self._skip_scan_waypoint(
+                                    task, waypoint_index, target, current,
+                                    max(horizontal, vertical), turn_s, reason,
+                                )
+                                continue
+                            self.flight.set_velocity_ned(0.0, 0.0, 0.0, yaw_deg=bearing)
+                            return False
+
+                task._scan_turn_since_monotonic = None
+                # This max metric reaches the same tolerance boundary as _goto_step's two checks.
+                distance = max(horizontal, vertical)
+                if task._scan_progress_reference_distance_m is None:
+                    task._scan_progress_reference_distance_m = distance
+                    task._scan_progress_since_monotonic = now
+                elif (
+                    task._scan_progress_reference_distance_m - distance
+                    >= self.settings.scan_progress_threshold_m
+                ):
+                    task._scan_progress_reference_distance_m = distance
+                    task._scan_progress_since_monotonic = now
+                elif (
+                    task._scan_progress_since_monotonic is not None
+                    and now - task._scan_progress_since_monotonic
+                    >= self.settings.scan_progress_timeout_s
+                ):
+                    stuck_s = now - task._scan_progress_since_monotonic
+                    reason = (
+                        f"no progress toward waypoint for {stuck_s:.1f} s; "
+                        "likely blocked by obstacle avoidance"
+                    )
+                    self._skip_scan_waypoint(
+                        task, waypoint_index, target, current, distance, stuck_s, reason
+                    )
+                    continue
+                self._goto_step(target, yaw_deg=bearing)
                 return False
             return True
         return self._target_step(task)
 
-    def _goto_step(self, target: Pose) -> bool:
+    def _skip_scan_waypoint(
+        self,
+        task: SkillTask,
+        waypoint_index: int,
+        target: Pose,
+        current: Pose,
+        distance: float,
+        elapsed_s: float,
+        reason: str,
+    ) -> None:
+        task.skipped_waypoints.append(
+            {
+                "index": waypoint_index,
+                "waypoint": target.as_dict(),
+                "vehicle_pose": current.as_dict(),
+                "distance_m": round(distance, 3),
+                "stuck_s": round(elapsed_s, 1),
+                "reason": reason,
+            }
+        )
+        logger.warning(
+            "scan task %s skipped waypoint %d target=(north=%.3f, east=%.3f, up=%.3f) "
+            "vehicle=(north=%.3f, east=%.3f, up=%.3f), remaining_distance=%.3f m, reason=%s",
+            task.task_id,
+            waypoint_index,
+            target.north_m,
+            target.east_m,
+            target.up_m,
+            current.north_m,
+            current.east_m,
+            current.up_m,
+            distance,
+            reason,
+        )
+        self._command_zero_velocity()
+        task._waypoint_index += 1
+        task._scan_progress_reference_distance_m = None
+        task._scan_progress_since_monotonic = None
+        task._scan_turn_since_monotonic = None
+        if len(task.skipped_waypoints) == len(task._waypoints):
+            all_no_progress = all(
+                "no progress" in item["reason"] for item in task.skipped_waypoints
+            )
+            all_turn_failures = all(
+                "could not turn" in item["reason"] for item in task.skipped_waypoints
+            )
+            if all_no_progress:
+                raise RuntimeError(
+                    f"scan skipped all {len(task._waypoints)} waypoints due to no progress "
+                    "toward any waypoint; likely blocked by obstacle avoidance"
+                )
+            if all_turn_failures:
+                raise RuntimeError(
+                    f"scan skipped all {len(task._waypoints)} waypoints because it could not "
+                    "turn toward any waypoint"
+                )
+            raise RuntimeError(
+                f"scan skipped all {len(task._waypoints)} waypoints because it could not "
+                "turn toward or make progress to any waypoint"
+            )
+
+    def _goto_step(self, target: Pose, *, yaw_deg: float | None = None) -> bool:
         current = self._current_pose()
         if current is None:
             raise RuntimeError("local vehicle pose unavailable; refusing open-loop movement")
@@ -768,7 +938,10 @@ class HorusExecutor:
         ve = east * scale
         vu = max(-self.settings.max_vertical_speed_m_s, min(self.settings.max_vertical_speed_m_s, up))
         # Velocity-only SET_POSITION_TARGET_LOCAL_NED is the only translation command.
-        self.flight.set_velocity_ned(vn, ve, -vu)
+        if yaw_deg is None:
+            self.flight.set_velocity_ned(vn, ve, -vu)
+        else:
+            self.flight.set_velocity_ned(vn, ve, -vu, yaw_deg=yaw_deg)
         return False
 
     def _candidate(self, target_id: Any) -> Any | None:
@@ -1214,6 +1387,8 @@ class HorusExecutor:
         }
         if task.skill == "follow":
             task.result["tracking"] = dict(task.tracking)
+        if task.skill == "scan":
+            task.result["skipped_waypoints"] = list(task.skipped_waypoints)
         if self._active_id == task.task_id:
             self._active_id = None
         if status in ("succeeded", "cancelled", "expired", "failed"):
@@ -1236,6 +1411,8 @@ class HorusExecutor:
         }
         if task.skill == "follow":
             result["tracking"] = dict(task.tracking)
+        if task.skill == "scan":
+            result["skipped_waypoints"] = list(task.skipped_waypoints)
         return result
 
     def get_task_status(self, task_id: str) -> dict[str, Any]:
@@ -1266,6 +1443,8 @@ class HorusExecutor:
                     "clamp_reason": task.clamp_reason,
                     "error": task.error,
                 }
+                if task.skill == "scan":
+                    task.result["skipped_waypoints"] = list(task.skipped_waypoints)
             return self._task_dict(task)
 
     def _emergency(self, action: str) -> dict[str, Any]:
@@ -1282,6 +1461,8 @@ class HorusExecutor:
                         "clamp_reason": task.clamp_reason,
                         "error": task.error,
                     }
+                    if task.skill == "scan":
+                        task.result["skipped_waypoints"] = list(task.skipped_waypoints)
             self._active_id = None
             self._queue.clear()
             self._holding_since = time.monotonic()
