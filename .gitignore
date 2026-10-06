@@ -10,3 +10,4 @@ __pycache__/
 /sim/run/
 /sim/logs/*
 !/sim/logs/koko_bringup.md
+/perf/runs/
