@@ -463,6 +463,9 @@ def create_mcp(
     def goto(pose: dict[str, float], heading_deg: float | None = None, ttl_s: float | None = None) -> str:
         """Queue bounded closed-loop motion to a local N/E/altitude pose.
 
+        ``pose`` keys are exact and all required: ``north_m``, ``east_m`` and ``up_m`` (metres in
+        the home-relative NED frame; ``up_m`` is height above home), e.g.
+        ``{"north_m": 1.0, "east_m": -0.5, "up_m": 1.5}``.
         Coordinates, speed, distance, and altitude are subject to executor clamps. Optional
         ``heading_deg`` (0 = north, clockwise) turns the vehicle in place after arrival.
         ``ttl_s`` optionally limits task lifetime in seconds; use its task ID with
@@ -478,6 +481,8 @@ def create_mcp(
     def approach(id: int, dist_m: float = 2.0, ttl_s: float | None = None) -> str:
         """Approach a currently visible tracker ID; ``id`` is not a pixel box.
 
+        ``id`` is a positive integer tracker ID from the latest list_candidates or get_map;
+        ``dist_m`` is the standoff distance in metres (clamped to at least 0.5).
         Stale/missing observations are rejected. Distance and motion are bounded;
         ``ttl_s`` is an optional task lifetime in seconds. Follow the returned task ID
         with get_task_status to observe completion, expiry, and any clamp.
@@ -489,6 +494,8 @@ def create_mcp(
     def follow(id: int, dist_m: float | None = None, ttl_s: float | None = None) -> str:
         """Follow a current tracker ID, never an identity inferred from pixels or labels.
 
+        ``id`` is a positive integer tracker ID from the latest list_candidates or get_map;
+        ``dist_m`` is the optional following distance in metres.
         A stale/lost target fails safely. Distance and velocity are bounded;
         ``ttl_s`` optionally limits task lifetime in seconds. Use the task ID with
         get_task_status to observe asynchronous completion, expiry, and clamps.
@@ -504,6 +511,8 @@ def create_mcp(
     def orbit(id: int, radius_m: float = 2.0, ttl_s: float | None = None) -> str:
         """Orbit a current tracker ID; ``id`` is an identity, not a pixel coordinate.
 
+        ``id`` is a positive integer tracker ID from the latest list_candidates or get_map;
+        ``radius_m`` is the orbit radius in metres (clamped to at least 0.75).
         Radius and motion are bounded, and a stale/lost observation is rejected.
         ``ttl_s`` optionally limits task lifetime in seconds; inspect the returned
         task ID with get_task_status for completion, expiry, and clamped values.
@@ -516,6 +525,11 @@ def create_mcp(
     def scan(area: dict[str, float], ttl_s: float | None = None) -> str:
         """Queue a bounded raster scan of a local N/E area.
 
+        ``area`` keys are exact. Required: ``north_min_m``, ``north_max_m``, ``east_min_m`` and
+        ``east_max_m`` (metres in the home-relative NED frame). Optional: ``altitude_m``
+        (default 2.0) and ``spacing_m`` (row spacing, default 2.0, minimum 0.5). Example:
+        ``{"north_min_m": -2, "north_max_m": 2, "east_min_m": -3, "east_max_m": 3,
+        "altitude_m": 1.5}``.
         The executor clamps area, altitude, speed, and distance to configured limits.
         ``ttl_s`` optionally sets the task lifetime in seconds; inspect get_task_status
         for asynchronous completion, expiry, and requested versus executed bounds.
@@ -527,6 +541,8 @@ def create_mcp(
     def hold() -> str:
         """Preempt queued work and command a bounded emergency hold in GUIDED mode.
 
+        Takes no arguments and returns an action status, not a task ID: do not pass it to
+        wait_for_task; confirm with get_state.
         Without a new skill the executor returns home and lands after the configured
         link-loss delay (executor.link_loss_rth_delay_s).
         """
@@ -535,13 +551,21 @@ def create_mcp(
     @mcp.tool()
     @event_logged
     def rth() -> str:
-        """Preempt queued work and request bounded return-to-home behavior."""
+        """Preempt queued work and request bounded return-to-home behavior.
+
+        Takes no arguments and returns an action status, not a task ID: do not pass it to
+        wait_for_task; confirm the landing with get_state (state IDLE, vehicle disarmed).
+        """
         return _json(executor.rth())
 
     @mcp.tool()
     @event_logged
     def land() -> str:
-        """Preempt queued work and request emergency LAND mode."""
+        """Preempt queued work and request emergency LAND mode.
+
+        Takes no arguments and returns an action status, not a task ID: do not pass it to
+        wait_for_task; confirm the landing with get_state (vehicle disarmed).
+        """
         return _json(executor.land())
 
     @mcp.tool()
@@ -554,6 +578,7 @@ def create_mcp(
     ) -> str:
         """Resolve a description or old-frame pixel box to a current tracker ID.
 
+        Pass exactly one of ``description`` (text) or ``box``; passing both is an error.
         ``frame_id`` identifies the observation containing the query. ``box`` uses
         source-image [x1,y1,x2,y2] pixel geometry only; it is never an identity. Stale
         frames raise an error. ``compensate`` defaults to the configured policy; when
@@ -617,6 +642,8 @@ def create_mcp(
     async def wait_for_task(task_id: str, timeout_s: float = 30.0) -> str:
         """Block until a task reaches a terminal status or timeout_s (1-60 s) elapses.
 
+        ``task_id`` is the exact ``task_id`` string returned by take_off, goto, approach, follow,
+        orbit or scan; hold, rth and land return no task ID.
         Returns the task status plus ``waited_s`` and ``timed_out``; call again to keep
         waiting on long skills such as follow.
         """
