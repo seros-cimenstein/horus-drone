@@ -1,23 +1,23 @@
+"""The canonical 150 m forest world (primitive trees, rocks, logs and campsite)."""
+
 from __future__ import annotations
 
 import math
 import random
+from pathlib import Path
 
-from sim.worldgen.dressing import (
-    Dressing, add_clutter, add_fauna, animal_models, dress_person, fauna_areas, person_files,
-    sample_events,
-)
+from sim.worldgen.assembly import assemble_world
+from sim.worldgen.dressing import Dressing
 from sim.worldgen.environment import Environment
 from sim.worldgen.layout import (
     CLEARING_SCAN_MARGIN_M, FOREST_VANTAGE_ROLES, ForestLayout, clears_actor_columns,
     clears_actor_routes, clears_clearing_scan, distance_to_path, forest_ground_rows, forest_surface,
 )
-from sim.worldgen.scenario import person_record
+from sim.worldgen.plan import checked_transit_altitude
+from sim.worldgen.scenario import follow_manifest
 from sim.worldgen.sdf import (
-    PAD_COLLIDE_BITMASK, PROCEDURAL_DRONE_MODEL, TREE_BARK, TREE_CONIFER, TREE_DECIDUOUS,
-    box_geometry, collision, collision_at, cone_geometry, cylinder_geometry, f, home_pad, include,
-    material, pedestrian_include, sphere_geometry, static_model,
-    visual, world_header,
+    TREE_BARK, TREE_CONIFER, TREE_DECIDUOUS, box_geometry, collision, collision_at, cone_geometry,
+    cylinder_geometry, f, include, material, sphere_geometry, static_model, visual,
 )
 from sim.worldgen.textures import terrain_model_files, write_npy
 
@@ -126,7 +126,13 @@ def tree_visuals(layout: ForestLayout, rng: random.Random, env: Environment) -> 
                 f"tree_canopy_collision_{tree_number:03d}", x, y,
                 base + height * 0.71, 0, sphere_geometry(crown_radius * 1.18),
             ))
+    return "".join([*parts, *_missing_hiker_tree(layout, env), *_follow_occlusion_bush(layout, env)])
 
+
+def _missing_hiker_tree(layout: ForestLayout, env: Environment) -> list[str]:
+    """The broad canopy that hides the missing hiker from the transit altitude."""
+    missing_tree_x, missing_tree_y = layout.missing_canopy_tree
+    parts: list[str] = []
     missing_base = forest_height(missing_tree_x, missing_tree_y, layout)
     parts.append(visual(
         "tree_missing_hiker_trunk", missing_tree_x, missing_tree_y, missing_base + 3.0,
@@ -146,16 +152,20 @@ def tree_visuals(layout: ForestLayout, rng: random.Random, env: Environment) -> 
         "tree_missing_hiker_canopy_collision", missing_tree_x, missing_tree_y,
         missing_base + 9.0, 0, sphere_geometry(4.8),
     ))
+    return parts
 
+
+def _follow_occlusion_bush(layout: ForestLayout, env: Environment) -> list[str]:
+    """The tiered bush on the follow route that occludes the pursuit camera."""
+    parts: list[str] = []
     bush_x, bush_y = layout.follow_occluder_xy
     bush_base = forest_height(bush_x, bush_y, layout)
-    for level, (z_absolute, radius), colour in zip(
-        ("lower", "middle", "upper", "canopy"),
+    for level, (z_offset, radius), colour in zip(
+        ("lower", "middle", "upper"),
         CANONICAL_OCCLUDER_TIERS,
         (env.tint(TREE_DECIDUOUS[1], "foliage"), env.tint(TREE_DECIDUOUS[0], "foliage"),
-         env.tint(TREE_CONIFER[0], "foliage"), env.tint(TREE_DECIDUOUS[1], "foliage")),
+         env.tint(TREE_CONIFER[0], "foliage")),
     ):
-        z_offset = z_absolute
         foliage = sphere_geometry(radius)
         parts.append(visual(
             f"follow_occlusion_bush_{level}", bush_x, bush_y,
@@ -165,7 +175,7 @@ def tree_visuals(layout: ForestLayout, rng: random.Random, env: Environment) -> 
             f"follow_occlusion_bush_{level}_collision", bush_x, bush_y,
             bush_base + z_offset, 0, foliage,
         ))
-    return "".join(parts)
+    return parts
 
 
 def forest_static_models(layout: ForestLayout, rng: random.Random,
@@ -261,72 +271,45 @@ def forest_static_models(layout: ForestLayout, rng: random.Random,
     return models
 
 
-def _scenery_bundle(layout: ForestLayout, world_name: str, *, textures: bool,
-                    clutter: list[dict]):
-    """Instanced scenery + per-tile trimesh collision + sidecar for a procedural forest."""
-    from sim.worldgen.dressing import clutter_scenery
-    from sim.worldgen.materials import scene_textures
-    from sim.worldgen.png import solid_png
-    from sim.worldgen.scenery import emit_scenery
-
-    instances = tuple(layout.scenery_instances)
-    meshes = tuple(layout.scenery_meshes)
-    if clutter:
-        clutter_instances, clutter_meshes = clutter_scenery("forest", clutter)
-        instances = instances + tuple(clutter_instances)
-        meshes = meshes + tuple(clutter_meshes)
-    if textures:
-        texture_bank = scene_textures(layout.seed)
-    else:
-        # Validation builds only need the geometry; the real PNGs are written by the final build.
-        texture_bank = {mesh.texture: solid_png((96, 112, 72))
-                        for mesh in meshes if mesh.texture is not None}
-    return emit_scenery(world_name, instances, meshes, textures=texture_bank, stem=world_name)
-
-
-def build_forest(layout: ForestLayout, world_dir,
+def build_forest(layout: ForestLayout, world_dir: Path,
                  terrain_model_name: str, *, textures: bool = True, dressing: Dressing
-                 ) -> tuple[str, list[dict], list[list[float]] | None, dict[str, bytes | str]]:
+                 ) -> tuple[str, list[dict], list[list[float]], dict[str, bytes | str]]:
     env = dressing.environment
     rows = [list(row) for row in forest_ground_rows(layout)]
     files = terrain_model_files(rows, layout.seed, terrain_model_name,
                                 layout.trail, layout.clearing, textures=textures,
                                 clearing_radius=layout.clearing_radius, tint=env.ground_tint,
-                                map_spec=layout.map,
-                                uv_tile_m=None if layout.canonical else 8.0)
-    ground_name = ("horus_forest_ground.npy" if layout.canonical else
-                   f"horus_forest_p{layout.seed}_ground.npy")
-    files[ground_name] = write_npy(rows)
-    models: list[str] = []
-    if layout.canonical:
-        models.extend(forest_static_models(layout, random.Random(layout.seed), terrain_model_name,
-                                           env))
-    else:
-        models.append(include(terrain_model_name, "forest_terrain", 0, 0, 0))
-    height = lambda x, y: forest_height(x, y, layout)  # noqa: E731
-    agents = []
-    for person in layout.people:
-        record = dress_person(dressing, person_record(person))
-        x, y = person.position
-        record["z"] = height(x, y)
-        models.append(pedestrian_include(record))
-        agents.append(record)
-    files.update(person_files(dressing, agents, textures=textures))
-    animals = add_fauna(dressing, "forest", layout, agents, fauna_areas("forest", layout), height)
-    models.extend(animal_models(animals, height))
-    agents.extend(animals)
-    models.extend(add_clutter(dressing, "forest", layout, agents, height))
-    sample_events(dressing, agents, layout.seed)
-    world_name = "horus_forest" if layout.canonical else f"horus_forest_p{layout.seed}"
-    if not layout.canonical:
-        bundle = _scenery_bundle(layout, world_name, textures=textures, clutter=dressing.clutter)
-        models.append(bundle.sdf.rstrip("\n"))
-        files.update(bundle.files)
-    if layout.canonical:
-        pad = home_pad(world_dir)
-        drone = include("horus_iris_outdoor", "horus_iris", 0, 0, 0.195, math.pi / 2)
-    else:
-        pad = home_pad(world_dir, PAD_COLLIDE_BITMASK)
-        drone = include(PROCEDURAL_DRONE_MODEL, "horus_iris", 0, 0, 0.195, math.pi / 2)
-    world = world_header(world_name, env) + "\n".join(models) + "\n" + pad + "\n" + drone + "\n  </world></sdf>\n"
+                                map_spec=layout.map)
+    files["horus_forest_ground.npy"] = write_npy(rows)
+    world, agents, actor_files = assemble_world(
+        "forest", layout, dressing, world_dir, world_name="horus_forest",
+        static_models=forest_static_models(layout, random.Random(layout.seed), terrain_model_name, env),
+        textures=textures, height=lambda x, y: forest_height(x, y, layout))
+    files.update(actor_files)
     return world, agents, rows, files
+
+
+def transit_altitude(layout: ForestLayout) -> float:
+    """Canonical rule: clear the tallest conifer canopy (1.18 x tree height) by 6 m."""
+    return checked_transit_altitude(2.2 + layout.tree_height_range[1] * 1.18 + 6.0, 36.0,
+                                    procedural=False)
+
+
+def forest_areas(layout: ForestLayout) -> dict:
+    return {
+        "trail": [[x, y] for x, y in layout.trail],
+        "creek": [[x, y] for x, y in layout.creek],
+        "clearing": {"center": list(layout.clearing), "radius": layout.clearing_radius},
+        "camp": list(layout.camp),
+    }
+
+
+def manifest_extras(layout: ForestLayout, people: dict[str, dict]) -> tuple[dict, dict, dict]:
+    """The canonical forest's ``(follow, areas, extra manifest fields)``."""
+    follow = follow_manifest(layout, layout.follow_hiker, people, {
+        "occluder_models_or_collisions": [f"follow_occlusion_bush_{level}_collision"
+                                          for level in ("lower", "middle", "upper")],
+        "occluder_xy": [layout.follow_occluder_xy[0], layout.follow_occluder_xy[1]],
+        "occluder_radius_m": None,
+    }, stage_xy=[-12.1006, -15.7487])
+    return follow, forest_areas(layout), {}

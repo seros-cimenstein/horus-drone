@@ -5,7 +5,8 @@ Author (model.config): Louise Poubel
 Licence: Creative Commons Zero v1.0 Universal (CC0 1.0) (Fuel model-level publisher metadata at import time; the archive itself embeds no licence text)
 Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used. COLLADA <image> references were rewritten to the copied meshes/ and materials/textures/ layout. COLLADA effects Bark-effect, Branch_1-effect were given diffuse and A_ONE alpha textures from the copied files.
 Notes: Upstream materials/scripts (Ogre alpha rejection) are not copied; the COLLADA effects reference the copied branch (with alpha) and bark textures directly.
-Files: materials/textures/bark_diffuse.png, materials/textures/branch_diffuse.png, meshes/oak_tree.dae
+Files: materials/textures/branch_diffuse.png, meshes/oak_tree.dae
+Shared: texture bark_diffuse.png references sim/models/horus_tree_pine/materials/textures/bark_diffuse.png (the Oak tree archive's bark_diffuse.png imports byte-identical to the Pine Tree v6 archive's, CC0 1.0); not copied
 
 Upstream model.config (verbatim):
 <?xml version="1.0"?>

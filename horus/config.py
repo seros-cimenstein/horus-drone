@@ -24,6 +24,12 @@ class FlightSettings:
     global_origin_latitude_deg: float = -35.363262
     global_origin_longitude_deg: float = 149.165237
     global_origin_altitude_m: float = 584.0
+    # ArduPilot servo mounts (MNTx_TYPE 1, the shipped sim airframe) report their servo demand in
+    # GIMBAL_DEVICE_ATTITUDE_STATUS: body-frame roll/pitch that cancel the vehicle lean, although
+    # the message flags claim horizon-locked roll/pitch (AP_Mount_Servo::get_attitude_quaternion,
+    # Copter-4.7.1). HORUS then composes the vehicle attitude back in. Set False for a gimbal
+    # whose reported roll/pitch are horizon-relative as the flags state.
+    gimbal_status_body_frame: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,14 +47,18 @@ class ExecutorSettings:
     max_distance_m: float = 8.0
     min_altitude_m: float = 0.5
     max_altitude_m: float = 5.0
+    # Circular fence around home, used only without a polygon: setting both is rejected.
     geofence_radius_m: float = 8.0
+    # Vertices are [north_m, east_m] = [Gazebo y, Gazebo x].
     geofence_polygon_ned: tuple[tuple[float, float], ...] | None = None
     geofence_margin_m: float = 0.0
     arrival_tolerance_m: float = 0.25
     follow_distance_m: float = 2.0
     target_width_m: float | None = None
     # Known person height (m) for monocular range from the detection box height; applied only to
-    # person targets (person label, shirt-colour attribute, or remembered person label). People ~1.7 m.
+    # person targets (person label, shirt-colour attribute, or remembered person label). Real
+    # deployments should use the expected person height (~1.7 m); the simulated people (MakeHuman
+    # mesh) are 1.90 m tall, so the shipped sim profiles set 1.9.
     target_height_m: float | None = None
     target_match_threshold: float = 0.72
     camera_horizontal_fov_deg: float = 114.59155902616465
@@ -79,94 +89,52 @@ class ExecutorSettings:
     precision_landing_target_grace_s: float = 1.0
 
     def __post_init__(self) -> None:
-        try:
-            margin = float(self.geofence_margin_m)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError("geofence_margin_m must be a finite non-negative number") from exc
-        if not math.isfinite(margin) or margin < 0.0:
-            raise ValueError("geofence_margin_m must be a finite non-negative number")
-        object.__setattr__(self, "geofence_margin_m", margin)
-        pitch_value = self.default_gimbal_pitch_deg
-        try:
-            pitch = float(pitch_value)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError(
-                "default_gimbal_pitch_deg must be between -90 and 45 degrees"
-            ) from exc
-        if (
-            isinstance(pitch_value, bool)
-            or not math.isfinite(pitch)
-            or not -90.0 <= pitch <= 45.0
+        _number(self, "control_hz", 10.0, 20.0)
+        for name in (
+            "command_ttl_s",
+            "max_speed_m_s",
+            "max_vertical_speed_m_s",
+            "arrival_tolerance_m",
+            "link_loss_rth_delay_s",
+            "precision_landing_stall_s",
+            "precision_landing_min_descent_m_s",
+            "precision_landing_target_grace_s",
+            "telemetry_max_age_s",
         ):
-            raise ValueError(
-                "default_gimbal_pitch_deg must be between -90 and 45 degrees"
-            )
-        object.__setattr__(self, "default_gimbal_pitch_deg", pitch)
-        depression_value = self.min_ground_range_depression_deg
-        try:
-            depression = float(depression_value)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError(
-                "min_ground_range_depression_deg must be between 0 and 90 degrees"
-            ) from exc
-        if (
-            isinstance(depression_value, bool)
-            or not math.isfinite(depression)
-            or not 0.0 < depression < 90.0
-        ):
-            raise ValueError("min_ground_range_depression_deg must be between 0 and 90 degrees")
-        object.__setattr__(self, "min_ground_range_depression_deg", depression)
-        beam_value = self.forward_tof_vertical_half_fov_deg
-        try:
-            beam = float(beam_value)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError(
-                "forward_tof_vertical_half_fov_deg must be between 0 and 45 degrees"
-            ) from exc
-        if (
-            isinstance(beam_value, bool)
-            or not math.isfinite(beam)
-            or not 0.0 <= beam <= 45.0
-        ):
-            raise ValueError("forward_tof_vertical_half_fov_deg must be between 0 and 45 degrees")
-        object.__setattr__(self, "forward_tof_vertical_half_fov_deg", beam)
+            _number(self, name, 0.0, low_open=True)
+        _number(self, "target_width_m", 0.0, low_open=True, optional=True)
+        _number(self, "geofence_radius_m", 0.5)
+        _number(self, "max_distance_m", 0.5)
+        _number(self, "min_altitude_m", 0.0)
+        _number(self, "max_altitude_m", self.min_altitude_m)
+        _number(self, "camera_horizontal_fov_deg", 1.0, 179.0)
+        _number(self, "target_match_threshold", 0.0, 1.0)
+        margin = _number(self, "geofence_margin_m", 0.0)
+        _number(self, "default_gimbal_pitch_deg", -90.0, 45.0)
+        _number(self, "min_ground_range_depression_deg", 0.0, 90.0, low_open=True, high_open=True)
+        _number(self, "forward_tof_vertical_half_fov_deg", 0.0, 45.0)
 
-        cruise_value = self.cruise_speed_m_s
-        if cruise_value is not None and (
-            isinstance(cruise_value, bool)
-            or not isinstance(cruise_value, (int, float))
-            or not math.isfinite(cruise_value)
-            or cruise_value < 0.0
-        ):
-            raise ValueError("cruise_speed_m_s must be a finite non-negative number or null")
-        cruise = None if cruise_value in (None, 0, 0.0) else float(cruise_value)
-        if cruise is None:
+        # 0 or None disables the altitude-gated cruise speed.
+        if not _number(self, "cruise_speed_m_s", 0.0, optional=True):
+            object.__setattr__(self, "cruise_speed_m_s", None)
             if self.cruise_min_altitude_m is not None:
                 raise ValueError("cruise_min_altitude_m requires cruise_speed_m_s")
         else:
-            if cruise <= self.max_speed_m_s:
+            if self.cruise_speed_m_s <= self.max_speed_m_s:
                 raise ValueError("cruise_speed_m_s must exceed max_speed_m_s")
-            gate_value = self.cruise_min_altitude_m
-            if (
-                gate_value is None
-                or isinstance(gate_value, bool)
-                or not isinstance(gate_value, (int, float))
-                or not math.isfinite(gate_value)
-            ):
-                raise ValueError("cruise_speed_m_s requires a finite cruise_min_altitude_m")
-            gate = float(gate_value)
-            if not self.min_altitude_m <= gate <= self.max_altitude_m:
-                raise ValueError(
-                    "cruise_min_altitude_m must lie within [min_altitude_m, max_altitude_m]"
-                )
-            object.__setattr__(self, "cruise_min_altitude_m", gate)
-        object.__setattr__(self, "cruise_speed_m_s", cruise)
+            if self.cruise_min_altitude_m is None:
+                raise ValueError("cruise_speed_m_s requires cruise_min_altitude_m")
+            _number(self, "cruise_min_altitude_m", self.min_altitude_m, self.max_altitude_m)
 
         polygon = self.geofence_polygon_ned
         if polygon is None:
             if margin != 0.0:
                 raise ValueError("geofence_margin_m requires geofence_polygon_ned")
             return
+        if self.geofence_radius_m != ExecutorSettings.__dataclass_fields__["geofence_radius_m"].default:
+            raise ValueError(
+                "geofence_radius_m applies only without geofence_polygon_ned; set one or the other"
+            )
         if not isinstance(polygon, Sequence) or isinstance(polygon, (str, bytes)):
             raise ValueError("geofence_polygon_ned must be a sequence of NED vertex pairs")
         vertices: list[tuple[float, float]] = []
@@ -189,6 +157,56 @@ class ExecutorSettings:
         object.__setattr__(self, "geofence_polygon_ned", tuple(vertices))
 
 
+def _number(
+    settings: Any,
+    name: str,
+    low: float | None = None,
+    high: float | None = None,
+    *,
+    low_open: bool = False,
+    high_open: bool = False,
+    optional: bool = False,
+    section: str = "",
+) -> float | None:
+    """Validate ``settings.<name>`` as a finite number in the given range and store it as float.
+
+    ``optional`` admits None. Bounds are inclusive unless ``low_open``/``high_open``; ``section``
+    prefixes the field name in the error (``"perception."``).
+    """
+    value = getattr(settings, name)
+    if value is None and optional:
+        return None
+    lower = "" if low is None else f"{'>' if low_open else '>='} {low:g}"
+    upper = "" if high is None else f"{'<' if high_open else '<='} {high:g}"
+    bounds = " and ".join(part for part in (lower, upper) if part)
+    message = f"{section}{name} must be a finite number{' ' + bounds if bounds else ''}"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(message)
+    number = float(value)
+    if (
+        not math.isfinite(number)
+        or (low is not None and (number <= low if low_open else number < low))
+        or (high is not None and (number >= high if high_open else number > high))
+    ):
+        raise ValueError(message)
+    object.__setattr__(settings, name, number)
+    return number
+
+
+def _count(settings: Any, name: str, high: int | None = None, *, section: str = "") -> int:
+    """Validate ``settings.<name>`` as an integer in [1, high]."""
+    value = getattr(settings, name)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 1
+        or (high is not None and value > high)
+    ):
+        limit = f" between 1 and {high}" if high is not None else ""
+        raise ValueError(f"{section}{name} must be a positive integer{limit}")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class PerceptionSettings:
     enabled: bool = True
@@ -204,68 +222,37 @@ class PerceptionSettings:
     onnx_inter_op_num_threads: int = 1
     ring_buffer_s: float = 5.0
     render_width_px: int = 640
-    # Keep a live track's identity through a brief appearance-score dip (see TrackerConfig);
-    # 0 disables the grace and requires every validated frame to pass the threshold.
+    # Tracker identity tuning, passed through to horus.perception.tracks.TrackerConfig (which
+    # documents each field). 0 disables revalidation_grace_s / reacquisition_confirm_s.
     revalidation_grace_s: float = 1.0
-    # Multi-view references (R1): a live, continuously associated track stores up to
-    # ``reference_views`` confirmed views in total and validates against the best of them, so an
-    # appearance dip does not lose a correctly tracked target. Admission is anchored on the
-    # creation view at the full threshold and gated by class, shirt colour and crop size.
-    # Re-acquisition after a loss stays creation-view-only with the full threshold and gates.
     reference_views: int = 4
+    # Crops below this size are never stored as reference views and never re-acquire a lost ID.
     reference_view_min_width_px: int = 12
     reference_view_min_height_px: int = 30
     reference_view_dedupe_cos: float = 0.98
-    # Re-acquisition must pass on two distinct processed frames within this many seconds
-    # (0 disables the confirmation).
     reacquisition_confirm_s: float = 1.0
-    # The published shirt colour is a bounded vote over the track's recent accepted
-    # classifications, so one misread frame cannot label a track: a colour needs at least
-    # ``shirt_colour_min_votes`` votes within the last ``shirt_colour_window`` and strictly
-    # more votes than any other colour, and an undecided track publishes no colour.
     shirt_colour_window: int = 5
     shirt_colour_min_votes: int = 3
     ignore_regions: tuple[tuple[float, float, float, float], ...] = ()
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.open_vocab_hz, bool)
-            or not isinstance(self.open_vocab_hz, (int, float))
-            or not math.isfinite(self.open_vocab_hz)
-            or self.open_vocab_hz <= 0
+        section = "perception."
+        for name in ("max_fps", "open_vocab_hz", "ring_buffer_s"):
+            _number(self, name, 0.0, low_open=True, section=section)
+        for name in ("revalidation_grace_s", "reacquisition_confirm_s"):
+            _number(self, name, 0.0, section=section)
+        _number(self, "reference_view_dedupe_cos", 0.0, 1.0, section=section)
+        _count(self, "render_width_px", 640, section=section)
+        for name in (
+            "reference_views",
+            "reference_view_min_width_px",
+            "reference_view_min_height_px",
+            "shirt_colour_window",
+            "shirt_colour_min_votes",
+            "onnx_intra_op_num_threads",
+            "onnx_inter_op_num_threads",
         ):
-            raise ValueError("perception.open_vocab_hz must be a finite positive number")
-        if (
-            isinstance(self.revalidation_grace_s, bool)
-            or not isinstance(self.revalidation_grace_s, (int, float))
-            or not math.isfinite(self.revalidation_grace_s)
-            or self.revalidation_grace_s < 0
-        ):
-            raise ValueError("perception.revalidation_grace_s must be a finite non-negative number")
-        if isinstance(self.reference_views, bool) or not isinstance(self.reference_views, int) or self.reference_views < 1:
-            raise ValueError("perception.reference_views must be a positive integer")
-        for name in ("reference_view_min_width_px", "reference_view_min_height_px"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ValueError(f"perception.{name} must be a positive integer")
-        if (
-            isinstance(self.reference_view_dedupe_cos, bool)
-            or not isinstance(self.reference_view_dedupe_cos, (int, float))
-            or not math.isfinite(self.reference_view_dedupe_cos)
-            or not 0.0 <= self.reference_view_dedupe_cos <= 1.0
-        ):
-            raise ValueError("perception.reference_view_dedupe_cos must be in [0, 1]")
-        if (
-            isinstance(self.reacquisition_confirm_s, bool)
-            or not isinstance(self.reacquisition_confirm_s, (int, float))
-            or not math.isfinite(self.reacquisition_confirm_s)
-            or self.reacquisition_confirm_s < 0
-        ):
-            raise ValueError("perception.reacquisition_confirm_s must be a finite non-negative number")
-        for name in ("shirt_colour_window", "shirt_colour_min_votes"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ValueError(f"perception.{name} must be a positive integer")
+            _count(self, name, section=section)
         if self.shirt_colour_min_votes > self.shirt_colour_window:
             raise ValueError(
                 "perception.shirt_colour_min_votes must not exceed perception.shirt_colour_window"
@@ -273,11 +260,6 @@ class PerceptionSettings:
         if not isinstance(self.vocabulary, Sequence) or isinstance(self.vocabulary, (str, bytes)):
             raise ValueError("perception.vocabulary must be a list of terms")
         object.__setattr__(self, "vocabulary", list(self.vocabulary))
-
-        for name in ("onnx_intra_op_num_threads", "onnx_inter_op_num_threads"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ValueError(f"perception.{name} must be a positive integer")
 
         try:
             regions = tuple(
@@ -323,6 +305,7 @@ class CommanderSettings:
     api_key_env: str = "ANTHROPIC_API_KEY"
     max_tokens: int = 800
     timeout_s: float = 180.0
+    # Claude's agentic tool-call budget per stream-json turn, not per mission.
     max_turns: int = 40
     claude_command: str = "claude"
     # Claude Code backend: model alias or full name ('opus' tracks the newest Opus available to the

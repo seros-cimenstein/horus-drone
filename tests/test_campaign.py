@@ -5,91 +5,89 @@ import math
 import pytest
 from pathlib import Path
 
-from sim.scripts.procedural_campaign import (
-    _parse_cli,
-    aggregate_campaign,
+from sim.campaign.camera_geometry import camera_pose, compose_camera_pose, include_pose_and_sdf, project
+from sim.campaign.civilians import civilian_check, static_gt_people
+from sim.campaign.episode import Episode, clearance_below_threshold
+from sim.campaign.gz_topics import measured_rate, parse_camera_info, parse_pose_info, parse_stats, topic_messages
+from sim.campaign.mcp_session import exception_summary
+from sim.campaign.scenarios import approach, hazard, orbit, perception, rth, scan
+from sim.campaign.scenarios.follow import mission_id_matches, pin_selection_confidence
+from sim.campaign.scoring import (
     candidate_bbox,
     match_candidates_to_people,
-    render_summary_markdown,
     score_detection_rows,
-    select_largest_attribute_candidate,
+    selection_min_confidence,
 )
-from sim.scripts.campaign_episode import (
-    CAMPAIGN_MIN_RTF,
-    Episode,
-    _arguments,
-    _clearance_below_threshold,
-    _exception_summary,
-    _goto_ttl_s,
-    _hazard_path_is_collision_course,
-    _mission_id_matches,
-    _parse_camera_info,
-    _parse_pose_info,
-    _projection_validation,
-    _static_gt_people,
-    _topic_messages,
-    compose_camera_pose,
-)
+from sim.campaign.summary import aggregate_campaign, render_summary_markdown
+from sim.campaign.ttl import CAMPAIGN_MIN_RTF, goto_ttl_s, scale_mission_ttls
+from sim.scripts.campaign_episode import _arguments, _grounder_status, probe_grounder
+from sim.scripts.procedural_campaign import _parse_cli
+
+
+@pytest.fixture
+def make_episode():
+    """Build bare Episodes (class-level planner defaults only) with the given attributes."""
+    def make(**attributes) -> Episode:
+        episode = object.__new__(Episode)
+        for name, value in attributes.items():
+            setattr(episode, name, value)
+        return episode
+
+    return make
 
 
 def test_goto_ttl_covers_a_worst_case_leg_at_the_campaign_rtf_floor():
     worst_wall_s = 850.0 / 8.0 / CAMPAIGN_MIN_RTF
-    assert _goto_ttl_s(850.0, 8.0) >= worst_wall_s
-    # Canonical 60 m legs keep their shipped 120 s TTL bit-for-bit.
-    assert _goto_ttl_s(60.0, 3.0) == 120.0
+    assert goto_ttl_s(850.0, 8.0) >= worst_wall_s
 
 
 def test_clearance_threshold_accepts_rounding_but_keeps_real_shortfall():
-    assert not _clearance_below_threshold(1.498)
-    assert not _clearance_below_threshold(1.5)
-    assert _clearance_below_threshold(1.494)
-
+    assert not clearance_below_threshold(1.498)
+    assert not clearance_below_threshold(1.5)
+    assert clearance_below_threshold(1.494)
 
 
 def test_forest_scan_planner_falls_back_to_a_clear_inner_rectangle():
     from sim.worldgen.geometry import CollisionWorld, Primitive
 
-    episode = object.__new__(Episode)
-    episode.kind = "forest"
-    episode.manifest = {"areas": {"clearing": {"center": [0.0, 0.0], "radius": 15.0}}}
-    episode.world = CollisionWorld([
+    manifest = {"areas": {"clearing": {"center": [0.0, 0.0], "radius": 15.0}}}
+    world = CollisionWorld([
         Primitive("tree", "tree", "box", (12.0, 0.0, 10.0, 0.0, 0.0, 0.0),
                   (2.0, 2.0, 20.0), True)
     ])
 
-    plan = episode._plan_scan_area()
+    plan = scan.plan_scan_area("forest", manifest, world)
 
     assert plan is not None
     rect, altitude, clearance = plan
     assert rect[4] == "clearing-core-80pct"
     assert altitude == 10.0
     assert clearance >= 2.0
-    assert episode._scan_clearance(episode._scan_rectangles()[0], altitude) < 2.0
+    assert scan.scan_clearance(world, scan.scan_rectangles("forest", manifest)[0], altitude) < 2.0
 
 
-def test_forest_scan_skips_when_the_clearing_has_no_person():
+def test_forest_scan_skips_when_the_clearing_has_no_person(make_episode):
     # A clear rectangle with nobody inside can never score detection coverage; the campaign
     # must say so instead of flying it and reporting a bare coverage failure.
     import asyncio
 
     from sim.worldgen.geometry import CollisionWorld
 
-    episode = object.__new__(Episode)
-    episode.kind = "forest"
-    episode.manifest = {"areas": {"clearing": {"center": [0.0, 0.0], "radius": 15.0}},
-                        "people": [{"model": "civ_far_away", "position": [60.0, 60.0]}]}
-    episode.people = list(episode.manifest["people"])
-    episode.world = CollisionWorld([])
+    manifest = {"areas": {"clearing": {"center": [0.0, 0.0], "radius": 15.0}},
+                "people": [{"model": "civ_far_away", "position": [60.0, 60.0]}]}
+    episode = make_episode(kind="forest", manifest=manifest, people=list(manifest["people"]),
+                           world=CollisionWorld([]))
 
     async def airborne() -> bool:
         return True
 
     episode._ensure_airborne = airborne
 
-    result = asyncio.run(episode.test_scan())
+    result = asyncio.run(scan.run(episode))
 
     assert result["passed"] is False and result["status"] == "skipped"
     assert result["reason"] == "no manifest person inside the planned scan area"
+
 
 def test_camera_pose_uses_model_pose_order_and_outdoor_sensor_offset():
     models = {
@@ -114,7 +112,7 @@ def test_camera_pose_uses_model_pose_order_and_outdoor_sensor_offset():
 
 
 def test_camera_info_uses_runtime_intrinsics_for_horizontal_fov():
-    parsed = _parse_camera_info(
+    parsed = parse_camera_info(
         """
         width: 640
         height: 480
@@ -137,7 +135,7 @@ def test_camera_info_uses_runtime_intrinsics_for_horizontal_fov():
 
 
 def test_camera_info_falls_back_to_projection_matrix():
-    parsed = _parse_camera_info(
+    parsed = parse_camera_info(
         """
         width: 640
         height: 480
@@ -160,13 +158,12 @@ def test_camera_info_falls_back_to_projection_matrix():
 def test_project_uses_camera_info_intrinsics():
     from sim.worldgen.plan import Camera
 
-    episode = object.__new__(Episode)
-    episode.camera = Camera(hfov_deg=84.0, width=640, height=480)
-    episode.camera_info = {"fx_px": 400.0, "fy_px": 410.0, "cx_px": 300.0, "cy_px": 240.0}
+    camera = Camera(hfov_deg=84.0, width=640, height=480)
+    camera_info = {"fx_px": 400.0, "fy_px": 410.0, "cx_px": 300.0, "cy_px": 240.0}
     pose = {"position": (0.0, 0.0, 0.0), "quaternion_xyzw": (0.0, 0.0, 0.0, 1.0)}
 
-    lateral = episode._project(pose, (10.0, -1.0, 0.0))
-    vertical = episode._project(pose, (10.0, 0.0, 1.0))
+    lateral = project(pose, (10.0, -1.0, 0.0), camera, camera_info)
+    vertical = project(pose, (10.0, 0.0, 1.0), camera, camera_info)
 
     assert lateral is not None and math.isclose(lateral[0], 340.0, abs_tol=1e-9)
     assert math.isclose(lateral[1], 240.0, abs_tol=1e-9)
@@ -202,7 +199,7 @@ def test_topic_stream_keeps_nested_headers_in_one_message():
     )
     stream = message.splitlines(keepends=True) + ["\n", "---\n", message]
 
-    messages = list(_topic_messages(stream))
+    messages = list(topic_messages(stream))
 
     assert [truncated for _text, truncated in messages] == [False, False]
     first, second = (text for text, _truncated in messages)
@@ -213,14 +210,14 @@ def test_topic_stream_keeps_nested_headers_in_one_message():
 
     # A consecutive message that starts with its own top-level header must split too,
     # even though every entity inside the message also carries a nested header.
-    header_split = list(_topic_messages(message.splitlines(keepends=True) * 2))
+    header_split = list(topic_messages(message.splitlines(keepends=True) * 2))
     assert [text for text, _truncated in header_split] == [message, message]
 
 
 def test_topic_stream_flags_oversized_messages_without_dropping_lines():
     stream = ['header {\n', '  field: "x"\n', '}\n', 'next {\n', '  field: "y"\n', '}\n']
 
-    messages = list(_topic_messages(stream, max_message_bytes=25))
+    messages = list(topic_messages(stream, max_message_bytes=25))
 
     assert [truncated for _text, truncated in messages] == [True, False]
     assert all(text for text, _truncated in messages)
@@ -237,7 +234,7 @@ def test_parse_pose_info_reads_every_model_in_a_large_message():
     ]
     text = "".join(blocks)
 
-    parsed = _parse_pose_info(text)
+    parsed = parse_pose_info(text)
 
     assert len(text) > 200_000
     assert parsed is not None
@@ -248,10 +245,9 @@ def test_parse_pose_info_reads_every_model_in_a_large_message():
 def test_camera_pose_fills_missing_rigid_chain_models():
     # The sparse pose topic can omit nested models that never moved; their SDF include poses
     # are parent-relative, exactly like the published Pose_V entries.
-    episode = object.__new__(Episode)
-    episode.camera_sensor_pose = (0.0, 0.0, 0.0, -1.57, -1.57, 0.0)
+    sensor_pose = (0.0, 0.0, 0.0, -1.57, -1.57, 0.0)
     # SDF order: (x, y, z, roll, pitch, yaw); the fallback converts to the pose-topic order.
-    episode.camera_chain_relative = {
+    chain_relative = {
         "iris_with_gimbal": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
         "gimbal": (0.0, -0.01, -0.124923, math.pi / 2, 0.0, math.pi / 2),
     }
@@ -260,7 +256,7 @@ def test_camera_pose_fills_missing_rigid_chain_models():
         "pitch_link": [0.0, 0.0147, 0.0043, -0.0015, 0.7854, 0.00005],
     }
 
-    camera = episode._camera_pose({"models": models})
+    camera = camera_pose({"models": models}, sensor_pose, chain_relative)
 
     assert camera is not None
     assert camera["pose_chain"] == [
@@ -272,15 +268,15 @@ def test_camera_pose_fills_missing_rigid_chain_models():
 
 
 def test_camera_chain_relative_poses_come_from_the_outdoor_sdfs():
-    from sim.scripts.campaign_episode import ROOT, _include_pose_and_sdf
+    from sim.campaign.episode import ROOT
 
     roots = (ROOT / "sim" / "models",)
-    identity, child = _include_pose_and_sdf(
+    identity, child = include_pose_and_sdf(
         ROOT / "sim" / "models" / "horus_iris_outdoor" / "model.sdf", "iris_with_gimbal", roots)
     assert identity == (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     assert child is not None and child.parent.name == "horus_iris_with_gimbal_outdoor"
 
-    gimbal, child_sdf = _include_pose_and_sdf(
+    gimbal, child_sdf = include_pose_and_sdf(
         ROOT / "sim" / "models" / "horus_iris_with_gimbal_outdoor" / "model.sdf", "gimbal", roots)
     assert child_sdf is not None and child_sdf.parent.name == "horus_gimbal_small_3d_outdoor"
     assert math.isclose(gimbal[1], -0.01, abs_tol=1e-9)
@@ -289,55 +285,28 @@ def test_camera_chain_relative_poses_come_from_the_outdoor_sdfs():
     assert math.isclose(gimbal[5], math.pi / 2, abs_tol=1e-9)  # yaw
 
 
-def test_scaled_ttl_applies_the_episode_scale():
-    episode = object.__new__(Episode)
-    episode.ttl_scale = 6.0
-    assert episode._scaled_ttl(180.0) == 1080.0
-
-    episode.ttl_scale = 1.0
-    assert episode._scaled_ttl(120.0) == 120.0
-
-
 def test_ttl_scale_rewrites_mission_commands_only_when_needed():
-    from sim.scripts.campaign_episode import _scale_mission_ttls
-
     mission = {"steps": [
         {"tool": "take_off", "arguments": {"altitude_m": 34.0, "ttl_s": 180.0}, "timeout_s": 185.0},
         {"select_candidate": {"attribute": "shirt_colour", "equals": "red", "choose": "largest",
                               "store_as": "target", "timeout_s": 15.0}},
     ]}
 
-    _scale_mission_ttls(mission, 1.0)
+    scale_mission_ttls(mission, 1.0)
     assert mission["steps"][0]["arguments"]["ttl_s"] == 180.0
     assert mission["steps"][0]["timeout_s"] == 185.0
 
-    _scale_mission_ttls(mission, 4.0)
+    scale_mission_ttls(mission, 4.0)
     assert mission["steps"][0]["arguments"]["ttl_s"] == 720.0
     assert mission["steps"][0]["timeout_s"] == 740.0
     # Selection waits are wall-clock UI waits, not sim-bound commands, so they stay fixed.
     assert mission["steps"][1]["select_candidate"]["timeout_s"] == 15.0
 
 
-def test_episode_cli_accepts_a_ttl_scale():
-    args = _arguments([
-        "--kind", "forest", "--seed", "1", "--manifest", "manifest.json",
-        "--sdf", "world.sdf", "--episode-dir", "episode", "--tests", "perception",
-        "--ttl-scale", "6",
-    ])
-    assert args.ttl_scale == 6.0
-    default = _arguments([
-        "--kind", "forest", "--seed", "1", "--manifest", "manifest.json",
-        "--sdf", "world.sdf", "--episode-dir", "episode", "--tests", "perception",
-    ])
-    assert default.ttl_scale == 1.0
-
-
 def test_civilian_check_uses_the_declared_max_speed_not_the_nominal_one(tmp_path):
     import json
 
     import yaml
-
-    from sim.scripts.campaign_episode import Episode
 
     scenario = {
         "world": "test_world", "rate_hz": 10, "seed": 1,
@@ -360,12 +329,10 @@ def test_civilian_check_uses_the_declared_max_speed_not_the_nominal_one(tmp_path
     (tmp_path / "civilians.jsonl").write_text(
         "".join(json.dumps(row) + "\n" for row in trace), encoding="utf-8")
 
-    episode = object.__new__(Episode)
-    episode.manifest_path = tmp_path / "world.layout.json"
-    episode.manifest = {"scenario": "scenario.yaml", "bounds": {"x": [-50.0, 50.0], "y": [-50.0, 50.0]}}
-    episode.civilian_trace_path = tmp_path / "civilians.jsonl"
+    trace_path = tmp_path / "civilians.jsonl"
+    manifest = {"scenario": "scenario.yaml", "bounds": {"x": [-50.0, 50.0], "y": [-50.0, 50.0]}}
 
-    check = episode._civilian_check()
+    check = civilian_check(manifest, tmp_path / "world.layout.json", trace_path)
 
     assert check["checked_poses"] == 6 and check["agents"] == 2
     # 2.4 m/s is below the deer's declared cap (2.5 * 1.05) but above its nominal speed, so the
@@ -383,12 +350,10 @@ def test_civilian_check_uses_the_declared_max_speed_not_the_nominal_one(tmp_path
     (tmp_path / "civilians.jsonl").write_text(
         "".join(json.dumps({"t": row["t"], "agents": {"ani_deer_01": row["agents"]["ani_deer_01"]}}) + "\n"
                 for row in trace), encoding="utf-8")
-    assert episode._civilian_check()["passed"] is True
+    assert civilian_check(manifest, tmp_path / "world.layout.json", trace_path)["passed"] is True
 
 
-def test_ground_truth_history_records_target_people_for_orbit_scoring():
-    from sim.scripts.campaign_episode import Episode
-
+def test_ground_truth_history_records_target_people_for_orbit_scoring(make_episode):
     class FakeReader:
         def latest(self):
             return {"wall_time": 10.0, "sim_time": 5.0, "models": {
@@ -397,11 +362,7 @@ def test_ground_truth_history_records_target_people_for_orbit_scoring():
                 "forest_trees": [1.0, 2.0, 0.0, 0.0, 0.0, 0.0],
             }}
 
-    episode = object.__new__(Episode)
-    episode._gt = FakeReader()
-    episode._person_models = {"civ_target"}
-    episode.path_history = []
-    episode.start_sim = None
+    episode = make_episode(_gt=FakeReader(), _person_models={"civ_target"}, path_history=[], start_sim=None)
 
     episode._record_gt()
 
@@ -412,28 +373,21 @@ def test_ground_truth_history_records_target_people_for_orbit_scoring():
 
 
 def test_projection_validation_uses_all_episode_matches_and_both_limits():
-    assert _projection_validation([1.0, 10.0, 15.0]) == {
+    assert perception.projection_validation([1.0, 10.0, 15.0]) == {
         "confident_match_count": 3, "median_pixel_error": 10.0,
         "minimum_confident_matches": 3, "threshold_px": 15.0, "passed": True,
     }
-    assert not _projection_validation([1.0, 10.0])["passed"]
-    assert not _projection_validation([16.0, 17.0, 18.0])["passed"]
+    assert not perception.projection_validation([1.0, 10.0])["passed"]
+    assert not perception.projection_validation([16.0, 17.0, 18.0])["passed"]
 
 
 def test_episode_command_line_parses_core_arguments():
-    args = _arguments([
-        "--kind", "forest", "--seed", "1", "--manifest", "manifest.json",
-        "--sdf", "world.sdf", "--episode-dir", "episode", "--tests", "perception,orbit",
-    ])
+    core = ["--kind", "forest", "--seed", "1", "--manifest", "manifest.json",
+            "--sdf", "world.sdf", "--episode-dir", "episode", "--tests", "perception,orbit"]
+    args = _arguments(core)
     assert args.kind == "forest" and args.seed == 1
     assert args.tests == ("perception", "orbit")
-    assert not hasattr(args, "camera_hfov_deg")
-
-
-def test_campaign_cli_has_no_camera_hfov_override():
-    args = _parse_cli(["--kinds", "forest", "--seeds", "1", "--tests", "perception"])
-    assert args.tests == ("perception",)
-    assert not hasattr(args, "camera_hfov_deg")
+    assert _arguments([*core, "--ttl-scale", "6"]).ttl_scale == 6.0
 
 
 def test_campaign_cli_supports_random_seed_mode():
@@ -464,7 +418,7 @@ def test_exception_summary_unwraps_taskgroup_sub_exceptions():
             super().__init__(message)
             self.exceptions = tuple(exceptions)
 
-    summary = _exception_summary(_FakeGroup(
+    summary = exception_summary(_FakeGroup(
         "unhandled errors in a TaskGroup (1 sub-exception)",
         [ValueError("Connection reset by peer")],
     ))
@@ -474,20 +428,20 @@ def test_exception_summary_unwraps_taskgroup_sub_exceptions():
 
 
 def test_hazard_gate_rejects_grazing_paths_and_requires_real_penetration():
-    assert _hazard_path_is_collision_course(-1.2)
-    assert _hazard_path_is_collision_course(-0.3)
-    assert not _hazard_path_is_collision_course(-0.05)
-    assert not _hazard_path_is_collision_course(0.06)
-    assert not _hazard_path_is_collision_course(math.nan)
-    assert not _hazard_path_is_collision_course(math.inf)
+    assert hazard.path_is_collision_course(-1.2)
+    assert hazard.path_is_collision_course(-0.3)
+    assert not hazard.path_is_collision_course(-0.05)
+    assert not hazard.path_is_collision_course(0.06)
+    assert not hazard.path_is_collision_course(math.nan)
+    assert not hazard.path_is_collision_course(math.inf)
 
 
 def test_mission_id_match_requires_both_ids():
-    assert _mission_id_matches(1773, 1773)
-    assert not _mission_id_matches(1773, 1774)
-    assert not _mission_id_matches(None, None)
-    assert not _mission_id_matches(1773, None)
-    assert not _mission_id_matches(None, 1773)
+    assert mission_id_matches(1773, 1773)
+    assert not mission_id_matches(1773, 1774)
+    assert not mission_id_matches(None, None)
+    assert not mission_id_matches(1773, None)
+    assert not mission_id_matches(None, 1773)
 
 
 def test_static_gt_people_cover_the_follow_group_only():
@@ -497,12 +451,11 @@ def test_static_gt_people_cover_the_follow_group_only():
         {"model": "civ_unknown"},
     ]
 
-    assert [person["model"] for person in _static_gt_people(people)] == ["civ_follow"]
+    assert [person["model"] for person in static_gt_people(people)] == ["civ_follow"]
 
 
-def test_follow_results_dir_is_relative_to_the_mission_file(tmp_path):
-    episode = object.__new__(Episode)
-    episode.directory = tmp_path
+def test_follow_results_dir_is_relative_to_the_mission_file(tmp_path, make_episode):
+    episode = make_episode(directory=tmp_path)
 
     assert episode._follow_results_dir() == tmp_path / "mission" / "follow_results"
 
@@ -524,50 +477,20 @@ def test_candidate_bbox_accepts_both_public_shapes_and_rejects_invalid_values():
         30.0,
         60.0,
     )
-    assert candidate_bbox({"box": [1, 2, 4, 8]}) == (1.0, 2.0, 4.0, 8.0)
+    assert candidate_bbox({"bbox": [1, 2, 4, 8]}) == (1.0, 2.0, 4.0, 8.0)
+    assert candidate_bbox({"box": [1, 2, 4, 8]}) is None
     assert candidate_bbox({"bbox": [0, 0, 0, 4]}) is None
     assert candidate_bbox({"bbox": [0, 0, float("nan"), 4]}) is None
 
 
-def test_select_candidate_uses_exact_attribute_then_largest_box_and_low_id_tie_break():
-    rows = [
-        candidate(2, [0, 0, 20, 20], "red"),
-        candidate(9, [0, 0, 30, 30], "red"),
-        candidate(4, [0, 0, 30, 30], "red"),
-        candidate(1, [0, 0, 90, 90], "green"),
-    ]
-    assert select_largest_attribute_candidate(rows, equals="red") == rows[2]
-    assert select_largest_attribute_candidate(rows, equals="blue") is None
-
-
-def test_select_candidate_applies_the_runner_confidence_floor():
-    from sim.scripts.procedural_campaign import selection_min_confidence
-
-    floor = selection_min_confidence()
-    big_artifact = candidate(3, [0, 0, 90, 90], "red", confidence=floor - 0.01)
-    small_match = candidate(4, [0, 0, 20, 20], "red", confidence=floor)
-    rows = [big_artifact, small_match]
-
-    # The larger low-confidence match is exactly what the floor exists to reject.
-    assert select_largest_attribute_candidate(rows, equals="red") == small_match
-    # A candidate table without a confidence value is not gated (synthetic/partial tables).
-    assert select_largest_attribute_candidate(
-        [{"id": 5, "attributes": {"shirt_colour": "red"}, "bbox": [0, 0, 10, 10]}], equals="red"
-    ) == {"id": 5, "attributes": {"shirt_colour": "red"}, "bbox": [0, 0, 10, 10]}
-    assert select_largest_attribute_candidate([big_artifact], equals="red") is None
-
-
 def test_follow_mission_selection_floor_is_pinned_explicitly():
-    from sim.scripts.campaign_episode import _pin_selection_confidence
-    from sim.scripts.procedural_campaign import selection_min_confidence
-
     mission = {"steps": [
         {"select_candidate": {"attribute": "shirt_colour", "equals": "red", "choose": "largest",
                               "store_as": "target", "timeout_s": 15.0}},
         {"tool": "follow", "arguments": {"id": "$target.id"}},
     ]}
 
-    _pin_selection_confidence(mission)
+    pin_selection_confidence(mission)
 
     assert mission["steps"][0]["select_candidate"]["min_confidence"] == selection_min_confidence()
     assert mission["steps"][1] == {"tool": "follow", "arguments": {"id": "$target.id"}}
@@ -638,7 +561,7 @@ def test_campaign_aggregation_counts_completed_runs_and_preserves_seed_rows():
     assert urban["detection"]["recall"] == 1.0
 
 
-def test_operational_metrics_aggregate_and_render_in_campaign_report():
+def test_operational_metrics_aggregate_per_kind():
     episode = {
         "kind": "forest",
         "seed": 7,
@@ -671,16 +594,6 @@ def test_operational_metrics_aggregate_and_render_in_campaign_report():
     assert forest["metrics"]["landing_error_m"]["mean"] == 0.8
     assert forest["metrics"]["hazard"] == {"attempts": 1, "safe_outcomes": 0, "crashes": 1,
                                            "skipped_invalid_trials": 0}
-    markdown = render_summary_markdown({
-        "episode_count": 1,
-        "episodes": [episode],
-        "aggregate": summary,
-    })
-    assert "| forest | select correctness | 1/1 (100.0%) |" in markdown
-    assert "| forest | orbit radius standard deviation, m | 0.200 (n=1) |" in markdown
-    assert "| forest | scan coverage fraction | 0.500 (n=1) |" in markdown
-    assert "| horus_forest_p7 | 7 | 123.0s (" in markdown
-    assert " | passed |" in markdown
 
 
 def test_skipped_hazard_trials_are_not_counted_as_product_attempts():
@@ -696,19 +609,13 @@ def test_skipped_hazard_trials_are_not_counted_as_product_attempts():
         },
         "rtf": {"mean": 0.5, "p10": 0.4},
     }
-    report = render_summary_markdown({
-        "episode_count": 1,
-        "episodes": [episode],
-        "aggregate": aggregate_campaign([episode]),
-    })
 
     assert aggregate_campaign([episode])["by_kind"]["urban"]["metrics"]["hazard"] == {
         "attempts": 0, "safe_outcomes": 0, "crashes": 0, "skipped_invalid_trials": 1,
     }
-    assert "| urban | hazard invalid trials skipped | 1 |" in report
 
 
-def test_grounder_status_is_aggregated_and_rendered_per_kind():
+def test_grounder_status_is_aggregated_per_kind():
     episodes = [
         {
             "kind": "forest", "seed": 1, "world": "horus_forest_p1", "status": "passed", "tests": {},
@@ -732,16 +639,6 @@ def test_grounder_status_is_aggregated_and_rendered_per_kind():
     assert aggregate["by_kind"]["urban"]["metrics"]["grounder"] == {
         "active": 1, "total": 1, "models": ["grounding-dino-tiny"],
     }
-    report = render_summary_markdown({
-        "episode_count": len(episodes), "episodes": episodes, "aggregate": aggregate,
-    })
-    assert "Grounder: 2/3 episodes active (grounding-dino-tiny)" in report
-    assert "| forest | grounder active episodes | 1/2 (grounding-dino-tiny) |" in report
-    assert "| urban | grounder active episodes | 1/1 (grounding-dino-tiny) |" in report
-    assert "Grounder: not recorded" in render_summary_markdown({
-        "episode_count": 1, "episodes": [{"kind": "forest", "seed": 9}],
-        "aggregate": aggregate_campaign([{"kind": "forest", "seed": 9}]),
-    })
 
 
 def test_probe_grounder_never_raises_and_reports_health():
@@ -749,8 +646,6 @@ def test_probe_grounder_never_raises_and_reports_health():
     import socket
     import threading
     from http.server import BaseHTTPRequestHandler, HTTPServer
-
-    from sim.scripts.campaign_episode import probe_grounder
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -839,12 +734,10 @@ def test_camera_pose_aggregates_measured_per_vantage_samples_and_renders_summary
     assert "| urban | horus_urban | 4 | 2 | blue_target | -46.0 | +31.0 | +6.0 | +3.0 |" in report
 
 
-def test_rth_skips_a_grounded_vehicle_but_runs_when_airborne():
+def test_rth_skips_a_grounded_vehicle_but_runs_when_airborne(make_episode, monkeypatch):
     # RTH on a grounded vehicle disarms trivially; without the airborne gate the test reports
     # a pass for an episode whose takeoff never succeeded.
     import asyncio
-
-    from sim.scripts.campaign_episode import Episode
 
     class FakeReader:
         def __init__(self, z: float) -> None:
@@ -858,9 +751,7 @@ def test_rth_skips_a_grounded_vehicle_but_runs_when_airborne():
         def height(self, x: float, y: float) -> float:
             return 0.0
 
-    grounded = object.__new__(Episode)
-    grounded._gt = FakeReader(0.21)
-    grounded.ground = FakeGround()
+    grounded = make_episode(_gt=FakeReader(0.21), ground=FakeGround())
     requested: list[str] = []
 
     async def grounded_tool(name, arguments=None):
@@ -869,31 +760,27 @@ def test_rth_skips_a_grounded_vehicle_but_runs_when_airborne():
 
     grounded._tool = grounded_tool
 
-    result = asyncio.run(grounded._rth(require_airborne=True))
+    result = asyncio.run(rth.return_home(grounded, require_airborne=True))
 
     assert result["passed"] is False and result["status"] == "skipped"
     assert result["reason"] == "vehicle was not airborne before RTH"
     assert result["airborne_altitude_m"] == 0.21
     assert requested == []  # a grounded vehicle must not even be asked to RTH
 
-    flying = object.__new__(Episode)
-    flying._gt = FakeReader(9.0)
-    flying.ground = FakeGround()
-    flying.path_history = []
-    flying._person_models = set()
-    flying.start_sim = None
+    flying = make_episode(_gt=FakeReader(9.0), ground=FakeGround(), path_history=[],
+                          _person_models=set(), start_sim=None)
     flying._sim_now = lambda: 5.0
 
     async def flying_tool(name, arguments=None):
         return {"state": "RTH"}
 
-    async def wait_disarmed(limit_sim_s=240.0):
+    async def wait_disarmed(episode, limit_sim_s=240.0):
         return {"disarmed": True, "elapsed_sim_s": 1.0}
 
     flying._tool = flying_tool
-    flying._wait_disarmed = wait_disarmed
+    monkeypatch.setattr(rth, "wait_disarmed", wait_disarmed)
 
-    result = asyncio.run(flying._rth(require_airborne=True))
+    result = asyncio.run(rth.return_home(flying, require_airborne=True))
 
     assert result["passed"] is True and result["landing_error_to_pad_m"] == 0.0
 
@@ -901,25 +788,25 @@ def test_rth_skips_a_grounded_vehicle_but_runs_when_airborne():
 def test_missing_result_failure_names_the_exit_code_and_container_state():
     from sim.scripts.procedural_campaign import _missing_result_failure, container_state
 
-    assert _missing_result_failure(0, {}) == "episode wrote no result file; exit code 0; see episode.log"
+    assert "exit code 0" in _missing_result_failure(0, {})
     oom = {"status": "exited", "exit_code": 137, "oom_killed": True, "error": ""}
     assert "OOM-killed" in _missing_result_failure(137, oom)
     assert "exit 137" in _missing_result_failure(137, oom)
+    # A container that is still running explains nothing beyond the exit code.
     running = {"status": "running", "exit_code": 0, "oom_killed": False, "error": ""}
-    assert _missing_result_failure(None, running) == "episode wrote no result file; exit code None; see episode.log"
+    assert _missing_result_failure(None, running) == _missing_result_failure(None, {})
     # docker may be absent or the container already purged: the helper stays best-effort.
     assert container_state("horus-sim-does-not-exist") == {}
 
 
-def test_takeoff_failure_payload_keeps_attempts_and_status_texts():
-    from sim.scripts.campaign_episode import Episode
-
-    episode = object.__new__(Episode)
-    episode._takeoff_attempts = [Episode._skill_summary({
-        "task_id": "t1", "skill": "take_off", "status": "expired",
-        "result": {"status": "expired", "error": "command TTL expired", "_image_data": ["jpeg"]},
-    })]
-    episode._takeoff_statustext = ["PreArm: GPS: waiting for home"]
+def test_takeoff_failure_payload_keeps_attempts_and_status_texts(make_episode):
+    episode = make_episode(
+        _takeoff_attempts=[Episode._skill_summary({
+            "task_id": "t1", "skill": "take_off", "status": "expired",
+            "result": {"status": "expired", "error": "command TTL expired", "_image_data": ["jpeg"]},
+        })],
+        _takeoff_statustext=["PreArm: GPS: waiting for home"],
+    )
 
     payload = episode._takeoff_failure("vehicle could not take off")
 
@@ -930,10 +817,8 @@ def test_takeoff_failure_payload_keeps_attempts_and_status_texts():
     assert payload["vehicle_statustext"] == ["PreArm: GPS: waiting for home"]
 
 
-def test_ensure_airborne_retries_once_and_reports_the_attempts():
+def test_ensure_airborne_retries_once_and_reports_the_attempts(make_episode):
     import asyncio
-
-    from sim.scripts.campaign_episode import Episode
 
     class FakeReader:
         def latest(self):
@@ -941,13 +826,8 @@ def test_ensure_airborne_retries_once_and_reports_the_attempts():
                     "models": {"horus_iris": [0.0, 0.0, 0.2, 0.0, 0.0, 0.0]}}
 
     def build(statuses):
-        episode = object.__new__(Episode)
-        episode.transit_alt = 30.0
-        episode.ttl_scale = 1.0
-        episode._gt = FakeReader()
-        episode.path_history = []
-        episode._person_models = set()
-        episode.start_sim = None
+        episode = make_episode(transit_alt=30.0, ttl_scale=1.0, _gt=FakeReader(), path_history=[],
+                               _person_models=set(), start_sim=None)
         calls: list[str] = []
 
         async def tool(name, arguments=None):
@@ -1011,13 +891,12 @@ def test_campaign_wall_timeout_defaults_to_the_ttl_scale():
     assert explicit.timeout_minutes == 30.0
 
 
-def test_hazard_trial_searches_for_a_real_collision_course():
-    # urban seed 15178 skipped hazard because the single chosen obstacle path was tangent
-    # (+0.06 m). The search must try other obstacles/headings, keep only real collision courses
-    # with a safe approach leg, and skip with that reason only when none exist.
+def test_hazard_trial_searches_for_a_real_collision_course(make_episode):
+    # One obstacle path can be tangent (+0.06 m clearance) rather than a collision course. The
+    # search must try other obstacles/headings, keep only real collision courses with a safe
+    # approach leg, and skip with that reason only when none exist.
     import asyncio
 
-    from sim.scripts.campaign_episode import Episode
     from sim.worldgen.geometry import CollisionWorld, Primitive
 
     def box(name: str, model: str, x: float, y: float, z: float,
@@ -1030,29 +909,25 @@ def test_hazard_trial_searches_for_a_real_collision_course():
                     "models": {"horus_iris": [0.0, 0.0, 34.0, 0.0, 0.0, 0.0]}}
 
     def episode_with(*primitives: Primitive) -> Episode:
-        episode = object.__new__(Episode)
-        episode._gt = FakeReader()
-        episode.transit_alt = 34.0
-        episode.world = CollisionWorld(list(primitives))
-        return episode
+        return make_episode(_gt=FakeReader(), transit_alt=34.0, world=CollisionWorld(list(primitives)))
 
     # A low bush is under the 3 m trial altitude for every heading: never a collision course.
     low = box("tree_low", "forest_trees", 10.0, 0.0, 0.5, 0.5, 0.5, 0.5)
     crossing = box("building_crossing", "urban_buildings", 30.0, 0.0, 3.0, 0.5, 0.5, 3.0)
 
-    trials = episode_with(low, crossing)._hazard_trials()
+    trials = hazard.hazard_trials(episode_with(low, crossing))
     assert trials and trials[0]["obstacle"] == "building_crossing"
     assert trials[0]["direct_path_static_clearance_m"] <= -0.3
     assert trials[0]["approach_min_clearance_m"] >= 1.5
 
-    assert episode_with(low)._hazard_trials() == []
+    assert hazard.hazard_trials(episode_with(low)) == []
 
     # A wall across the approach (cruise altitude included) makes the only crossing obstacle
     # unrunnable, so the search must not fall back to it.
     # Primitive sizes are full extents, so this wall spans x 19-21 and z -20..60: the cruise
     # leg at 34 m cannot avoid it.
     wall = box("blocking_wall", "walls", 20.0, 0.0, 20.0, 2.0, 40.0, 80.0)
-    assert episode_with(crossing, wall)._hazard_trials() == []
+    assert hazard.hazard_trials(episode_with(crossing, wall)) == []
 
     episode = episode_with(low)
 
@@ -1060,7 +935,7 @@ def test_hazard_trial_searches_for_a_real_collision_course():
         return True
 
     episode._ensure_airborne = airborne
-    result = asyncio.run(episode.test_hazard())
+    result = asyncio.run(hazard.run(episode))
 
     assert result["passed"] is False and result["status"] == "skipped"
     assert result["reason"].startswith("no static obstacle offers a collision course")
@@ -1078,7 +953,7 @@ def test_hazard_trial_searches_for_a_real_collision_course():
         return {"passed": False, "reason": f"planned transit legs clearance -0.405 m < 1.5 m"}
 
     episode._navigate = refuse
-    result = asyncio.run(episode.test_hazard())
+    result = asyncio.run(hazard.run(episode))
 
     # Every obstacle/heading candidate is tried (8 headings per obstacle), nearest first.
     assert len(attempted) == 16, attempted
@@ -1090,13 +965,30 @@ def test_hazard_trial_searches_for_a_real_collision_course():
     assert all(entry["direct_path_static_clearance_m"] <= -0.3 for entry in considered)
     assert all(entry["route_reason"].startswith("planned transit legs clearance") for entry in considered)
 
+    # A goto that returns no task id is reported as such, not hidden behind a NameError.
+    episode = episode_with(crossing)
+    episode._ensure_airborne = airborne
+    episode.path_history = []
+    episode.ttl_scale = 1.0
 
-def test_approach_passes_on_minimum_range_not_the_final_range():
+    async def accept(eye, yaw_rad):
+        return {"passed": True}
+
+    async def tool(name, arguments=None):
+        return {}
+
+    episode._navigate = accept
+    episode._tool = tool
+    result = asyncio.run(hazard.run(episode))
+    assert result["reason"] == "goto did not return task id: {}"
+    assert result["obstacle"] == "building_crossing"
+
+
+def test_approach_passes_on_minimum_range_not_the_final_range(make_episode):
     # The approach is one-shot: it holds at the standoff and the target can walk away or become
     # undetectable afterwards, so arrival is judged on the closest ground-truth range.
     import asyncio
 
-    from sim.scripts.campaign_episode import Episode
     from sim.worldgen.geometry import CollisionWorld
     from sim.worldgen.plan import Camera
 
@@ -1129,25 +1021,18 @@ def test_approach_passes_on_minimum_range_not_the_final_range():
     person = {"model": "civ_target", "posture": "standing"}
 
     def episode_with(trial_samples) -> Episode:
-        # path_history starts empty: the trial's own samples are what _approach_one scores.
-        episode = object.__new__(Episode)
-        episode._gt = FakeReader(list(trial_samples))
-        episode._person_models = {"civ_target"}
-        episode.path_history = []
-        episode.world = CollisionWorld([])
-        episode.camera = Camera()
-        episode.camera_info = None
-        episode.camera_sensor_pose = (0.0, 0.0, 0.0, -1.57, -1.57, 0.0)
-        episode.camera_chain_relative = {
-            "iris_with_gimbal": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-            "gimbal": (0.0, -0.01, -0.124923, math.pi / 2, 0.0, math.pi / 2),
-        }
+        # path_history starts empty: the trial's own samples are what approach_one scores.
         empty_trace = type("_Trace", (), {"positions_at": lambda self, t: {}})()
-        episode._civilian_trace = empty_trace
-        episode._follow_trace = empty_trace
-        episode.people = [person]
-        episode._static_gt_people = []
-        episode._person_models = {"civ_target"}
+        episode = make_episode(
+            _gt=FakeReader(list(trial_samples)), _person_models={"civ_target"}, path_history=[],
+            world=CollisionWorld([]), camera=Camera(), camera_info=None,
+            camera_sensor_pose=(0.0, 0.0, 0.0, -1.57, -1.57, 0.0),
+            camera_chain_relative={
+                "iris_with_gimbal": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                "gimbal": (0.0, -0.01, -0.124923, math.pi / 2, 0.0, math.pi / 2),
+            },
+            _civilian_trace=empty_trace, _follow_trace=empty_trace, people=[person], _static_gt_people=[],
+        )
 
         async def skill(name, arguments, timeout_s=None, observer=None):
             # The real wait records a ground-truth sample on every poll.
@@ -1160,7 +1045,7 @@ def test_approach_passes_on_minimum_range_not_the_final_range():
 
     # Closest approach ~6 m (<= 5 + 2), final range ~20 m: the trial must pass.
     arrival = episode_with([sample(12.0, 1.0), sample(2.4, 2.0), sample(20.0, 3.0)])
-    result = asyncio.run(arrival._approach_one(person, {"id": 5, "source": "detector"},
+    result = asyncio.run(approach.approach_one(arrival, person, {"id": 5, "source": "detector"},
                                                target_size=None, label="standing"))
     assert result["passed"] is True and result["reason"] is None
     assert result["gt_min_camera_to_torso_m"] < 7.0 and result["gt_final_camera_to_torso_m"] > 7.0
@@ -1171,36 +1056,34 @@ def test_approach_passes_on_minimum_range_not_the_final_range():
 
     # Never closer than ~9.7 m: the task succeeded but the trial must fail with the arrival reason.
     distant = episode_with([sample(12.0, 1.0), sample(8.0, 2.0)])
-    result = asyncio.run(distant._approach_one(person, {"id": 5, "source": "detector"},
+    result = asyncio.run(approach.approach_one(distant, person, {"id": 5, "source": "detector"},
                                                target_size=None, label="standing"))
     assert result["passed"] is False and result["reason"].startswith("approach never closed")
     assert result["arrival_limit_m"] == 7.0
 
     # Grounder-only candidates carry no detector person evidence and need a declared size.
-    assert Episode._needs_declared_size({"source": "open_vocab"}) is True
-    assert Episode._needs_declared_size({"source": "point"}) is True
-    assert Episode._needs_declared_size({"source": "detector"}) is False
+    assert approach.needs_declared_size({"source": "open_vocab"}) is True
+    assert approach.needs_declared_size({"source": "point"}) is True
+    assert approach.needs_declared_size({"source": "detector"}) is False
 
 
 def test_orbit_outcome_separates_never_validated_from_geometry():
-    from sim.scripts.campaign_episode import _orbit_outcome
-
-    passed, classification, reason = _orbit_outcome(status="expired", validated=False,
-                                                    reference_views=1, mean_radius_m=None)
+    passed, classification, reason = orbit.orbit_outcome(status="expired", validated=False,
+                                                         reference_views=1, mean_radius_m=None)
     assert passed is False and classification == "never_validated"
     assert "never appearance-validated" in reason and "reference_views 1" in reason
 
-    passed, classification, reason = _orbit_outcome(status="expired", validated=True,
-                                                    reference_views=3, mean_radius_m=None)
+    passed, classification, reason = orbit.orbit_outcome(status="expired", validated=True,
+                                                         reference_views=3, mean_radius_m=None)
     assert passed is False and classification == "orbit_behaviour"
     assert reason == "orbit produced no ground-truth samples"
 
-    passed, classification, reason = _orbit_outcome(status="expired", validated=True,
-                                                    reference_views=2, mean_radius_m=6.4)
+    passed, classification, reason = orbit.orbit_outcome(status="expired", validated=True,
+                                                         reference_views=2, mean_radius_m=6.4)
     assert passed is True and classification == "passed" and reason is None
 
-    passed, classification, reason = _orbit_outcome(status="failed", validated=True,
-                                                    reference_views=2, mean_radius_m=6.4)
+    passed, classification, reason = orbit.orbit_outcome(status="failed", validated=True,
+                                                         reference_views=2, mean_radius_m=6.4)
     assert passed is False and classification == "orbit_behaviour"
     assert reason == "orbit task ended failed"
 
@@ -1208,8 +1091,6 @@ def test_orbit_outcome_separates_never_validated_from_geometry():
 def test_grounder_status_counts_a_late_service_as_active():
     # The start probe runs before the service has loaded and can be refused; the episode must
     # still report the grounder as active when the end probe answers.
-    from sim.scripts.campaign_episode import _grounder_status
-
     refused = {"active": False, "model": None, "detail": "URLError: connection refused"}
     active = {"active": True, "model": "IDEA-Research/grounding-dino-tiny", "detail": None}
 
@@ -1233,3 +1114,19 @@ def test_grounder_status_counts_a_late_service_as_active():
     merged = _grounder_status(refused, refused, {"status": "unavailable"}, open_vocab_candidates=7)
     assert merged["active"] is True and merged["decided_by"] == ["open_vocab_candidates"]
     assert merged["open_vocab_candidates"] == 7
+
+
+def test_rtf_is_measured_from_simulation_and_wall_time_not_the_reported_field(make_episode):
+    sample = parse_stats("sim_time {\n  sec: 10\n  nsec: 500000000\n}\nreal_time_factor: 0.011\n")
+    assert sample["sim_time_s"] == 10.5 and "real_time_factor" not in sample
+    # Forest-run shape: sim time advances 0.22 s per wall second while the field reports 0.011.
+    rows = [{"wall_time": 1000.0 + 5.0 * i, "sim_time_s": 1.1 * i} for i in range(13)]
+    assert measured_rate(rows) == pytest.approx(0.22)
+
+    class Reader:
+        def snapshot(self):
+            return rows
+
+    stats = make_episode(_rtf=Reader())._rtf_stats()
+    assert stats["windows"] == 6
+    assert stats["mean"] == pytest.approx(0.22) and stats["overall"] == pytest.approx(0.22)

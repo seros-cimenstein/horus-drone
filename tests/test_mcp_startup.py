@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 import time
@@ -13,6 +12,8 @@ from horus.config import HorusConfig, PerceptionSettings
 from horus.mcp_server.server import create_mcp
 from horus.perception import FrameBuffer, PerceptionSystem, PersistentTracker, TrackerConfig
 from horus.perception.types import Candidate, Frame
+
+from tests.fakes import FakeFlight, call_tool
 
 
 class _BlockingCamera:
@@ -30,7 +31,7 @@ class _BlockingCamera:
 
     def read(self):
         self.read_started.set()
-        self.released.wait()
+        self.released.wait(5.0)  # bounded: a missed release fails the test instead of hanging
         return None
 
     def release(self) -> None:
@@ -48,19 +49,11 @@ class _Executor:
         self.submissions.append((args, kwargs))
         return {"task_id": "task-1"}
 
-    def hold(self):
+    def hold(self, *, source=None):
         return {"state": "holding"}
 
-
-def _call_tool(mcp, name: str, arguments: dict | None = None, *, convert_result: bool = False):
-    return asyncio.run(
-        mcp._tool_manager.call_tool(name, arguments or {}, convert_result=convert_result)
-    )
-
-
-class _Flight:
-    def telemetry(self):
-        return None
+    def note_supervisor_contact(self):
+        pass
 
 
 _VISION_MODULES = ("numpy", "cv2", "onnxruntime")
@@ -87,10 +80,10 @@ def test_fastmcp_serves_state_and_rejects_perception_tools_while_camera_blocks()
     perception.start()
     try:
         assert camera.read_started.wait(timeout=1.0)
-        mcp = create_mcp(HorusConfig(), executor, _Flight(), perception)
+        mcp = create_mcp(HorusConfig(), executor, FakeFlight(), perception)
 
         started = time.monotonic()
-        state = json.loads(_call_tool(mcp, "get_state"))
+        state = json.loads(call_tool(mcp, "get_state"))
         elapsed = time.monotonic() - started
         assert elapsed < 2.0
         assert state["perception"]["camera"] in {"connecting", "stalled"}
@@ -101,17 +94,13 @@ def test_fastmcp_serves_state_and_rejects_perception_tools_while_camera_blocks()
                 ("list_candidates", {}),
                 ("follow", {"id": 4}),
             ):
-                try:
-                    _call_tool(mcp, tool_name, arguments)
-                except Exception as exc:
-                    assert "perception unavailable:" in str(exc)
-                else:
-                    raise AssertionError(f"{tool_name} must reject unavailable perception")
+                with pytest.raises(Exception, match="perception unavailable:"):
+                    call_tool(mcp, tool_name, arguments)
 
         assert_perception_tools_rejected()
         # The watchdog releases the blocked read; the camera must not be reported as streaming.
         assert camera.released.wait(timeout=1.0)
-        state = json.loads(_call_tool(mcp, "get_state"))
+        state = json.loads(call_tool(mcp, "get_state"))
         assert state["perception"]["camera"] in {"connecting", "stalled"}
         assert_perception_tools_rejected()
         assert executor.submissions == []
@@ -124,26 +113,39 @@ def test_flight_and_state_tools_work_with_perception_disabled():
     mcp = create_mcp(
         HorusConfig(),
         executor,
-        _Flight(),
+        FakeFlight(),
         None,
         perception_unavailable_reason="disabled by --no-perception",
     )
 
-    state = json.loads(_call_tool(mcp, "get_state"))
+    state = json.loads(call_tool(mcp, "get_state"))
     assert state["perception"] == {
         "camera": "disabled",
         "last_frame_age_s": None,
         "reason": "disabled by --no-perception",
     }
-    try:
-        _call_tool(mcp, "get_frame")
-    except Exception as exc:
-        assert "perception unavailable: disabled by --no-perception" in str(exc)
-    else:
-        raise AssertionError("get_frame must reject disabled perception")
-    _call_tool(mcp, "take_off", {"altitude_m": 2.0})
+    with pytest.raises(Exception, match="perception unavailable: disabled by --no-perception"):
+        call_tool(mcp, "get_frame")
+    call_tool(mcp, "take_off", {"altitude_m": 2.0})
     assert executor.submissions
-    _call_tool(mcp, "hold")
+    call_tool(mcp, "hold")
+
+
+def test_mission_brief_resource_returns_the_commander_prompt_text():
+    import asyncio
+
+    mcp = create_mcp(HorusConfig(), _Executor(), FakeFlight(), None)
+
+    async def read_both():
+        contents = list(await mcp.read_resource("horus://mission/brief"))
+        prompt = await mcp.get_prompt("horus_commander")
+        return contents, prompt
+
+    contents, prompt = asyncio.run(read_both())
+    assert len(contents) == 1 and len(prompt.messages) == 1
+    prompt_text = prompt.messages[0].content.text
+    assert "wait_for_task" in prompt_text
+    assert contents[0].content == prompt_text
 
 
 @pytest.mark.parametrize(
@@ -268,12 +270,10 @@ def test_frame_tools_return_bounded_jpeg_and_quoted_candidate_text():
         def list_candidates(self):
             return [candidate.to_dict()]
 
-    mcp = create_mcp(HorusConfig(), _Executor(), _Flight(), Perception())
+    mcp = create_mcp(HorusConfig(), _Executor(), FakeFlight(), Perception())
 
     for name in ("get_frame", "list_candidates"):
-        content = asyncio.run(
-            mcp._tool_manager.call_tool(name, {}, convert_result=True)
-        )
+        content = call_tool(mcp, name, {}, convert_result=True)
         image = next(block for block in content if isinstance(block, ImageContent))
         text = next(block for block in content if isinstance(block, TextContent))
         assert image.mimeType == "image/jpeg"
@@ -300,13 +300,13 @@ def test_frame_tools_return_bounded_jpeg_and_quoted_candidate_text():
 def test_mcp_event_log_records_tool_failures_and_redacts_credentials_and_images(tmp_path):
     import base64
 
-    from horus.mcp_server.event_log import JsonlEventLog
+    from horus.event_log import JsonlEventLog
 
     path = tmp_path / "events.jsonl"
     log = JsonlEventLog(path)
-    mcp = create_mcp(HorusConfig(), _Executor(), _Flight(), None, event_log=log)
+    mcp = create_mcp(HorusConfig(), _Executor(), FakeFlight(), None, event_log=log)
     with pytest.raises(Exception, match="perception unavailable"):
-        _call_tool(mcp, "get_frame")
+        call_tool(mcp, "get_frame")
     image_base64 = base64.b64encode(b"\xff\xd8\xff" + bytes(30)).decode("ascii")
     log.append({
         "authorization": "Bearer never-log-this-token",
@@ -329,8 +329,34 @@ def test_mcp_event_log_records_tool_failures_and_redacts_credentials_and_images(
     assert "[omitted payload]" in records[1]["message"]
 
 
+def test_passive_state_polls_neither_count_as_supervision_nor_fill_the_event_log(tmp_path):
+    from horus.event_log import JsonlEventLog
+
+    class _SupervisedExecutor(_Executor):
+        contacts = 0
+
+        def note_supervisor_contact(self):
+            self.contacts += 1
+
+    executor = _SupervisedExecutor()
+    path = tmp_path / "events.jsonl"
+    mcp = create_mcp(HorusConfig(), executor, FakeFlight(), None, event_log=JsonlEventLog(path))
+
+    for _ in range(10):
+        assert json.loads(call_tool(mcp, "get_state", {"passive": True}))["state"] == "idle"
+    assert executor.contacts == 0
+    assert not path.exists() or path.read_text(encoding="utf-8") == ""
+
+    call_tool(mcp, "get_state")
+    assert executor.contacts == 2
+    assert [json.loads(line)["tool"] for line in path.read_text(encoding="utf-8").splitlines()] == [
+        "get_state"
+    ]
+
+
+
 def test_event_log_path_uses_explicit_environment_then_current_run_pointer(monkeypatch, tmp_path):
-    from horus.mcp_server.event_log import event_log_path_from_environment
+    from horus.event_log import event_log_path_from_environment
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HORUS_EVENT_LOG", raising=False)
@@ -400,7 +426,7 @@ def _point_test_system():
         buffer=buffer,
         camera=object(),
     )
-    system._set_camera_status("streaming", None, time.monotonic())
+    system.camera_supervisor.set_status("streaming", None, time.monotonic())
     return system
 
 
@@ -409,44 +435,43 @@ def test_mcp_box_point_obeys_compensation_config_and_per_call_override():
     enabled = create_mcp(
         HorusConfig(perception=PerceptionSettings(point_compensation_enabled=True)),
         _Executor(),
-        _Flight(),
+        FakeFlight(),
         perception,
     )
     point_args = {"frame_id": 1, "box": [0, 0, 10, 10]}
-    enabled_result = json.loads(_call_tool(enabled, "point", point_args))
+    enabled_result = json.loads(call_tool(enabled, "point", point_args))
     assert enabled_result["candidate"]["id"] == 3
     assert enabled_result["frame_id"] == 3
 
     disabled = create_mcp(
         HorusConfig(perception=PerceptionSettings(point_compensation_enabled=False)),
         _Executor(),
-        _Flight(),
+        FakeFlight(),
         _point_test_system(),
     )
-    try:
-        _call_tool(disabled, "point", point_args)
-    except Exception as exc:
-        assert "compensation disabled" in str(exc)
-    else:
-        raise AssertionError("disabled compensation must not re-match an expired track")
+    with pytest.raises(Exception, match="compensation disabled"):
+        call_tool(disabled, "point", point_args)
 
     overridden = json.loads(
-        _call_tool(disabled, "point", {**point_args, "compensate": True})
+        call_tool(disabled, "point", {**point_args, "compensate": True})
     )
     assert overridden["candidate"]["id"] == 3
 
 
 def test_get_map_reports_the_enforced_inset_geofence_and_altitude_envelope():
     from horus.config import ExecutorSettings
+    from horus.executor import Envelope
 
     settings = ExecutorSettings(
         max_altitude_m=2.2,
         geofence_polygon_ned=((-4.0, -5.0), (-4.0, 5.0), (4.0, 5.0), (4.0, -5.0)),
         geofence_margin_m=1.2,
     )
-    mcp = create_mcp(HorusConfig(executor=settings), _Executor(), _Flight(), None)
+    executor = _Executor()
+    executor.envelope = Envelope(settings)
+    mcp = create_mcp(HorusConfig(executor=settings), executor, FakeFlight(), None)
 
-    envelope = json.loads(_call_tool(mcp, "get_map"))["flight_envelope"]
+    envelope = json.loads(call_tool(mcp, "get_map"))["flight_envelope"]
 
     assert {tuple(vertex) for vertex in envelope["geofence_polygon_ned"]} == {
         (-2.8, -3.8), (-2.8, 3.8), (2.8, 3.8), (2.8, -3.8)
@@ -464,14 +489,14 @@ def test_wait_for_task_returns_at_terminal_status_or_reports_timeout():
             status = self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
             return {"task_id": task_id, "status": status}
 
-    finishing = create_mcp(HorusConfig(), Executor(["running", "running", "succeeded"]), _Flight(), None)
+    finishing = create_mcp(HorusConfig(), Executor(["running", "running", "succeeded"]), FakeFlight(), None)
     started = time.monotonic()
-    done = json.loads(_call_tool(finishing, "wait_for_task", {"task_id": "t1", "timeout_s": 30}))
+    done = json.loads(call_tool(finishing, "wait_for_task", {"task_id": "t1", "timeout_s": 30}))
     assert done["status"] == "succeeded" and done["timed_out"] is False
     assert time.monotonic() - started < 5.0
 
     # A timeout below the 1 s floor is raised to it; a still-running task reports timed_out.
-    running = create_mcp(HorusConfig(), Executor(["running"]), _Flight(), None)
-    waiting = json.loads(_call_tool(running, "wait_for_task", {"task_id": "t2", "timeout_s": 0.01}))
+    running = create_mcp(HorusConfig(), Executor(["running"]), FakeFlight(), None)
+    waiting = json.loads(call_tool(running, "wait_for_task", {"task_id": "t2", "timeout_s": 0.01}))
     assert waiting["status"] == "running" and waiting["timed_out"] is True
     assert waiting["waited_s"] >= 1.0

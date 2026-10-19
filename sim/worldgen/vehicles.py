@@ -14,8 +14,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from typing import TYPE_CHECKING
 
-from sim.worldgen.sdf import ACTOR_COLLIDE_BITMASK, box_geometry, cylinder_geometry, f, material, pose, visual
+from sim.worldgen.sdf import (
+    ACTOR_COLLIDE_BITMASK, box_geometry, collide_surface, cylinder_geometry, f, material, pose, visual,
+)
+
+if TYPE_CHECKING:
+    from sim.worldgen.layout import VehiclePlacement
 
 
 @dataclass(frozen=True)
@@ -107,8 +113,17 @@ def vehicle_asset(name: str, variant: int = 0) -> str:
     return kind.assets[variant % len(kind.assets)]
 
 
-def _surface() -> str:
-    return f"<surface><contact><collide_bitmask>{ACTOR_COLLIDE_BITMASK:#06x}</collide_bitmask></contact></surface>"
+def vehicle_record(vehicle: VehiclePlacement) -> dict:
+    """Manifest/scenario record for one circulating vehicle (canonical and procedural)."""
+    kind = vehicle_type(vehicle.type)
+    return {"model": vehicle.model, "kind": "vehicle", "asset": vehicle.type,
+            "position": vehicle.position, "yaw": vehicle.yaw,
+            "behavior": "route", "group": "ambient",
+            "waypoints": vehicle.waypoints, "speed": vehicle.speed,
+            "accel": vehicle.accel, "mode": vehicle.mode,
+            "start_offset_s": vehicle.start_offset_s or None,
+            "footprint": kind.footprint(), "decel": kind.decel_m_s2,
+            "turn_radius": kind.turn_radius_m, "variant": vehicle.variant}
 
 
 def _primitive_parts(kind: VehicleType, paint: tuple[float, float, float]) -> list[str]:
@@ -141,7 +156,7 @@ def vehicle_model(model_name: str, type_name: str, x: float, y: float, z: float,
     kind = vehicle_type(type_name)
     size = box_geometry(kind.length_m, kind.width_m, kind.height_m)
     parts = [f'<collision name="body_collision"><pose>0 0 {f(kind.height_m / 2 + 0.02)} 0 0 0</pose>'
-             f"<geometry>{size}</geometry>{_surface()}</collision>"]
+             f"<geometry>{size}</geometry>{collide_surface(ACTOR_COLLIDE_BITMASK)}</collision>"]
     if kind.mesh is None:
         parts.extend(_primitive_parts(kind, paint or PAINTS[variant % len(PAINTS)]))
     else:

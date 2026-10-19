@@ -12,7 +12,7 @@ ROOT = Path(__file__).parents[1]
 
 def test_each_proximity_beam_points_where_ardupilot_is_told_it_points():
     # ArduPilot avoidance trusts the MAVLink orientation; a beam aimed elsewhere hides real
-    # obstacles in that sector and reports phantom ones (all beams once pointed forward).
+    # obstacles in that sector and reports phantom ones.
     bridged = {name: orientation for name, orientation, _sensor_id in PAYLOAD_SENSORS
                if name.startswith("proximity_")}
     model = ElementTree.parse(ROOT / "sim/models/horus_sensor_payload/model.sdf").getroot()

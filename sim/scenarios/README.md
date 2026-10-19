@@ -1,8 +1,9 @@
 # Civilian-life scenarios
 
-`sim/scripts/civilian_life.py` reads a strict YAML scenario and drives selected
-Gazebo models with `/world/<world>/set_pose_vector`. The scenario `world` value
-must match the Gazebo world name. Unknown keys and invalid values are errors.
+`sim/scripts/civilian_life.py` reads a strict YAML scenario (parsed and
+validated by `sim/campaign/civilian_spec.py`) and drives selected Gazebo models
+with `/world/<world>/set_pose_vector`. The scenario `world` value must match the
+Gazebo world name. Unknown keys and invalid values are errors.
 
 ## Schema
 

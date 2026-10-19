@@ -9,34 +9,66 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Callable, Protocol
 SUPPORTED_ORIENTATIONS = frozenset((*range(8), 25))
-
-# The generated-world payload (sim/models/horus_sensor_payload_procedural) replaces the six
-# single-beam proximity ToFs with one 8-beam horizontal ring at the payload origin. Each beam
-# stands in for one of the directions the single-beam payload covered: the MAVLink clockwise
-# 45-degree orientation, the DISTANCE_SENSOR id and the distance from the payload origin to
-# the face of the sensor that used to sit there. Subtracting that radial offset turns the
-# ring's centre-based range back into the old sensor's face-to-obstacle reading.
-_FRONT_DIAGONAL_OFFSET_M = math.hypot(0.30, 0.30)
 RING_BEAM_ANGLE_TOLERANCE_DEG = 1.0
+
+
+def _check_identity(orientation: object, sensor_id: object) -> None:
+    """Reject a DISTANCE_SENSOR orientation or id that ArduPilot cannot use."""
+    if isinstance(orientation, bool) or not isinstance(orientation, int) or orientation not in SUPPORTED_ORIENTATIONS:
+        raise ValueError("orientation must be a MAVLink horizontal value 0..7 or downward PITCH_270 value 25")
+    if isinstance(sensor_id, bool) or not isinstance(sensor_id, int) or not 0 <= sensor_id <= 255:
+        raise ValueError("sensor_id must be an integer from 0 through 255")
+
+
+def validate_rate_hz(rate_hz: float) -> float:
+    """Return ``rate_hz`` if it is a per-sensor send rate from 10 through 20 Hz."""
+    if isinstance(rate_hz, bool) or not math.isfinite(rate_hz) or not 10 <= rate_hz <= 20:
+        raise ValueError("rate_hz must be between 10 and 20 Hz")
+    return rate_hz
 
 
 @dataclass(frozen=True, slots=True)
 class RingBeam:
-    """One ring beam: SDF angle (counter-clockwise/left positive), MAVLink identity, old face."""
+    """One horizontal payload direction and the MAVLink sensor that reports it.
+
+    ``angle_deg`` is the SDF beam angle (counter-clockwise/left positive), ``radial_offset_m``
+    the distance from the payload origin to the face of the single-beam ToF for this direction,
+    and ``name`` that single-beam sensor (None for a direction only the ring covers).
+    """
 
     angle_deg: float
     orientation: int
     sensor_id: int
     radial_offset_m: float
+    name: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.angle_deg, bool) or not isinstance(self.angle_deg, (int, float)) \
                 or not math.isfinite(self.angle_deg):
             raise ValueError("angle_deg must be a finite number of degrees")
-        TofBridgeConfig(orientation=self.orientation, sensor_id=self.sensor_id)
+        _check_identity(self.orientation, self.sensor_id)
         if isinstance(self.radial_offset_m, bool) or not isinstance(self.radial_offset_m, (int, float)) \
                 or not math.isfinite(self.radial_offset_m) or self.radial_offset_m < 0:
             raise ValueError("radial_offset_m must be a finite non-negative number of metres")
+
+
+_FRONT_DIAGONAL_OFFSET_M = math.hypot(0.30, 0.30)
+
+# The payload's horizontal directions, bridged by both layouts: sim/models/horus_sensor_payload
+# carries one single-beam ToF per named direction, horus_sensor_payload_procedural one 8-beam ring
+# at the payload origin whose beams are fanned out as the same sensors (MAVLink clockwise 45-degree
+# orientations). The radial offset turns a centre-based ring range into the single-beam ToF's
+# face-to-obstacle reading. Ring-only rear diagonals take ids 7 and 8; range_down keeps id 6.
+RING_BEAMS: tuple[RingBeam, ...] = (
+    RingBeam(-180.0, 4, 3, 0.32, "proximity_rear"),
+    RingBeam(-135.0, 3, 7, 0.32),
+    RingBeam(-90.0, 2, 2, 0.32, "proximity_right"),
+    RingBeam(-45.0, 1, 1, _FRONT_DIAGONAL_OFFSET_M, "proximity_front_right"),
+    RingBeam(0.0, 0, 0, 0.24, "proximity_front"),
+    RingBeam(45.0, 7, 5, _FRONT_DIAGONAL_OFFSET_M, "proximity_front_left"),
+    RingBeam(90.0, 6, 4, 0.32, "proximity_left"),
+    RingBeam(135.0, 5, 8, 0.32),
+)
 
 
 class LaserScanLike(Protocol):
@@ -47,18 +79,11 @@ class LaserScanLike(Protocol):
     ranges: Iterable[float]
 
 
-class RingScanLike(Protocol):
-    """The gz.msgs10 LaserScan subset needed to fan out one reading per ring beam.
+class RingScanLike(LaserScanLike, Protocol):
+    """A LaserScan whose ``angle_step`` (or ``angle_max``/range count) says where each return aimed."""
 
-    ``angle_step`` (or the ``angle_max``/range-count fallback) describes where each return was
-    aimed; the beam angles are never hard-coded.
-    """
-
-    range_min: float
-    range_max: float
     angle_min: float
     angle_step: float
-    ranges: Iterable[float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,53 +101,6 @@ class DistanceSensorReading:
 
 
 @dataclass(frozen=True, slots=True)
-class TofBridgeConfig:
-    """Output settings for one Gazebo lidar topic and one MAVLink sensor ID."""
-
-    rate_hz: float = 20.0
-    orientation: int = 0
-    sensor_id: int = 0
-
-    def __post_init__(self) -> None:
-        if (
-            isinstance(self.rate_hz, bool)
-            or not math.isfinite(self.rate_hz)
-            or not 10 <= self.rate_hz <= 20
-        ):
-            raise ValueError("rate_hz must be between 10 and 20 Hz")
-        if (
-            isinstance(self.orientation, bool)
-            or not isinstance(self.orientation, int)
-            or self.orientation not in SUPPORTED_ORIENTATIONS
-        ):
-            raise ValueError(
-                "orientation must be a MAVLink horizontal value 0..7 or "
-                "downward PITCH_270 value 25"
-            )
-        if (
-            isinstance(self.sensor_id, bool)
-            or not isinstance(self.sensor_id, int)
-            or not 0 <= self.sensor_id <= 255
-        ):
-            raise ValueError("sensor_id must be an integer from 0 through 255")
-
-
-# The six directions that existed keep their old sensor IDs (0 front, 1 front-right, 2 right,
-# 3 rear, 4 left, 5 front-left); the two rear diagonals are new and take the next free IDs 7
-# (rear-right, orientation 3) and 8 (rear-left, orientation 5). range_down keeps id 6.
-RING_BEAMS: tuple[RingBeam, ...] = (
-    RingBeam(-180.0, 4, 3, 0.32),                     # proximity_rear
-    RingBeam(-135.0, 3, 7, 0.32),                     # new rear-right diagonal
-    RingBeam(-90.0, 2, 2, 0.32),                      # proximity_right
-    RingBeam(-45.0, 1, 1, _FRONT_DIAGONAL_OFFSET_M),  # proximity_front_right
-    RingBeam(0.0, 0, 0, 0.24),                        # proximity_front
-    RingBeam(45.0, 7, 5, _FRONT_DIAGONAL_OFFSET_M),   # proximity_front_left
-    RingBeam(90.0, 6, 4, 0.32),                       # proximity_left
-    RingBeam(135.0, 5, 8, 0.32),                      # new rear-left diagonal
-)
-
-
-@dataclass(frozen=True, slots=True)
 class SensorSpec:
     """One Gazebo LaserScan source and its MAVLink DISTANCE_SENSOR identity."""
 
@@ -133,7 +111,7 @@ class SensorSpec:
     def __post_init__(self) -> None:
         if not isinstance(self.topic, str) or not self.topic.strip():
             raise ValueError("topic must be a non-empty Gazebo LaserScan topic")
-        TofBridgeConfig(orientation=self.orientation, sensor_id=self.sensor_id)
+        _check_identity(self.orientation, self.sensor_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,8 +127,6 @@ class RingSensorSpec:
         if not isinstance(self.beams, tuple) or not self.beams \
                 or any(not isinstance(beam, RingBeam) for beam in self.beams):
             raise ValueError("beams must be a non-empty tuple of RingBeam values")
-        if len({beam.sensor_id for beam in self.beams}) != len(self.beams):
-            raise ValueError("ring beam sensor IDs must be unique")
         if len({beam.orientation for beam in self.beams}) != len(self.beams):
             raise ValueError("ring beam orientations must be unique")
 
@@ -166,41 +142,22 @@ def _finite_float(value: object, field: str) -> float:
 
 
 def laser_scan_to_distance_sensor(
-    scan: LaserScanLike,
-    *,
-    time_boot_ms: int,
-    orientation: int = 0,
-    sensor_id: int = 0,
+    scan: LaserScanLike, *, time_boot_ms: int, orientation: int = 0, sensor_id: int = 0,
     radial_offset_m: float = 0.0,
 ) -> DistanceSensorReading | None:
     """Convert nearest return; positive-infinite/out-of-range beams mean clear range.
 
-    Gazebo ranges are metres. DISTANCE_SENSOR limits and returns are rounded to
-    centimetres and saturated to MAVLink's uint16 range. Orientation is the
-    MAV_SENSOR_ORIENTATION horizontal values 0..7 and downward PITCH_270 (25).
-
-    ``radial_offset_m`` is the distance from the lidar's origin to the face of the sensor the
-    scan stands in for (a ring beam replacing a single-beam ToF). It is subtracted from a
-    measured return and the result clamped to the sensor's [min, max] centimetre range, so
-    readings keep the old face-to-obstacle meaning. Clear beams (+inf or beyond range_max) report
+    Gazebo ranges are metres; DISTANCE_SENSOR limits and returns are rounded to centimetres and
+    saturated to MAVLink's uint16 range. The identity and offset come validated from
+    :class:`SensorSpec` or :class:`RingBeam`. ``radial_offset_m`` (lidar origin to the face of
+    the sensor the scan stands in for) is subtracted from a measured return, clamped to
+    [min, max] centimetres, so readings keep the face-to-obstacle meaning. Clear beams report
     one centimetre past ``max_distance``: ArduPilot's MAVLink proximity backend stores any reading
     with ``min <= distance <= max`` as an obstacle, so a clear beam at exactly the maximum range
-    put a phantom obstacle 4 m away in every sector and throttled/deflected guided velocity.
+    would put a phantom obstacle 4 m away in every sector and throttle/deflect guided velocity.
     """
-    if isinstance(orientation, bool) or not isinstance(orientation, int) or orientation not in SUPPORTED_ORIENTATIONS:
-        raise ValueError("orientation must be a MAVLink horizontal value 0..7 or downward PITCH_270 value 25")
-    if isinstance(sensor_id, bool) or not isinstance(sensor_id, int) or not 0 <= sensor_id <= 255:
-        raise ValueError("sensor_id must be an integer from 0 through 255")
     if isinstance(time_boot_ms, bool) or not isinstance(time_boot_ms, int) or not 0 <= time_boot_ms <= 0xFFFFFFFF:
         raise ValueError("time_boot_ms must be an unsigned 32-bit integer")
-    if isinstance(radial_offset_m, bool):
-        raise ValueError("radial_offset_m must be a finite non-negative number of metres")
-    try:
-        radial_offset_m = float(radial_offset_m)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("radial_offset_m must be a finite non-negative number of metres") from exc
-    if not math.isfinite(radial_offset_m) or radial_offset_m < 0:
-        raise ValueError("radial_offset_m must be a finite non-negative number of metres")
 
     try:
         range_min_m = _finite_float(scan.range_min, "range_min")
@@ -225,13 +182,10 @@ def laser_scan_to_distance_sensor(
                 distance_m = float(sample)
             except (TypeError, ValueError, OverflowError):
                 continue
-            if math.isinf(distance_m) and distance_m > 0:
+            if distance_m > range_max_m:  # +inf or beyond range: a clear beam
                 has_clear_beam = True
-            elif math.isfinite(distance_m) and range_min_m <= distance_m <= range_max_m:
-                if nearest_m is None or distance_m < nearest_m:
-                    nearest_m = distance_m
-            elif math.isfinite(distance_m) and distance_m > range_max_m:
-                has_clear_beam = True
+            elif range_min_m <= distance_m and (nearest_m is None or distance_m < nearest_m):
+                nearest_m = distance_m
     except TypeError as exc:
         raise ValueError("LaserScan ranges must be an iterable of distances") from exc
     if nearest_m is None:
@@ -289,17 +243,14 @@ def _beam_at_angle(angle_deg: float, beams: Sequence[RingBeam]) -> RingBeam | No
 
 
 def ring_scan_to_distance_sensors(
-    scan: RingScanLike,
-    *,
-    time_boot_ms: int,
-    beams: Sequence[RingBeam] = RING_BEAMS,
+    scan: RingScanLike, *, time_boot_ms: int, beams: Sequence[RingBeam] = RING_BEAMS,
 ) -> list[DistanceSensorReading]:
     """Fan one ring LaserScan out to one DISTANCE_SENSOR reading per mapped beam.
 
     Beam angles come from the scan itself (``angle_min + index * angle_step``, falling back to
     ``angle_max`` with the range count); a beam whose angle misses its configured 45-degree
     direction by more than :data:`RING_BEAM_ANGLE_TOLERANCE_DEG` is skipped. Each matched beam
-    is converted through :func:`laser_scan_to_distance_sensor` with its direction's old radial
+    is converted through :func:`laser_scan_to_distance_sensor` with its direction's radial
     offset, so no-return/out-of-range handling matches the seven-sensor path exactly.
     """
     try:
@@ -325,116 +276,11 @@ def ring_scan_to_distance_sensors(
         if beam is None:
             continue
         reading = laser_scan_to_distance_sensor(
-            _SingleBeamScan(range_min, range_max, (sample,)),
-            time_boot_ms=time_boot_ms,
-            orientation=beam.orientation,
-            sensor_id=beam.sensor_id,
-            radial_offset_m=beam.radial_offset_m,
-        )
+            _SingleBeamScan(range_min, range_max, (sample,)), time_boot_ms=time_boot_ms,
+            orientation=beam.orientation, sensor_id=beam.sensor_id, radial_offset_m=beam.radial_offset_m)
         if reading is not None:
             readings.append(reading)
     return readings
-
-
-class DistanceSensorBridge:
-    """Rate-limit scans and deliver readings through a callable sender.
-
-    The configured rate is an upper bound: a DISTANCE_SENSOR message is sent
-    only when a fresh LaserScan arrives, so a stalled sensor is not replayed as
-    fresh data. A sender receives one :class:`DistanceSensorReading` per send.
-    """
-
-    def __init__(
-        self,
-        sender: Callable[[DistanceSensorReading], None],
-        config: TofBridgeConfig | None = None,
-        *,
-        monotonic: Callable[[], float] = time.monotonic,
-        clock_ms: Callable[[], int] | None = None,
-    ) -> None:
-        if not callable(sender):
-            raise TypeError("sender must be callable and accept a DistanceSensorReading")
-        self.config = config or TofBridgeConfig()
-        self._sender = sender
-        self._monotonic = monotonic
-        self._clock_ms = clock_ms or (lambda: int(self._monotonic() * 1000))
-        self._interval_s = 1.0 / self.config.rate_hz
-        self._last_sent_at: float | None = None
-        self._lock = threading.Lock()
-
-    def on_scan(self, scan: LaserScanLike) -> DistanceSensorReading | None:
-        """Send a scan's nearest valid range unless rate-limited or out of range."""
-        now = self._monotonic()
-        with self._lock:
-            if self._last_sent_at is not None and now - self._last_sent_at < self._interval_s:
-                return None
-
-        reading = laser_scan_to_distance_sensor(
-            scan,
-            time_boot_ms=self._clock_ms() & 0xFFFFFFFF,
-            orientation=self.config.orientation,
-            sensor_id=self.config.sensor_id,
-        )
-        if reading is None:
-            return None
-
-        with self._lock:
-            send_at = self._monotonic()
-            if self._last_sent_at is not None and send_at - self._last_sent_at < self._interval_s:
-                return None
-            self._sender(reading)
-            self._last_sent_at = self._monotonic()
-        return reading
-
-
-class RingSensorBridge:
-    """Rate-limit a ring scan and deliver one reading per beam through a callable sender.
-
-    Mirrors :class:`DistanceSensorBridge`: the configured rate is an upper bound, each
-    DISTANCE_SENSOR id is rate-limited independently, and a stalled ring is never replayed
-    as fresh data.
-    """
-
-    def __init__(
-        self,
-        sender: Callable[[DistanceSensorReading], None],
-        spec: RingSensorSpec,
-        rate_hz: float = 20.0,
-        *,
-        monotonic: Callable[[], float] = time.monotonic,
-        clock_ms: Callable[[], int] | None = None,
-    ) -> None:
-        if not callable(sender):
-            raise TypeError("sender must be callable and accept a DistanceSensorReading")
-        if not isinstance(spec, RingSensorSpec):
-            raise TypeError("spec must be a RingSensorSpec")
-        self.spec = spec
-        self.config = TofBridgeConfig(rate_hz=rate_hz)
-        self._sender = sender
-        self._monotonic = monotonic
-        self._clock_ms = clock_ms or (lambda: int(self._monotonic() * 1000))
-        self._interval_s = 1.0 / self.config.rate_hz
-        self._last_sent_at: dict[int, float] = {}
-        self._lock = threading.Lock()
-
-    def on_scan(self, scan: RingScanLike) -> list[DistanceSensorReading]:
-        """Send every fresh beam reading, subject to the per-sensor rate limit."""
-        readings = ring_scan_to_distance_sensors(
-            scan,
-            time_boot_ms=self._clock_ms() & 0xFFFFFFFF,
-            beams=self.spec.beams,
-        )
-        sent: list[DistanceSensorReading] = []
-        with self._lock:
-            for reading in readings:
-                now = self._monotonic()
-                last = self._last_sent_at.get(reading.sensor_id)
-                if last is not None and now - last < self._interval_s:
-                    continue
-                self._sender(reading)
-                self._last_sent_at[reading.sensor_id] = self._monotonic()
-                sent.append(reading)
-        return sent
 
 
 def sensor_ids(spec: SensorSpec | RingSensorSpec) -> tuple[int, ...]:
@@ -445,17 +291,19 @@ def sensor_ids(spec: SensorSpec | RingSensorSpec) -> tuple[int, ...]:
 
 
 class MultiSensorBridge:
-    """Route multiple LaserScan topics through one shared MAVLink sender."""
+    """Route LaserScan topics through one shared sender, rate-limiting each DISTANCE_SENSOR id.
 
-    def __init__(
-        self,
-        sender: Callable[[DistanceSensorReading], None],
-        sensors: Iterable[SensorSpec | RingSensorSpec],
-        rate_hz: float = 20.0,
-        *,
-        monotonic: Callable[[], float] = time.monotonic,
-        clock_ms: Callable[[], int] | None = None,
-    ) -> None:
+    The configured rate is an upper bound: a reading is sent only when a fresh LaserScan
+    arrives, so a stalled sensor is never replayed as fresh data. The sender receives one
+    :class:`DistanceSensorReading` per send.
+    """
+
+    def __init__(self, sender: Callable[[DistanceSensorReading], None],
+                 sensors: Iterable[SensorSpec | RingSensorSpec], rate_hz: float = 20.0, *,
+                 monotonic: Callable[[], float] = time.monotonic,
+                 clock_ms: Callable[[], int] | None = None) -> None:
+        if not callable(sender):
+            raise TypeError("sender must be callable and accept a DistanceSensorReading")
         specs = tuple(sensors)
         if not specs:
             raise ValueError("at least one LaserScan sensor is required")
@@ -468,25 +316,34 @@ class MultiSensorBridge:
         if len(set(ids)) != len(ids):
             raise ValueError("sensor IDs must be unique")
         self.sensors = specs
-        self._bridges: dict[str, DistanceSensorBridge | RingSensorBridge] = {}
-        for spec in specs:
-            if isinstance(spec, RingSensorSpec):
-                self._bridges[spec.topic] = RingSensorBridge(
-                    sender, spec, rate_hz, monotonic=monotonic, clock_ms=clock_ms)
-            else:
-                self._bridges[spec.topic] = DistanceSensorBridge(
-                    sender,
-                    TofBridgeConfig(rate_hz, spec.orientation, spec.sensor_id),
-                    monotonic=monotonic,
-                    clock_ms=clock_ms,
-                )
+        self._specs = dict(zip(topics, specs))
+        self._sender = sender
+        self._monotonic = monotonic
+        self._clock_ms = clock_ms or (lambda: int(self._monotonic() * 1000))
+        self._interval_s = 1.0 / validate_rate_hz(rate_hz)
+        self._last_sent_at: dict[int, float] = {}
+        self._lock = threading.Lock()
 
-    def on_scan(
-        self, topic: str, scan: LaserScanLike | RingScanLike
-    ) -> DistanceSensorReading | list[DistanceSensorReading] | None:
-        """Forward a fresh scan using the identity configured for its topic."""
+    def on_scan(self, topic: str, scan: LaserScanLike | RingScanLike) -> list[DistanceSensorReading]:
+        """Convert a fresh scan for ``topic`` and send every reading not rate-limited."""
         try:
-            bridge = self._bridges[topic]
+            spec = self._specs[topic]
         except KeyError as exc:
             raise ValueError(f"no sensor configured for LaserScan topic {topic!r}") from exc
-        return bridge.on_scan(scan)
+        time_boot_ms = self._clock_ms() & 0xFFFFFFFF
+        if isinstance(spec, RingSensorSpec):
+            readings = ring_scan_to_distance_sensors(scan, time_boot_ms=time_boot_ms, beams=spec.beams)
+        else:
+            reading = laser_scan_to_distance_sensor(
+                scan, time_boot_ms=time_boot_ms, orientation=spec.orientation, sensor_id=spec.sensor_id)
+            readings = [] if reading is None else [reading]
+        sent: list[DistanceSensorReading] = []
+        with self._lock:
+            for reading in readings:
+                last = self._last_sent_at.get(reading.sensor_id)
+                if last is not None and self._monotonic() - last < self._interval_s:
+                    continue
+                self._sender(reading)
+                self._last_sent_at[reading.sensor_id] = self._monotonic()
+                sent.append(reading)
+        return sent

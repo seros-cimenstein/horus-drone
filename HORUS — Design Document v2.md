@@ -34,7 +34,7 @@ flowchart TD
   R["REPL console<br/>terminal / web / voice"] --> C["Cloud commander<br/>frontier model"]
   C -->|MCP over tunnel| M["Onboard MCP server"]
   C -.fallback.-> G["Grounding model<br/>cloud or ground-station GPU"]
-  C -.on demand.-> T["Training service<br/>cloud GPU + TIDL compile"]
+  C -.on demand.-> T["Training service (planned)<br/>cloud GPU + TIDL compile"]
   M --> E["Local executor<br/>skills, tracking, latency comp"]
   E --> P["Perception<br/>4 TOPS accelerator"]
   E --> A["ArduPilot<br/>avoidance, geofence, RTH"]
@@ -47,10 +47,10 @@ The commander plans and reports; the grounding model is called only when onboard
 | --- | --- | --- | --- |
 | Cloud commander | Frontier model (Claude / GPT-class / Qwen) | ≤ 1 Hz, event-driven | Plan, pick target ID, ask operator, report |
 | Ground-station edge (optional) | Laptop GPU on the same LAN | 3–10 Hz | Grounding DINO / Florence-2 fallback pointing |
-| Onboard executor | Gemstone A53 cores + accelerator | 10–30 Hz | Tracking, ReID, approach, orbit, scan |
-| Flight control | ArduPilot on R5F cores | 400 Hz | Stabilization, avoidance, failsafes |
+| Onboard executor | AI board (BeagleY-AI / AM67A class) A53 cores + accelerator | 10–30 Hz | Tracking, ReID, approach, orbit, scan, `run_plan` |
+| Flight control | ArduPilot on a dedicated flight controller | 400 Hz | Stabilization, avoidance, failsafes |
 
-Executor state machine: `IDLE → EXECUTING → HOLDING → OFFLINE_MISSION → RETURNING_TO_LINK → RTH`. Every command has a time-to-live; when it expires with nothing fresh, the executor finishes the current safe action and holds.
+Executor states (`ExecutorState` in `horus/executor/core.py`): `IDLE → EXECUTING → HOLDING → RTH`, plus `PILOT` whenever a pilot or autopilot failsafe takes over. `OFFLINE_MISSION` and `RETURNING_TO_LINK` are planned states for disconnected autonomy (stretch) and do not exist yet. Every command has a time-to-live: a queued command that expires is dropped, and a running one that expires is stopped and the executor holds in GUIDED.
 
 ## Scope tiers
 
@@ -60,7 +60,7 @@ The must-have core alone answers the research question; everything else is added
 | --- | --- | --- |
 | **Must-have core** | Dual-system loop, set-of-mark grounding, latency compensation, safety layer, bounded MCP tools, REPL, recognition ladder steps 1–2 (embeddings, tiny head) | Find the person in the red shirt · Follow that person with occlusion · Link cut with no package → hold → RTH → AprilTag landing |
 | **Stretch** | Agent-triggered YOLOv8n fine-tune (ladder step 3), offline mission packages + store-and-forward, one thermal module, ground-station edge tier | Search room for someone lying down · Link cut mid-mission → continue → return to link zone → sync · Ambiguity: drone asks before acting |
-| **Future work** | Full module manager with DroneCAN auto-discovery, local LLM for offline decisions, VIO, multi-drone, outdoor/GPS | — |
+| **Future work** | Full module manager with DroneCAN auto-discovery, local LLM for offline decisions, VIO, multi-drone | — |
 
 Scripted, replayable REPL missions are part of the core because every experiment depends on them.
 
@@ -104,7 +104,7 @@ The manager agent climbs a three-step ladder and stops at the first step that wo
 
 For a specific person, stay on step 1: fine-tuning YOLO on one person from a few photos teaches "person", not "this person". Identity is an embedding problem.
 
-### Step 3 pipeline (MCP tool `train_specialist`)
+### Step 3 pipeline (planned MCP tool `train_specialist`)
 
 ```mermaid
 flowchart LR
@@ -116,7 +116,7 @@ flowchart LR
   F --> G["Sign + load_model<br/>shadow mode"]
 ```
 
-The commander calls `train_specialist(description, reference_images)`, which returns a `task_id`; the job runs in the cloud and the drone keeps working on step 1 or 2 meanwhile.
+Planned, not yet registered: the commander calls `train_specialist(description, reference_images)`, which returns a `task_id`; the job runs in the cloud and the drone keeps working on step 1 or 2 meanwhile. The result is loaded with the equally planned `load_model(package)`.
 
 - **Frozen architecture:** one YOLOv8n configuration is proven once to compile on TIDL with no CPU fallback layers; afterwards only weights change, so compilation is predictable.
 - **Data from the drone's own camera:** recent keyframes are included so the training data matches the real viewpoint and sensor.
@@ -128,7 +128,7 @@ In simulation, step 3 is testable end to end except the TIDL compile, which is v
 
 ## Disconnected autonomy (stretch)
 
-While connected the brain prepares the drone; while disconnected the drone executes and records; on reconnect the brain and operator confirm.
+While connected the brain prepares the drone; while disconnected the drone executes and records; on reconnect the brain and operator confirm. Built so far: a `run_plan` plan keeps running onboard without the link (Section: Provider-written plans). Mission packages, store-and-forward and link-aware return below are planned.
 
 **Mission package** (signed, sent before link loss):
 
@@ -155,20 +155,40 @@ A bad AI decision cannot produce a dangerous maneuver: the executor and ArduPilo
 
 - **Collision avoidance:** ToF ring (4–6× VL53L1X) feeding ArduPilot proximity (`PRX_*`, `AVOID_ENABLE`). Monocular depth may add awareness but is never the only safeguard.
 - **Verify avoidance in Guided mode first.** The executor drives the drone in Guided mode, and avoidance behaves differently per flight mode. Milestone S3 in the simulation plan proves the proximity sensors stop executor-issued motion before anything else is built on it.
-- **Odometry and RTH:** optical flow + downward rangefinder into EKF3, home set at takeoff, AprilTag pad for precise landing, breadcrumb retracing as backup.
-- **Failsafes:** cloud link lost → mission package if any, else hold → return to link zone → RTH. Low battery → RTH with enforced reserve. Hardware RC override always available.
+- **Odometry and RTH:** GPS in the default profile; without GPS, optical flow + downward rangefinder into EKF3 (Section: Navigation source). Home set at takeoff, AprilTag pad for precise landing, breadcrumb retracing as backup (planned).
+- **Failsafes:** cloud link lost → the executor holds, and after `link_loss_rth_delay_s` (default 30 s) of hold with no MCP call it returns home (`auto_rth`); a running plan counts as supervision. Planned (stretch): run a mission package if any, return to the link zone, then RTH. Low battery → RTH with enforced reserve. Hardware RC override always available.
+- **Pilot override is final.** Any armed flight-mode change HORUS did not request (RC mode switch, GCS, ArduPilot battery/fence/EKF failsafe) cancels all HORUS work, enters `PILOT` state, publishes `pilot_override`, and refuses every flight tool, emergencies included, until the vehicle is switched back to GUIDED (`pilot_released`) or disarmed. HORUS only re-sends GUIDED when telemetry does not already report it, so a stale GUIDED report never undoes a pilot's switch.
 
 | Category | Tools |
 | --- | --- |
 | State | `get_state`, `get_frame`, `list_candidates`, `get_map`, `get_link_status` |
-| Skills | `take_off`, `goto(pose)`, `follow(id, target_size_m)`, `orbit(id, radius, target_size_m)`, `scan(area)`, `approach(id, dist, target_size_m)` |
+| Skills | `take_off(altitude_m)`, `goto(pose)`, `follow(id, dist_m, target_size_m)`, `orbit(id, radius_m, target_size_m)`, `scan(area)`, `search(area, cue)` (cue: `class_name`, `attribute` + `equals`, or `reference_id`), `approach(id, dist_m, target_size_m)` |
 | Grounding | `set_vocabulary(terms)` (continuous open-vocabulary detection), `point(frame_id, description|box)` (may seed a new tracker ID) |
-| Recognition | `set_target_profile(profile)`, `train_specialist(desc, refs)`, `load_model(package)`, `set_mode(name)` |
+| Scene | `get_candidate_motion(id)`, `watch_region(name, box, class_name)`, `list_region_watches`, `remove_region_watch(watch_id)` |
+| Recognition | `set_target_profile(profile)`, `set_mode(name)`; planned (stretch, not registered): `train_specialist(desc, refs)`, `load_model(package)` |
 | Tasks | `get_task_status(task_id)`, `wait_for_task(task_id, timeout_s)`, `wait_events(after_id, timeout_s)`, `cancel(task_id)` |
-| Missions (stretch) | `upload_mission`, `start_mission`, `get_mission_log`, `clear_mission` |
+| Plans | `run_plan(plan, ttl_s)`, `get_plan_status(plan_id)`, `wait_for_plan(plan_id, timeout_s)`, `cancel_plan(plan_id)` |
+| Missions (planned, stretch; not registered) | `upload_mission`, `start_mission`, `get_mission_log`, `clear_mission` |
 | Emergency | `hold`, `rth`, `land` |
 
-Skills take tracker IDs rather than pixel regions. Long actions return a `task_id` immediately. `wait_events` blocks asynchronously until an executor or perception transition arrives (or its timeout expires), so the commander can observe task completion, target loss/reacquisition, link state, emergency actions, and perception changes without polling. Every state and frame response is timestamped. The server is authenticated, reached only through an encrypted tunnel, and built on the Python MCP SDK over streamable HTTP, with pymavlink or MAVSDK to ArduPilot.
+Skills take tracker IDs rather than pixel regions. Long actions return a `task_id` immediately. `wait_events` blocks asynchronously until an executor or perception transition arrives (or its timeout expires), so the commander can observe task completion, target loss/reacquisition, link state, emergency actions, and perception changes without polling. Event kinds are registered in `horus/events.py`: executor (`task_finished`, `target_lost`, `target_reacquired`, `target_found`, `link_lost`, `link_restored`, `auto_rth`, `emergency`, `landed`, `precision_landing_stalled`, `pilot_override`, `pilot_released`), plan (`plan_finished`, `plan_log`) and scene (`object_detected` and the `watch_region` kinds `region_enter`, `region_exit`, `region_dwell`, `region_watch_paused`, `region_watch_resumed`, `region_watch_expired`). Every registered kind except `plan_log` may wake the commander model; `vocabulary_changed` stays on the `wait_events` stream only. The server also offers its operating guidance as the `horus_commander` prompt and the `horus://mission/brief` resource. Every state and frame response is timestamped. The server is authenticated (bearer token), reached only through an encrypted tunnel, and built on the Python MCP SDK over streamable HTTP, with pymavlink to ArduPilot.
+
+### Provider-written plans (`run_plan`)
+
+HORUS is a provider-agnostic MCP server: any MCP client and model can command it, and the provider decides whether to drive step by step or to plan. `run_plan` lets it send a whole mission as one short program, following TypeFly's plan format (restricted Python; [TypeFly](https://github.com/typefly/TypeFly), Apache-2.0). TypeFly's original MiniSpec language was dropped by its authors in December 2025; MCP tool calls cannot stream partial arguments, so MiniSpec's stream interpreting does not apply, and a measured "find and orbit the person in red" mission is 147 tokens over 8 tool turns as separate calls, 71 tokens in one turn as a plan, and 53 as MiniSpec. The win is the single round trip, not the syntax.
+
+- **Grammar:** plan-function calls, single-name assignment, `if/elif/else`, `for i in range(<integer literals>)` (≤ 100 iterations, ≤ 1000 nested), `break/continue/pass`, comparisons, `and/or/not`, float `+ - * /`, f-strings. HORUS interprets the AST itself, so nothing outside the plan functions is reachable.
+- **Functions:** `take_off(altitude_m)`, `goto(north_m, east_m, up_m)`, `approach(id, dist_m)`, `follow(id, duration_s)`, `orbit(id, duration_s)`, `scan(north_min_m, north_max_m, east_min_m, east_max_m)`, `search(<same area>, class_name|attribute+equals|reference_id) → id or -1`, `wait(seconds)`, `log(message)`, `hold/rth/land` (end the plan). Each flight call is an ordinary clamped executor skill and returns success so the plan can branch.
+- **Safety:** one plan at a time; while it runs, direct skill tools are refused. Emergencies (`hold/rth/land`) and pilot override abort it at the next statement or while a step runs. Plan TTL defaults to 600 s (max 1800 s). A running plan counts as onboard supervision, so link-loss RTH cannot fire until it ends; ArduPilot battery and fence failsafes still apply.
+- **Events:** `plan_log` per `log()` line (log and GUI only, never wakes the model), `plan_finished` at the end.
+
+### Navigation source
+
+GPS flight is the default on every shipped world: the indoor room (`horus_indoor`), the canonical outdoor worlds (`horus_forest`, `horus_urban`) and generated procedural worlds (`horus_<kind>_p<seed>`). The SITL parameters are composed from fragments in `config/ardupilot/`: `common.parm` (proximity avoidance, downward rangefinder, gimbal) followed by `indoor.parm`, or by `outdoor.parm` plus `canonical_fence.parm` or `procedural_fence.parm`. `sim/scripts/world_profiles.py` maps each world to its executor config and fragment list; `HORUS_SITL_PARAM_FILE` overrides it. The GPS-free profile (optical flow into EKF3, barometer altitude, downward rangefinder) is `nogps.parm` loaded after `common.parm` and `indoor.parm` (`sim/scripts/s4_landing_trials.sh`); it stays maintained so the same stack can fly without GPS when needed.
+
+### Flight controller
+
+ArduPilot runs on a dedicated flight controller; the AI board (BeagleY-AI / AM67A class with CNN accelerator) is the companion computer for the executor, perception and MCP server.
 
 ## Simulation plan (ArduPilot SITL + Gazebo)
 
@@ -217,10 +237,11 @@ The agent runs in its own container so `tc netem` delay and loss apply only to t
 
 ### World and sensors
 
-- **Indoor world:** a room and corridor with furniture, a textured floor and an AprilTag pad; Gazebo actors (animated people) in different shirt colors, one lying on the floor.
-- **GPS-free flight:** disable GPS and fly on SITL's simulated optical flow + downward rangefinder into EKF3. Start with GPS on for milestones S1–S2, then switch. Check exact `FLOW_*`, `RNGFND*`, `EK3_SRC*` and `SIM_*` values against current ArduPilot docs.
-- **ToF ring:** 4–6 short-range Gazebo lidar sensors, read by a small bridge that sends MAVLink `DISTANCE_SENSOR` messages, with ArduPilot proximity set to the MAVLink type.
-- **Perception in sim** runs on the dev PC (PyTorch / ONNX). Cap its frame rate to what the Gemstone accelerator is expected to sustain, so behavior does not depend on desktop-class compute.
+- **Indoor world (`horus_indoor`):** a room and corridor with furniture, a textured floor and an AprilTag pad; Gazebo actors (animated people) in different shirt colors, one lying on the floor.
+- **Outdoor worlds:** the canonical `horus_forest` and `horus_urban`, and procedurally generated forest/urban worlds (`horus_<kind>_p<seed>`), all flown on GPS with an ArduPilot fence.
+- **GPS-free flight (S4):** `nogps.parm` disables the SITL GPS and flies on SITL's simulated optical flow into EKF3, with the downward rangefinder from the ToF bridge. Every other profile flies on GPS (Section: Navigation source).
+- **ToF ring:** six short-range Gazebo lidar sensors plus a downward range sensor indoors (one 8-beam ring lidar on the procedural payload), read by a small bridge that sends MAVLink `DISTANCE_SENSOR` messages, with ArduPilot proximity set to the MAVLink type (`PRX1_TYPE 2`).
+- **Perception in sim** runs on the dev PC (PyTorch / ONNX). Cap its frame rate to what the AI board's accelerator is expected to sustain, so behavior does not depend on desktop-class compute.
 
 ### Milestones
 
@@ -234,7 +255,7 @@ The agent runs in its own container so `tc netem` delay and loss apply only to t
 | S5 | Perception + tracking | Camera stream → detector → tracker with persistent IDs; `follow(id)` survives a 2 s occlusion |
 | S6 | Cloud loop | Set-of-mark frames to the commander; "find the person in the red shirt" succeeds end to end |
 | S7 | Latency | Frame buffer, fast-forward tracking, embedding re-match; latency sweep 0–3 s with `netem` |
-| S8 | Stretch | Mission package + link cut; `train_specialist` produces a model the executor loads in shadow mode |
+| S8 | Stretch | Mission package + link cut; `train_specialist` (planned tool) produces a model the executor loads in shadow mode |
 
 Use `SIM_SPEEDUP` and headless Gazebo runs for batches of repeated trials once scripted REPL missions work.
 
@@ -258,11 +279,11 @@ Every experiment runs as a scripted REPL mission, N ≥ 20 trials per condition 
 
 ## Hardware and risks
 
-The target board is the T3 Gemstone O1 (TI AM67A: 4× A53 for Linux, 2× R5F for ArduPilot, 4 TOPS accelerator, 4 GB RAM) on a 5–7" frame with prop guards; the default-core BOM from v1 (\~$785–1,190, or \~$510–915 with a free board) is unchanged.
+The companion is an AM67A-class AI board (BeagleY-AI or T3 Gemstone O1: 4× A53 for Linux, 4 TOPS accelerator) next to a separate ArduPilot flight controller, on a 5–7" frame with prop guards; the default-core BOM from v1 (\~$785–1,190, or \~$510–915 with a free board) plus the flight controller.
 
 | Risk | Mitigation |
 | --- | --- |
-| Gemstone ecosystem is new; ArduPilot on R5F is less proven than a Pixhawk | Fixed go/no-go date for switching to a Pixhawk + Raspberry Pi fallback (see Timeline) |
+| AI-board ecosystem is new (TIDL toolchain, drivers) | Flight control is on the separate controller, so the board only risks perception; compile models early |
 | TIDL operator support | Prove the frozen YOLOv8n and tracker/ReID models compile early, before any training |
 | Indoor optical flow drift on plain floors | Textured floor mats, AprilTag landing, breadcrumb retracing |
 | ReID trained on eye-level footage fails from above | Early test on drone-view footage; fall back to attributes + fine-tuning if needed |
@@ -285,7 +306,7 @@ The timeline is in weeks from the start of simulation work; real dates depend on
 | 3–4 | MCP server, REPL, safety proof | S2, S3 |
 | 5–6 | GPS-free flight, perception, tracking | S4, S5 |
 | 7–9 | Cloud loop and latency compensation | S6, S7 |
-| 8 | **Hardware go/no-go:** Gemstone flies stable hover with flow + ToF, or switch to fallback | Props-off, tethered, low-altitude tests |
+| 8 | **Hardware go/no-go:** the flight controller flies stable hover with flow + ToF and the AI board runs perception at target rate, or switch to fallback | Props-off, tethered, low-altitude tests |
 | 10–12 | Indoor flights of the core scenarios | Core demos on hardware |
 | 12–14 | Stretch goals if the core is solid | S8, thermal module |
 | 14–16 | Experiments and write-up | Headline experiments, thesis, demo video |
@@ -307,7 +328,7 @@ HORUS differs from prior LLM-drone work by combining ID-based grounding, onboard
 
 | Project | Summary | Gap HORUS addresses |
 | --- | --- | --- |
-| [TypeFly](https://arxiv.org/abs/2312.14950v2) (Yale, 2023–24) | A cloud LLM writes programs in a small custom language (MiniSpec) that a drone executes, with edge-based vision; the revised version targets LLM response latency | Closest prior art. HORUS supervises goals continuously instead of generating a program, grounds by tracker ID, and adds an ArduPilot safety layer and offline autonomy |
+| [TypeFly](https://arxiv.org/abs/2312.14950v2) (Yale, 2023–24) | A cloud LLM writes programs in a small custom language (MiniSpec, since replaced by restricted Python) that a drone executes, with edge-based vision; the revised version targets LLM response latency | Baseline HORUS builds on: HORUS adopts its plan format as `run_plan` and adds a provider-agnostic MCP interface, tracker-ID grounding, an ArduPilot safety layer with pilot override, and plans that keep running without the link |
 | ChatGPT for Robotics (Microsoft, 2023) | ChatGPT generates Python code to fly a simulated drone toward an object, given skills and the object's precise location | Simulation only; object location given; no real-time layer |
 | CognitiveDrone / -R1 (Skoltech, 2025) | 7B VLA trained on simulated trajectories; R1 adds a Qwen2.5-VL reasoning module | Simulation only, narrow task, too heavy for edge; dropped from the plan |
 | EchoPilot | Voice → local LLM plans a mission → MCP tools over MAVSDK (PX4) | Upfront planning, GPS waypoints, no vision loop or latency handling |

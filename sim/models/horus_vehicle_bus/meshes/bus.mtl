@@ -25,5 +25,5 @@ newmtl Wheels_01
 	Kd 0.5882 0.5882 0.5882
 	Ks 0.0000 0.0000 0.0000
 	Ke 0.0000 0.0000 0.0000
-	map_Ka ../materials/textures/wheels_01.png
-	map_Kd ../materials/textures/wheels_01.png
+	map_Ka ../../horus_vehicle_suv/materials/textures/wheels_01.png
+	map_Kd ../../horus_vehicle_suv/materials/textures/wheels_01.png

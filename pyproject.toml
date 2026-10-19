@@ -8,20 +8,17 @@ version = "0.1.0"
 description = "Safety-first, latency-tolerant autonomous drone supervision core"
 readme = "README.md"
 requires-python = ">=3.10"
+dependencies = ["PyYAML>=6.0,<7"]
 
 [project.optional-dependencies]
 commander = [
   "mcp>=1.30.0,<2",
-  "PyYAML>=6.0,<7",
   "httpx>=0.27,<1",
   "uvicorn>=0.29,<1",
 ]
 server = [
-  "mcp>=1.30.0,<2",
-  "PyYAML>=6.0,<7",
-  "httpx>=0.27,<1",
+  "horus-drone[commander]",
   "pymavlink>=2.4.41,<3",
-  "uvicorn>=0.29,<1",
 ]
 perception = [
   "numpy>=1.24,<2",
@@ -41,10 +38,7 @@ commander-anthropic = ["anthropic>=0.34,<1"]
 commander-openai = ["openai>=1.30,<3"]
 test = [
   "pytest>=8,<9",
-  "mcp>=1.30.0,<2",
-  "PyYAML>=6.0,<7",
-  "httpx>=0.27,<1",
-  "uvicorn>=0.29,<1",
+  "horus-drone[commander]",
   "numpy>=1.24,<2",
 ]
 
@@ -62,4 +56,5 @@ include = ["horus*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-ra"

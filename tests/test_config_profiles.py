@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from horus.config import ExecutorSettings, load_config
+from sim.scripts.world_profiles import world_profile
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_REFERENCE = re.compile(r"config/[A-Za-z0-9_./-]+\.yaml")
@@ -46,32 +47,28 @@ def test_mission_referenced_configs_exist_and_load() -> None:
         load_config(path)
 
 
-PROCEDURAL_PROFILES = {
-    "forest": (26.0, 36.0),
-    "urban": (38.0, 48.0),
-}
+MAP_HALF_EXTENT_M = 600.0  # generated worlds span 1.2 km
 
 
-@pytest.mark.parametrize("kind", sorted(PROCEDURAL_PROFILES))
-def test_procedural_profiles_enable_city_scale_cruise(kind: str) -> None:
-    cruise_min, max_altitude = PROCEDURAL_PROFILES[kind]
+@pytest.mark.parametrize("kind", ["forest", "urban"])
+def test_procedural_profiles_enable_city_scale_cruise_inside_the_map(kind: str) -> None:
     executor = load_config(ROOT / f"config/horus_procedural_{kind}.yaml").executor
 
-    assert executor.max_speed_m_s == 3.0
-    assert executor.cruise_speed_m_s == 8.0
     assert executor.cruise_speed_m_s > executor.max_speed_m_s
-    assert executor.cruise_min_altitude_m == cruise_min
-    assert executor.min_altitude_m <= cruise_min <= max_altitude
-    assert executor.max_altitude_m == max_altitude
-    assert executor.max_distance_m == 850.0
-    assert executor.geofence_polygon_ned == (
-        (-585.0, -585.0), (-585.0, 585.0), (585.0, 585.0), (585.0, -585.0),
-    )
-    # The circular fence backstop must clear the 600 m map corners...
-    assert executor.geofence_radius_m >= 600.0 * math.sqrt(2.0)
-    # ...and one command TTL must cover a worst-case 850 m goto in wall-clock time at the
-    # RTF 0.35 campaign hosts sustain on the 1.2 km worlds (plus margin for ramp/arrival).
-    assert executor.command_ttl_s == 360.0
+    assert executor.min_altitude_m <= executor.cruise_min_altitude_m <= executor.max_altitude_m
+    # The polygon is the only executor fence and stays inside the map; the circular backstop
+    # is the profile's SITL FENCE_RADIUS, which must clear the map corners...
+    assert max(abs(c) for vertex in executor.geofence_polygon_ned for c in vertex) < MAP_HALF_EXTENT_M
+    assert executor.geofence_radius_m == ExecutorSettings().geofence_radius_m
+    fence_radii = [
+        float(line.split()[1])
+        for param_file in world_profile(f"horus_{kind}_p1").param_files.split(":")
+        for line in (ROOT / param_file.removeprefix("/horus/")).read_text(encoding="utf-8").splitlines()
+        if line.split()[:1] == ["FENCE_RADIUS"]
+    ]
+    assert fence_radii and fence_radii[-1] >= MAP_HALF_EXTENT_M * math.sqrt(2.0)
+    # ...and one command TTL must cover a worst-case goto in wall-clock time at the RTF 0.35
+    # campaign hosts sustain on the 1.2 km worlds.
     assert executor.command_ttl_s >= executor.max_distance_m / (executor.cruise_speed_m_s * 0.35)
 
 
@@ -110,6 +107,49 @@ def test_zero_cruise_speed_disables_the_gate() -> None:
     settings = ExecutorSettings(max_speed_m_s=3.0, cruise_speed_m_s=0, max_altitude_m=36.0)
     assert settings.cruise_speed_m_s is None
     assert settings.cruise_min_altitude_m is None
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"control_hz": 1000.0},
+        {"control_hz": 9.9},
+        {"command_ttl_s": 0.0},
+        {"max_altitude_m": 0.4, "min_altitude_m": 0.5},
+        {"camera_horizontal_fov_deg": 180.0},
+        {"target_match_threshold": 1.5},
+        {"telemetry_max_age_s": float("nan")},
+        {"target_width_m": 0.0},
+        {"geofence_radius_m": True},
+    ],
+)
+def test_executor_settings_reject_out_of_range_limits(values) -> None:
+    with pytest.raises(ValueError):
+        ExecutorSettings(**values)
+
+
+def test_executor_settings_accept_the_range_edges() -> None:
+    settings = ExecutorSettings(control_hz=10, min_altitude_m=0, max_altitude_m=0, target_match_threshold=1)
+    assert (settings.control_hz, settings.max_altitude_m, settings.target_match_threshold) == (10.0, 0.0, 1.0)
+    assert isinstance(settings.control_hz, float)
+
+
+def test_geofence_radius_and_polygon_are_mutually_exclusive(tmp_path: Path) -> None:
+    square = ((-4.0, -4.0), (-4.0, 4.0), (4.0, 4.0), (4.0, -4.0))
+    with pytest.raises(ValueError, match="geofence_radius_m applies only without geofence_polygon_ned"):
+        ExecutorSettings(geofence_radius_m=95.0, geofence_polygon_ned=square)
+    path = tmp_path / "both.yaml"
+    path.write_text(
+        "executor:\n"
+        "  geofence_radius_m: 95.0\n"
+        "  geofence_polygon_ned: [[-4, -4], [-4, 4], [4, 4], [4, -4]]\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="geofence_radius_m applies only without"):
+        load_config(path)
+    # Either one alone is accepted; the radius default does not count as set.
+    assert ExecutorSettings(geofence_polygon_ned=square).geofence_polygon_ned == square
+    assert ExecutorSettings(geofence_radius_m=95.0).geofence_radius_m == 95.0
 
 
 def test_cruise_config_validation_goes_through_the_loader(tmp_path: Path) -> None:

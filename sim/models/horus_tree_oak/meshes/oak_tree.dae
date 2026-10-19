@@ -11,7 +11,7 @@
     <up_axis>Z_UP</up_axis>
   </asset>
   <library_images/>
-  <library_images><image id="Branch_1-effect-image" name="Branch_1-effect-image"><init_from>../materials/textures/branch_diffuse.png</init_from></image><image id="Bark-effect-image" name="Bark-effect-image"><init_from>../materials/textures/bark_diffuse.png</init_from></image></library_images>
+  <library_images><image id="Branch_1-effect-image" name="Branch_1-effect-image"><init_from>../materials/textures/branch_diffuse.png</init_from></image><image id="Bark-effect-image" name="Bark-effect-image"><init_from>../../horus_tree_pine/materials/textures/bark_diffuse.png</init_from></image></library_images>
   <library_effects>
     <effect id="Branch_1-effect">
       <profile_COMMON><newparam sid="Branch_1-effect-surface"><surface type="2D"><init_from>Branch_1-effect-image</init_from></surface></newparam><newparam sid="Branch_1-effect-sampler"><sampler2D><source>Branch_1-effect-surface</source></sampler2D></newparam>

@@ -21,13 +21,22 @@ VELOCITY_YAW_MASK = (1 | 2 | 4 | 64 | 128 | 256 | 2048)
 GIMBAL_PITCH_MIN_DEG = -90.0
 GIMBAL_PITCH_MAX_DEG = 45.0
 GIMBAL_YAW_LIMIT_DEG = 160.0
+# ArduCopter 4.7.1 (SITL probe) reports gimbal attitude only as GIMBAL_DEVICE_ATTITUDE_STATUS, a
+# MAVLink 2 message absent from pymavlink's default v1 dialect (hence literal IDs); older firmware
+# sends MOUNT_STATUS. Both are requested and either feeds ``Telemetry.mount_status``.
+MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS = 285
+# GIMBAL_DEVICE_FLAGS bits that select the frame of the reported yaw.
+GIMBAL_DEVICE_FLAGS_YAW_LOCK = 16
+GIMBAL_DEVICE_FLAGS_YAW_IN_VEHICLE_FRAME = 32
+GIMBAL_DEVICE_FLAGS_YAW_IN_EARTH_FRAME = 64
+# A body-frame gimbal sample (``FlightSettings.gimbal_status_body_frame``) is composed with the
+# latest ATTITUDE roll/pitch only when that sample is at most this old; otherwise it is dropped.
+GIMBAL_LEAN_MAX_AGE_S = 1.0
 
-# SET_MESSAGE_INTERVAL is in autopilot time, so in SITL it scales with the real-time factor: the
-# old 5 Hz request for pose/attitude delivered a sample only every ~1.1 s of wall time at the
-# campaign's RTF ~0.18 (measured pose ages up to 2.15 s), tripping the executor's 1.5 s wall
-# staleness guard. 20 Hz autopilot time keeps the wall gap at ~0.28 s at RTF 0.18 and ~0.5 s at
-# RTF 0.1, with the guard as the backstop; at real time it is 20 Hz, about 2.4 kB/s for the four
-# messages. Every closed-loop control decision (pose, heading, vehicle clock) uses this group.
+# SET_MESSAGE_INTERVAL is in autopilot time, so in SITL the wall-clock rate scales with the
+# real-time factor. Every closed-loop control decision (pose, heading, vehicle clock) uses the
+# 20 Hz control group, whose wall gap (~0.28 s at RTF 0.18, ~0.5 s at RTF 0.1) stays inside the
+# executor's 1.5 s wall staleness guard; the remaining telemetry streams at 5 Hz.
 CONTROL_STREAM_INTERVAL_US = 50_000
 TELEMETRY_STREAM_INTERVAL_US = 200_000
 
@@ -66,14 +75,20 @@ class DistanceSensor:
 
 @dataclass(frozen=True, slots=True)
 class MountStatus:
+    """Gimbal attitude in degrees: pitch and roll relative to the horizon, yaw relative to the
+    vehicle nose (positive right), from MOUNT_STATUS or GIMBAL_DEVICE_ATTITUDE_STATUS.
+
+    ``mount_mode`` is ``None`` for GIMBAL_DEVICE_ATTITUDE_STATUS samples, which carry no mode.
+    """
+
     target_system: int
     target_component: int
-    mount_mode: int
+    mount_mode: int | None
     pitch_deg: float
     roll_deg: float
     yaw_deg: float
     updated_at: str
-    # Monotonic receive time of this MOUNT_STATUS, for freshness checks on the same clock as frames.
+    # Monotonic receive time of this sample, for freshness checks on the same clock as frames.
     updated_monotonic: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -144,6 +159,84 @@ class Telemetry:
                 else max(0.0, monotonic - self.attitude_updated_monotonic)
             ),
         }
+
+
+Quaternion = tuple[float, float, float, float]
+
+
+def _quaternion_from_euler(roll_deg: float, pitch_deg: float, yaw_deg: float) -> Quaternion:
+    """(w, x, y, z) of the yaw-pitch-roll (Z-Y-X) rotation, as MAVLink and ArduPilot use."""
+    cr, sr = math.cos(math.radians(roll_deg) / 2.0), math.sin(math.radians(roll_deg) / 2.0)
+    cp, sp = math.cos(math.radians(pitch_deg) / 2.0), math.sin(math.radians(pitch_deg) / 2.0)
+    cy, sy = math.cos(math.radians(yaw_deg) / 2.0), math.sin(math.radians(yaw_deg) / 2.0)
+    return (
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    )
+
+
+def _quaternion_to_euler(q: Quaternion) -> tuple[float, float, float]:
+    """Roll, pitch and yaw (degrees) of a (w, x, y, z) quaternion, Z-Y-X order."""
+    w, x, y, z = q
+    roll = math.degrees(math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y)))
+    pitch = math.degrees(math.asin(max(-1.0, min(1.0, 2.0 * (w * y - z * x)))))
+    yaw = math.degrees(math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
+    return roll, pitch, yaw
+
+
+def _quaternion_multiply(a: Quaternion, b: Quaternion) -> Quaternion:
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return (
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    )
+
+
+def _gimbal_device_angles(
+    message: Any, vehicle_yaw_deg: float | None, lean_deg: tuple[float, float]
+) -> tuple[float, float, float] | None:
+    """Horizon-relative pitch and roll and vehicle-relative yaw (degrees) of a
+    GIMBAL_DEVICE_ATTITUDE_STATUS, or None when the sample cannot be placed in that frame.
+
+    The quaternion (w, x, y, z) decomposes as yaw-pitch-roll. The yaw frame comes from the flags:
+    YAW_IN_VEHICLE_FRAME or YAW_IN_EARTH_FRAME, else (pre-flag devices) YAW_LOCK means earth frame.
+    Earth-frame yaw is made vehicle-relative with the message's own ``delta_yaw`` (earth yaw =
+    vehicle-frame yaw + delta_yaw) or, when NaN, ``vehicle_yaw_deg``; with neither the sample is
+    unusable, never read as vehicle-relative. The resulting body-relative attitude is then rotated
+    by the vehicle ``lean_deg`` (roll, pitch): the actual lean for a gimbal that reports body-frame
+    roll/pitch, (0, 0) for one whose roll/pitch are already horizon-relative (MAVLink's vehicle
+    frame is the earth frame rotated by the vehicle yaw).
+    """
+    try:
+        q = tuple(float(value) for value in message.q)
+        flags = int(message.flags)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if len(q) != 4 or not all(math.isfinite(value) for value in q):
+        return None
+    roll, pitch, yaw = _quaternion_to_euler(q)  # type: ignore[arg-type]
+    if flags & GIMBAL_DEVICE_FLAGS_YAW_IN_VEHICLE_FRAME:
+        earth_frame = False
+    elif flags & GIMBAL_DEVICE_FLAGS_YAW_IN_EARTH_FRAME:
+        earth_frame = True
+        delta_yaw = float(getattr(message, "delta_yaw", math.nan))
+        if math.isfinite(delta_yaw):
+            vehicle_yaw_deg = math.degrees(delta_yaw)
+    else:
+        earth_frame = bool(flags & GIMBAL_DEVICE_FLAGS_YAW_LOCK)
+    if earth_frame:
+        if vehicle_yaw_deg is None:
+            return None
+        yaw -= vehicle_yaw_deg
+    lean = _quaternion_from_euler(lean_deg[0], lean_deg[1], 0.0)
+    roll, pitch, yaw = _quaternion_to_euler(_quaternion_multiply(lean, _quaternion_from_euler(roll, pitch, yaw)))
+    return pitch, roll, (yaw + 180.0) % 360.0 - 180.0
+
 
 
 class MavlinkFlightLink:
@@ -245,35 +338,33 @@ class MavlinkFlightLink:
 
     def _request_telemetry(self) -> None:
         """Request control-critical messages at 20 Hz and the rest at 5 Hz, in autopilot time."""
-        mav = self.connection.mav
-        command = getattr(mav, "command_long_send", None)
-        if command is None:
-            return
-        try:
-            from pymavlink import mavutil
+        from pymavlink import mavutil
 
-            control_message_ids = (
-                mavutil.mavlink.MAVLINK_MSG_ID_SYSTEM_TIME,
-                mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE,
-                mavutil.mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED,
-                mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT,
-            )
-            telemetry_message_ids = (
-                74,  # VFR_HUD
-                132,  # DISTANCE_SENSOR
-                147,  # BATTERY_STATUS
-                1,  # SYS_STATUS
-                253,  # STATUSTEXT
-                mavutil.mavlink.MAVLINK_MSG_ID_MOUNT_STATUS,
-            )
+        mavlink = mavutil.mavlink
+        control_message_ids = (
+            mavlink.MAVLINK_MSG_ID_SYSTEM_TIME,
+            mavlink.MAVLINK_MSG_ID_ATTITUDE,
+            mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED,
+            mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT,
+        )
+        telemetry_message_ids = (
+            mavlink.MAVLINK_MSG_ID_VFR_HUD,
+            mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR,
+            mavlink.MAVLINK_MSG_ID_BATTERY_STATUS,
+            mavlink.MAVLINK_MSG_ID_SYS_STATUS,
+            mavlink.MAVLINK_MSG_ID_STATUSTEXT,
+            mavlink.MAVLINK_MSG_ID_MOUNT_STATUS,
+            MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS,
+        )
+        try:
             for message_id, interval_us in (
                 *((message_id, CONTROL_STREAM_INTERVAL_US) for message_id in control_message_ids),
                 *((message_id, TELEMETRY_STREAM_INTERVAL_US) for message_id in telemetry_message_ids),
             ):
-                command(
+                self.connection.mav.command_long_send(
                     self.connection.target_system,
                     self.connection.target_component,
-                    mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+                    mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
                     0,
                     message_id,
                     interval_us,
@@ -283,8 +374,8 @@ class MavlinkFlightLink:
                     0,
                     0,
                 )
-        except (AttributeError, OSError):
-            # A link may not expose interval controls; incoming heartbeat/telemetry still work.
+        except OSError:
+            # The autopilot keeps its default stream rates; heartbeat/telemetry still arrive.
             return
 
     def _read_loop(self) -> None:
@@ -320,17 +411,19 @@ class MavlinkFlightLink:
                 self._local_position_seen = True
                 self._pose_updated_monotonic = now
             elif kind == "GLOBAL_POSITION_INT":
-                self._velocity = Velocity(
-                    float(message.vx) / 100.0,
-                    float(message.vy) / 100.0,
-                    float(message.vz) / 100.0,
-                )
                 heading = int(message.hdg)
                 if 0 <= heading < 36000:
                     self._heading_deg = heading / 100.0
                     self._heading_updated_monotonic = now
-                # GPS fallback is kept in the same relative-meter frame as local NED.
+                # Until LOCAL_POSITION_NED arrives, pose and velocity fall back to this message,
+                # kept in the same relative-meter NED frame; afterwards LOCAL_POSITION_NED alone
+                # feeds both, so velocity always comes from the message that produced the pose.
                 if not self._local_position_seen:
+                    self._velocity = Velocity(
+                        float(message.vx) / 100.0,
+                        float(message.vy) / 100.0,
+                        float(message.vz) / 100.0,
+                    )
                     latitude = float(message.lat) / 1e7
                     longitude = float(message.lon) / 1e7
                     if self._global_origin is None:
@@ -391,6 +484,18 @@ class MavlinkFlightLink:
                     self._last_observed_at,
                     now,
                 )
+            elif kind == "GIMBAL_DEVICE_ATTITUDE_STATUS":
+                lean = (0.0, 0.0) if not self.settings.gimbal_status_body_frame else self._fresh_lean_deg(now)
+                angles = None if lean is None else _gimbal_device_angles(message, self._heading_deg, lean)
+                if angles is not None:
+                    self._mount_status = MountStatus(
+                        int(message.target_system),
+                        int(message.target_component),
+                        None,
+                        *angles,
+                        self._last_observed_at,
+                        now,
+                    )
             elif kind == "STATUSTEXT":
                 text = message.text
                 if isinstance(text, bytes):
@@ -399,6 +504,17 @@ class MavlinkFlightLink:
                 if text:
                     self._statustext.append(text)
                     self._statustext = self._statustext[-20:]
+
+    def _fresh_lean_deg(self, now: float) -> tuple[float, float] | None:
+        """Latest ATTITUDE roll/pitch when at most ``GIMBAL_LEAN_MAX_AGE_S`` old; call with the lock."""
+        if (
+            self._vehicle_roll_deg is None
+            or self._vehicle_pitch_deg is None
+            or self._attitude_updated_monotonic is None
+            or now - self._attitude_updated_monotonic > GIMBAL_LEAN_MAX_AGE_S
+        ):
+            return None
+        return self._vehicle_roll_deg, self._vehicle_pitch_deg
 
     def _accept_heartbeat(self, message: Any, now: float | None = None) -> None:
         from pymavlink import mavutil
@@ -415,27 +531,27 @@ class MavlinkFlightLink:
     def telemetry(self) -> Telemetry:
         with self._lock:
             return Telemetry(
-                self._last_observed_at,
-                self._last_received_monotonic,
-                self._pose,
-                self._velocity,
-                self._mode,
-                self._armed,
-                self._battery_remaining_pct,
-                self._battery_voltage_v,
-                tuple(sorted(self._proximity.values(), key=lambda value: value.orientation)),
-                tuple(self._statustext),
-                self._heartbeat_monotonic,
-                self._heading_deg,
-                self._pose_updated_monotonic,
-                self._time_boot_ms,
-                self._mount_status,
-                self._heading_updated_monotonic,
-                self._vehicle_roll_deg,
-                self._vehicle_pitch_deg,
-                self._attitude_updated_monotonic,
-                self._time_boot_updated_monotonic,
-                self._ground_distance,
+                observed_at=self._last_observed_at,
+                received_monotonic=self._last_received_monotonic,
+                pose=self._pose,
+                velocity=self._velocity,
+                mode=self._mode,
+                armed=self._armed,
+                battery_remaining_pct=self._battery_remaining_pct,
+                battery_voltage_v=self._battery_voltage_v,
+                proximity=tuple(sorted(self._proximity.values(), key=lambda value: value.orientation)),
+                statustext=tuple(self._statustext),
+                heartbeat_monotonic=self._heartbeat_monotonic,
+                heading_deg=self._heading_deg,
+                pose_updated_monotonic=self._pose_updated_monotonic,
+                time_boot_ms=self._time_boot_ms,
+                mount_status=self._mount_status,
+                heading_updated_monotonic=self._heading_updated_monotonic,
+                vehicle_roll_deg=self._vehicle_roll_deg,
+                vehicle_pitch_deg=self._vehicle_pitch_deg,
+                attitude_updated_monotonic=self._attitude_updated_monotonic,
+                time_boot_updated_monotonic=self._time_boot_updated_monotonic,
+                ground_distance=self._ground_distance,
             )
 
     def heartbeat_ok(self, max_age_s: float = 3.0) -> bool:
@@ -444,13 +560,15 @@ class MavlinkFlightLink:
         return heartbeat is not None and time.monotonic() - heartbeat <= max_age_s
 
     def _set_mode(self, name: str) -> None:
+        from pymavlink import mavutil
+
         mapping = self.connection.mode_mapping()
         if name not in mapping:
             raise RuntimeError(f"Autopilot does not advertise {name} mode")
         with self._send_lock:
             self.connection.mav.set_mode_send(
                 self.connection.target_system,
-                1,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
                 mapping[name],
             )
 
@@ -532,24 +650,6 @@ class MavlinkFlightLink:
                 0.0,
                 yaw_rad,
                 0.0,
-            )
-
-    def set_yaw(self, heading_deg: float, speed_deg_s: float = 30.0) -> None:
-        from pymavlink import mavutil
-
-        with self._send_lock:
-            self.connection.mav.command_long_send(
-                self.connection.target_system,
-                self.connection.target_component,
-                mavutil.mavlink.MAV_CMD_CONDITION_YAW,
-                0,
-                float(heading_deg) % 360.0,
-                float(speed_deg_s),
-                1,
-                0,
-                0,
-                0,
-                0,
             )
 
     def set_gimbal_pitch_yaw(self, pitch_deg: float, yaw_deg: float = 0.0) -> None:

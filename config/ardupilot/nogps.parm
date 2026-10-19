@@ -1,0 +1,23 @@
+# ArduPilot Copter-4.7.1 GPS-denied SITL profile (S4): loaded after common.parm and indoor.parm.
+# SITL parameter groups are prefixed SIM_; GPSParms exposes ENABLE as SIM_GPS1_ENABLE.
+SIM_GPS1_ENABLE 0
+
+# Disable the GPS1 receiver backend as well as its simulated source.
+GPS1_TYPE 0
+
+# Skip the GPS-lock pre-arm check only; retain every other pre-arm check for indoor SITL.
+ARMING_SKIPCHK 8
+
+# Enable simulated flow generation and the SITL optical-flow backend.
+SIM_FLOW_ENABLE 1
+FLOW_TYPE 10
+
+# Relative horizontal navigation from optical flow; altitude from barometer.
+EK3_SRC1_POSXY 0
+EK3_SRC1_VELXY 5
+EK3_SRC1_POSZ 1
+EK3_SRC1_VELZ 0
+
+# Optical-flow measurement noise (rad/s). SITL flow is otherwise ideal, which hides drift; ArduPilot's
+# own optical-flow autotest uses 0.02. 0.05 represents a noisier indoor sensor for the S4 experiment.
+SIM_FLOW_RND 0.05

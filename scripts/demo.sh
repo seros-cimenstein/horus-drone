@@ -26,7 +26,7 @@ procedural_stratum=""
 usage() {
   printf 'Usage: %s [--remote [host] | --local] [--procedural [--seed N] [--kind forest|urban] [--stratum baseline|chaotic]] [--record out.mp4]\n' "${0##*/}"
   printf '%s\n' 'Default: visible laptop GUI with simulation and perception on Koko.'
-  printf '%s\n' '--procedural starts a generated outdoor world instead of the indoor demo (--local only).'
+  printf '%s\n' '--procedural starts a generated outdoor world instead of the indoor demo; in remote mode it is generated here and synced to the remote.'
 }
 
 while (( $# > 0 )); do
@@ -159,29 +159,27 @@ export HORUS_COMMANDER_URL="${COMMANDER_URL}"
 export HORUS_SIM_CONTAINER_NAME="${CONTAINER}"
 if (( procedural == 1 )); then
   procedural_kind="${procedural_kind:-forest}"
-  # Generated outdoor worlds carry the procedural fence/cruise-speed parameters and profile.
-  export HORUS_SITL_PARAM_FILE="${HORUS_SITL_PARAM_FILE:-/horus/config/ardupilot/horus_sitl_procedural.parm}"
-  # Container path for the MCP; the host commander gets the same profile at its host path.
-  mcp_config="${HORUS_CONFIG:-/horus/config/horus_procedural_${procedural_kind}.yaml}"
-  commander_config="${PROJECT_DIR}/config/horus_procedural_${procedural_kind}.yaml"
-else
-  export HORUS_SITL_PARAM_FILE="${HORUS_SITL_PARAM_FILE:-/horus/config/ardupilot/horus_sitl.parm}"
-fi
-
-if (( procedural == 1 )) && (( remote_mode == 1 )); then
-  # Generate on the laptop; remote_up.sh rsyncs sim/generated and starts this SDF remotely.
   if [[ -z "${procedural_seed}" ]]; then
     procedural_seed="$(( (RANDOM << 15 | RANDOM) % 90000 + 10000 ))"
     printf 'Random procedural seed for this run: %s\n' "${procedural_seed}"
   fi
+  procedural_stem="$(procedural_world_stem "${procedural_kind}" "${procedural_seed}")"
+  # The SITL parameters and the remote MCP config follow the world (run.sh, start_sim.sh and
+  # remote_up.sh resolve them); the MCP started here and the host commander need the config.
+  world_profile="$(horus_world_profile "${procedural_stem}")"
+  read -r profile_config _ <<< "${world_profile}"
+  # Container path for the MCP; the host commander gets the same profile at its host path.
+  mcp_config="${HORUS_CONFIG:-${profile_config}}"
+  commander_config="${PROJECT_DIR}/${profile_config#/horus/}"
+fi
+
+if (( procedural == 1 )) && (( remote_mode == 1 )); then
+  # Generate on the laptop; remote_up.sh rsyncs sim/generated and starts this SDF remotely.
   if ! procedural_sdf="$(generate_procedural_world "${procedural_kind}" "${procedural_seed}" "${procedural_stratum}")"; then
     exit 1
   fi
-  procedural_stem="$(procedural_world_stem "${procedural_kind}" "${procedural_seed}")"
   export HORUS_REMOTE_WORLD="${procedural_sdf}"
   export HORUS_GUI_WORLD="${procedural_stem}"
-  # The remote MCP must run with the procedural executor config, not the indoor default.
-  export HORUS_REMOTE_CONFIG="/horus/config/horus_procedural_${procedural_kind}.yaml"
 fi
 # The MCP run pointer holds a container path (/horus/...); the host commander needs a host path.
 export HORUS_EVENT_LOG="${HORUS_EVENT_LOG:-${PROJECT_DIR}/runs/demo/$(date -u +%Y%m%dT%H%M%SZ)-commander-events.jsonl}"
@@ -336,14 +334,8 @@ else
   sim_cleanup_needed=1
   if (( procedural == 1 )); then
     printf 'Starting the GUI procedural %s simulation in %s...\n' \
-      "${procedural_kind:-forest}" "${CONTAINER}"
-    run_args=(start --gui --procedural)
-    if [[ -n "${procedural_seed}" ]]; then
-      run_args+=(--seed "${procedural_seed}")
-    fi
-    if [[ -n "${procedural_kind}" ]]; then
-      run_args+=(--kind "${procedural_kind}")
-    fi
+      "${procedural_kind}" "${CONTAINER}"
+    run_args=(start --gui --procedural --seed "${procedural_seed}" --kind "${procedural_kind}")
     if [[ -n "${procedural_stratum}" ]]; then
       run_args+=(--stratum "${procedural_stratum}")
     fi

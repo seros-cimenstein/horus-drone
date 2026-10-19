@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import math
+from typing import Any
+
 from sim.worldgen.layout import PersonPlacement
+from sim.worldgen.plan import PROCEDURAL_MAX_LEG_M, PROCEDURAL_VANTAGE_BOUNDS_M
 from sim.worldgen.sdf import f
 from sim.worldgen.surface import CANONICAL_MAP, MapSpec
 
@@ -19,6 +22,35 @@ def person_record(person: PersonPlacement) -> dict:
     if person.start_offset_s is not None:
         record["start_offset_s"] = person.start_offset_s
     return record
+
+
+def follow_manifest(layout: Any, person: PersonPlacement, people: dict[str, dict],
+                    occluder: dict[str, Any], stage_xy: list[float] | None = None) -> dict:
+    """The manifest ``follow`` block; ``occluder`` holds the world kind's occluder fields."""
+    follow = {
+        "model": person.model, "group": person.group,
+        "route": [[float(point[0]), float(point[1])] for point in person.waypoints],
+        "speed_m_s": layout.follow_speed,
+        **occluder,
+        "follower_altitude_m": layout.follower_altitude_m,
+        "follower_horizontal_m": layout.follower_horizontal_m,
+        "expected_occlusion_s": layout.expected_occlusion_s,
+        "shirt_colour_attribute": people[person.model]["shirt_colour_attribute"],
+    }
+    if stage_xy is not None:
+        follow["stage_xy"] = stage_xy
+    return follow
+
+
+def procedural_manifest_fields(layout: Any) -> dict:
+    """Generated-world manifest fields: mission sites, the actor geofence inset and the planner
+    limits of the world's flight profile (config/horus_procedural_<kind>.yaml)."""
+    return {
+        "sites": [{"name": name, "kind": kind, "center": [x, y], "radius": radius}
+                  for name, kind, x, y, radius in layout.sites],
+        "actor_geofence_m": layout.actor_inset_m,
+        "flight": {"vantage_bounds_m": PROCEDURAL_VANTAGE_BOUNDS_M, "max_leg_m": PROCEDURAL_MAX_LEG_M},
+    }
 
 
 def _point(x: float, y: float) -> str:

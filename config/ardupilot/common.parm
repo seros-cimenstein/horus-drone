@@ -1,0 +1,33 @@
+# Shared by every HORUS SITL profile (see sim/scripts/world_profiles.py for the compositions).
+# No fragment sets a key another fragment of the same load order sets; only alternatives for one
+# slot (indoor|outdoor, canonical_fence|procedural_fence) set the same keys, to different values.
+
+# MAVLink-backed horizontal proximity sectors: the ToF bridge sends DISTANCE_SENSOR, and
+# ArduPilot's simple avoidance brakes before obstacles instead of flying through them.
+PRX1_TYPE 2
+AVOID_ENABLE 3
+# Stop 1 m from proximity obstacles (default 2 m): indoors the executor's 1.2 m wall-centre
+# geofence inset (0.1 m half wall + 1 m + 0.1 m slack) stays reachable instead of fighting
+# avoidance at the edge; outdoors the executor's clearance margins (orbit 1.5 m, scan 2 m) do.
+AVOID_MARGIN 1.0
+
+# Downward ToF (payload range_down, 4 m range) from DISTANCE_SENSOR orientation PITCH_270 as a
+# short-range landing/altitude input.
+RNGFND1_TYPE 10
+RNGFND1_ORIENT 25
+# Copter 4.7 MIN/MAX are in metres; the old centimetre-named parameters no longer exist.
+RNGFND1_MIN 0.05
+RNGFND1_MAX 4.0
+
+# Gimbal (iris_with_gimbal): servo 9/10/11 drive roll/pitch/yaw (mount servo functions roll=8,
+# tilt=7, pan=6). The model maps the pitch servo's 1100-1900 us range to +135..-45 deg, so
+# MNT1_PITCH_MIN/MAX must be -135/45 (upstream gazebo-iris-gimbal.parm) for a -90 deg command to
+# point the camera straight down.
+MNT1_TYPE 1
+MNT1_PITCH_MIN -135
+MNT1_PITCH_MAX 45
+MNT1_YAW_MIN -160
+MNT1_YAW_MAX 160
+SERVO9_FUNCTION 8
+SERVO10_FUNCTION 7
+SERVO11_FUNCTION 6

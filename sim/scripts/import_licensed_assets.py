@@ -7,9 +7,10 @@ and reads only the files this script writes under ``sim/models``.
 Every archive is pinned by Fuel owner/name/version and SHA-256. Only listed mesh and texture
 members are copied (upstream model.sdf files, plugins, actors and scripts are never used);
 archive member paths are checked before reading. OBJ material libraries and COLLADA ``<image>``
-references are rewritten to point at the copied textures. Each imported model directory gets a
-PROVENANCE.txt with the source, version, archive hash, full author, licence and any required
-attribution or change notice.
+references are rewritten to point at the copied textures; a texture byte-identical to a sibling
+model's is referenced from there instead of copied, and a byte-identical mesh is a relative
+symlink. Each imported model directory gets a PROVENANCE.txt with the source, version, archive
+hash, full author, licence and any required attribution or change notice.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import argparse
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -69,8 +71,10 @@ ARCHIVES = [
         "members": {"meshes/hatchback.obj": "meshes/hatchback.obj",
                     "materials/textures/hatchback.png": "materials/textures/hatchback_red.png"},
         "textures": {"hatchback.png": "hatchback_red.png", "wheels3.png": "wheels3.png"},
-        # The colour variants ship without wheel textures; they reuse the base Hatchback's (CC0).
-        "copy_from": {"horus_vehicle_hatchback/materials/textures/wheels3.png": "materials/textures/wheels3.png"},
+        # The colour variants ship without wheel textures; they reference the base Hatchback's
+        # (CC0) and symlink its byte-identical mesh, keeping their own hatchback.mtl.
+        "shared_textures": {"wheels3.png": "horus_vehicle_hatchback/materials/textures/wheels3.png"},
+        "linked": {"meshes/hatchback.obj": "horus_vehicle_hatchback/meshes/hatchback.obj"},
     },
     {
         "fuel": "OpenRobotics/Hatchback blue", "version": 5,
@@ -81,7 +85,8 @@ ARCHIVES = [
         "members": {"meshes/hatchback.obj": "meshes/hatchback.obj",
                     "materials/textures/hatchback.png": "materials/textures/hatchback_blue.png"},
         "textures": {"hatchback.png": "hatchback_blue.png", "wheels3.png": "wheels3.png"},
-        "copy_from": {"horus_vehicle_hatchback/materials/textures/wheels3.png": "materials/textures/wheels3.png"},
+        "shared_textures": {"wheels3.png": "horus_vehicle_hatchback/materials/textures/wheels3.png"},
+        "linked": {"meshes/hatchback.obj": "horus_vehicle_hatchback/meshes/hatchback.obj"},
     },
     {
         "fuel": "OpenRobotics/Prius Hybrid", "version": 3,
@@ -90,10 +95,12 @@ ARCHIVES = [
         "description": "Toyota Prius hybrid sedan", "mtl": "meshes/Hybrid.mtl", "standalone_sdf": True,
         "members": {"meshes/Hybrid.obj": "meshes/Hybrid.obj",
                     "materials/textures/Hybrid.png": "materials/textures/Hybrid.png",
-                    "materials/textures/Hybrid_Interior.png": "materials/textures/Hybrid_Interior.png",
-                    "materials/textures/Wheels3.png": "materials/textures/Wheels3.png"},
+                    "materials/textures/Hybrid_Interior.png": "materials/textures/Hybrid_Interior.png"},
         "textures": {"Hybrid.png": "Hybrid.png", "Hybrid_Interior.png": "Hybrid_Interior.png",
                      "Wheels3.png": "Wheels3.png"},
+        "shared_textures": {"Wheels3.png": "horus_vehicle_hatchback/materials/textures/wheels3.png"},
+        "shared_note": "the Prius archive's Wheels3.png imports byte-identical to the base Hatchback v3 "
+                       "archive's wheels3.png, CC0 1.0",
     },
     {
         "fuel": "OpenRobotics/SUV", "version": 4,
@@ -162,10 +169,12 @@ ARCHIVES = [
                  "effects reference the copied branch (with alpha) and bark textures directly.",
         "members": {
             "meshes/oak_tree.dae": "meshes/oak_tree.dae",
-            "materials/textures/bark_diffuse.png": "materials/textures/bark_diffuse.png",
             "materials/textures/branch_diffuse.png": "materials/textures/branch_diffuse.png",
         },
         "textures": {"bark_diffuse.png": "bark_diffuse.png", "branch_diffuse.png": "branch_diffuse.png"},
+        "shared_textures": {"bark_diffuse.png": "horus_tree_pine/materials/textures/bark_diffuse.png"},
+        "shared_note": "the Oak tree archive's bark_diffuse.png imports byte-identical to the Pine Tree v6 "
+                       "archive's, CC0 1.0",
         "embed_textures": {"Branch_1-effect": "branch_diffuse.png", "Bark-effect": "bark_diffuse.png"},
     },
     {
@@ -210,13 +219,13 @@ ARCHIVES = [
         "description": "coach bus", "mtl": "meshes/bus.mtl", "standalone_sdf": True,
         "notes": "The upstream model.sdf scales the mesh by 0.01 (12.49 m long); the HORUS registry "
                  "applies the same canonical scale."
-                 " The bus material library names the SUV's wheel texture, so it is copied from "
-                 "sim/models/horus_vehicle_suv (same author and licence).",
+                 " The bus material library names the SUV's wheel texture, so it references the copy "
+                 "in sim/models/horus_vehicle_suv (same author and licence).",
         "members": {"meshes/bus.obj": "meshes/bus.obj", "meshes/bus.mtl": "meshes/bus.mtl",
                     "materials/textures/bus.png": "materials/textures/bus.png"},
         "textures": {"bus.png": "bus.png", "wheels_01.png": "wheels_01.png"},
-        "copy_from": {"horus_vehicle_suv/materials/textures/wheels_01.png": "materials/textures/wheels_01.png"},
-        "copy_from_note": "OpenRobotics/SUV v4 archive, CC0 1.0 (the Bus model depends on the SUV's wheel texture)",
+        "shared_textures": {"wheels_01.png": "horus_vehicle_suv/materials/textures/wheels_01.png"},
+        "shared_note": "OpenRobotics/SUV v4 archive, CC0 1.0 (the Bus model depends on the SUV's wheel texture)",
     },
     {
         "fuel": "OpenRobotics/Rescue Randy Sitting", "version": 8,
@@ -294,16 +303,33 @@ def _save_texture(data: bytes, destination: Path) -> None:
         image.save(destination, optimize=True)
 
 
-def _rewrite_mtl(text: str, textures: dict[str, str]) -> str:
+def _texture_ref(entry: dict, name: str) -> str:
+    """Mesh-relative path of a texture: the model's own copy or a byte-identical sibling's."""
+    shared = entry.get("shared_textures", {}).get(name)
+    return f"../../{shared}" if shared else f"../materials/textures/{name}"
+
+
+def _check_texture(path: Path, reference: str, entry: dict, target: Path) -> None:
+    """A mesh texture reference must resolve to a copied file or to a declared shared sibling file."""
+    resolved = (path.parent / reference).resolve()
+    shared = {(MODELS / source).resolve() for source in entry.get("shared_textures", {}).values()}
+    if not resolved.is_file() or not (resolved.is_relative_to(target.resolve()) or resolved in shared):
+        raise RuntimeError(f"{entry['target']}: {path.name} texture {reference!r} does not resolve "
+                           "inside the model or to an imported shared texture")
+
+
+def _rewrite_mtl(text: str, entry: dict) -> str:
+    textures = entry["textures"]
+
     def replace(match: re.Match[str]) -> str:
         basename = match.group(2).rsplit("/", 1)[-1]
         if basename not in textures:
             raise RuntimeError(f"unmapped MTL texture {match.group(2)!r}")
-        return f"{match.group(1)} ../materials/textures/{textures[basename]}"
+        return f"{match.group(1)} {_texture_ref(entry, textures[basename])}"
     return re.sub(r"^(\s*map_K[ad])\s+(\S+)\s*$", replace, text, flags=re.MULTILINE)
 
 
-def _rewrite_dae(text: str, textures: dict[str, str]) -> str:
+def _rewrite_dae(text: str, entry: dict) -> str:
     """Point COLLADA ``<image>`` file references at the copied textures layout.
 
     gz-common resolves a COLLADA image path relative to the mesh file, so ``meshes/*.dae``
@@ -313,27 +339,28 @@ def _rewrite_dae(text: str, textures: dict[str, str]) -> str:
     def replace_image(match: re.Match[str]) -> str:
         def replace_reference(reference: re.Match[str]) -> str:
             basename = reference.group(1).strip().rsplit("/", 1)[-1]
-            mapped = textures.get(basename)
+            mapped = entry["textures"].get(basename)
             if mapped is None:
                 return reference.group(0)
-            return f"<init_from>../materials/textures/{mapped}</init_from>"
+            return f"<init_from>{_texture_ref(entry, mapped)}</init_from>"
 
         return re.sub(r"<init_from>([^<]*)</init_from>", replace_reference, match.group(0))
 
     return re.sub(r"<image\b[^>]*>.*?</image>", replace_image, text, flags=re.DOTALL)
 
 
-def _embed_dae_textures(text: str, effects: dict[str, str]) -> str:
+def _embed_dae_textures(text: str, entry: dict) -> str:
     """Reference a copied texture from each named COLLADA effect (diffuse and A_ONE alpha).
 
     gz-common's COLLADA loader turns a textured ``<diffuse>`` into the mesh material's texture
     and a textured ``<transparent opaque="A_ONE">`` into alpha-from-texture, so foliage renders
     alpha-tested without any SDF ``<material>``.
     """
+    effects = entry["embed_textures"]
     if "<library_images>" in text:
         raise RuntimeError("COLLADA file already has <library_images>; embedding expects none")
     images = "".join(f'<image id="{effect}-image" name="{effect}-image">'
-                     f"<init_from>../materials/textures/{texture}</init_from></image>"
+                     f"<init_from>{_texture_ref(entry, texture)}</init_from></image>"
                      for effect, texture in effects.items())
     text = text.replace("<library_effects>", f"<library_images>{images}</library_images>\n  <library_effects>", 1)
     for effect in effects:
@@ -357,13 +384,24 @@ def _embed_dae_textures(text: str, effects: dict[str, str]) -> str:
     return text
 
 
-def _validate_dae_images(path: Path, target: Path) -> None:
-    """Every COLLADA image reference must resolve to a copied file inside the model."""
+def _validate_dae_images(path: Path, entry: dict, target: Path) -> None:
+    """Every COLLADA image reference must resolve to a copied or declared shared file."""
     for block in re.findall(r"<image\b[^>]*>.*?</image>", path.read_text(encoding="utf-8"), re.DOTALL):
         for value in re.findall(r"<init_from>([^<]*)</init_from>", block):
-            resolved = (path.parent / value.strip()).resolve()
-            if not resolved.is_relative_to(target.resolve()) or not resolved.is_file():
-                raise RuntimeError(f"{path.name}: image reference {value!r} does not resolve inside the model")
+            _check_texture(path, value.strip(), entry, target)
+
+
+def _link_identical(payload: bytes, shared: Path, destination: Path) -> None:
+    """Replace a byte-identical copy of a sibling model's file with a relative symlink.
+
+    gz-common opens the mesh through the symlink path, so an OBJ ``mtllib`` still resolves next
+    to the link and each colour variant keeps its own material library.
+    """
+    if not shared.is_file() or shared.read_bytes() != payload:
+        raise RuntimeError(f"{destination}: {shared} must be imported first and byte-identical")
+    destination.unlink(missing_ok=True)
+    destination.symlink_to(os.path.relpath(shared, destination.parent))
+
 
 def _provenance(entry: dict, archive: zipfile.ZipFile) -> str:
     owner, name = entry["fuel"].split("/", 1)
@@ -389,9 +427,11 @@ def _provenance(entry: dict, archive: zipfile.ZipFile) -> str:
     if entry.get("notes"):
         lines.append(f"Notes: {entry['notes']}")
     lines.append("Files: " + ", ".join(sorted(entry["members"].values())))
-    for source, relative in entry.get("copy_from", {}).items():
-        note = entry.get("copy_from_note", "base Hatchback v3 archive, CC0 1.0")
-        lines.append(f"Copied: {relative} from sim/models/{source} ({note})")
+    for texture, source in entry.get("shared_textures", {}).items():
+        note = entry.get("shared_note", "base Hatchback v3 archive, CC0 1.0")
+        lines.append(f"Shared: texture {texture} references sim/models/{source} ({note}); not copied")
+    for relative, source in entry.get("linked", {}).items():
+        lines.append(f"Linked: {relative} is a relative symlink to the byte-identical sim/models/{source}")
     lines.append("")
     lines.append("Upstream model.config (verbatim):")
     lines.append(archive.read("model.config").decode("utf-8", "replace").strip())
@@ -434,32 +474,26 @@ def import_archive(entry: dict, cache: Path) -> dict:
         payload = archive.read(source)
         destination = target / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.suffix.lower() in (".png", ".jpg"):
+        if relative in entry.get("linked", {}):
+            _link_identical(payload, MODELS / entry["linked"][relative], destination)
+        elif destination.suffix.lower() in (".png", ".jpg"):
             _save_texture(payload, destination)
         elif destination.suffix.lower() == ".dae" and entry.get("textures"):
-            dae = _rewrite_dae(payload.decode("utf-8"), entry["textures"])
+            dae = _rewrite_dae(payload.decode("utf-8"), entry)
             if entry.get("embed_textures"):
-                dae = _embed_dae_textures(dae, entry["embed_textures"])
+                dae = _embed_dae_textures(dae, entry)
             destination.write_text(dae, encoding="utf-8")
         else:
             destination.write_bytes(payload)
     for relative in entry["members"].values():
         if relative.endswith(".dae"):
-            _validate_dae_images(target / relative, target)
-    for source, relative in entry.get("copy_from", {}).items():
-        shared = MODELS / source
-        if not shared.is_file():
-            raise RuntimeError(f"{entry['fuel']}: shared file {source} must be imported first")
-        (target / relative).parent.mkdir(parents=True, exist_ok=True)
-        (target / relative).write_bytes(shared.read_bytes())
+            _validate_dae_images(target / relative, entry, target)
     if "mtl" in entry:
         text = archive.read(entry["mtl"]).decode("utf-8", "replace")
-        rewritten = _rewrite_mtl(text, entry["textures"])
+        rewritten = _rewrite_mtl(text, entry)
         for line in rewritten.splitlines():
             if line.strip().startswith("map_K"):
-                path = (target / entry["mtl"]).parent / line.split()[1]
-                if not path.resolve().is_relative_to(target.resolve()) or not path.is_file():
-                    raise RuntimeError(f"{entry['target']}: MTL texture {line.split()[1]} does not resolve inside the model")
+                _check_texture(target / entry["mtl"], line.split()[1], entry, target)
         (target / entry["mtl"]).write_text(rewritten, encoding="utf-8")
     (target / "PROVENANCE.txt").write_text(_provenance(entry, archive), encoding="utf-8")
     (target / "model.config").write_text(_model_config(entry), encoding="utf-8")

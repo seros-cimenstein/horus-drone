@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from pymavlink import mavutil
+from pymavlink.dialects.v20 import common as mavlink2
 
 from horus.config import FlightSettings
 from horus.flight.link import MavlinkFlightLink
@@ -108,8 +109,7 @@ def test_invalid_gps_free_origin_is_rejected_before_connecting(
 
 
 def test_guided_velocity_setpoint_is_a_velocity_only_local_ned_target() -> None:
-    # Regression for the campaign's "precision landing does not descend" investigation: a
-    # descent must reach the autopilot as a velocity-only LOCAL_NED target with vz positive
+    # A descent must reach the autopilot as a velocity-only LOCAL_NED target with vz positive
     # (down). ArduPilot ignores position/accel/yaw fields flagged in type_mask and drops the
     # whole message outside GUIDED, so the frame and mask have to be exact.
     import math
@@ -133,10 +133,10 @@ def test_guided_velocity_setpoint_is_a_velocity_only_local_ned_target() -> None:
 
 
 def test_control_messages_are_requested_fast_enough_for_low_real_time_factors() -> None:
-    # SET_MESSAGE_INTERVAL is autopilot time; at the campaign's RTF ~0.18 a 5 Hz request delivered
-    # a pose sample only every ~1.1 s of wall time (measured ages up to 2.15 s), tripping the
-    # executor's 1.5 s wall staleness guard. Pose, heading and the vehicle clock must be requested
-    # at 20 Hz so the wall gap stays ~0.3 s at RTF 0.18 and ~0.5 s at RTF 0.1.
+    # SET_MESSAGE_INTERVAL is autopilot time: at RTF ~0.18 a 5 Hz request delivers a pose sample
+    # only every ~1.1 s of wall time, past the executor's 1.5 s wall staleness guard once jitter
+    # adds up. Pose, heading and the vehicle clock must be requested at 20 Hz so the wall gap
+    # stays ~0.3 s at RTF 0.18 and ~0.5 s at RTF 0.1.
     connection = FakeConnection()
     command_calls: list[tuple[object, ...]] = []
     connection.mav.command_long_send = lambda *fields: command_calls.append(fields)
@@ -153,8 +153,9 @@ def test_control_messages_are_requested_fast_enough_for_low_real_time_factors() 
     assert intervals[mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE] == 50_000
     assert intervals[mavutil.mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED] == 50_000
     assert intervals[mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT] == 50_000
-    assert intervals[253] == 200_000  # STATUSTEXT
+    assert intervals[mavutil.mavlink.MAVLINK_MSG_ID_STATUSTEXT] == 200_000
     assert intervals[mavutil.mavlink.MAVLINK_MSG_ID_MOUNT_STATUS] == 200_000
+    assert intervals[mavlink2.MAVLINK_MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS] == 200_000
 
 
 def test_gimbal_command_uses_mount_control_and_checks_angles() -> None:
@@ -193,20 +194,6 @@ def test_gimbal_command_uses_mount_control_and_checks_angles() -> None:
     assert len(command_calls) == 1
 
 
-def test_mount_status_stream_is_requested() -> None:
-    connection = FakeConnection()
-    link = MavlinkFlightLink(FlightSettings(), connection=connection)
-
-    link._request_telemetry()
-
-    assert any(
-        call[2] == mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL
-        and call[4] == mavutil.mavlink.MAVLINK_MSG_ID_MOUNT_STATUS
-        and call[5] == 200_000
-        for call in connection.mav.command_calls
-    )
-
-
 def test_mount_status_angles_are_exposed_in_degrees() -> None:
     link = MavlinkFlightLink(FlightSettings(), connection=FakeConnection())
     link._consume(
@@ -230,6 +217,134 @@ def test_mount_status_angles_are_exposed_in_degrees() -> None:
         90.0,
     )
     assert link.telemetry().as_dict()["mount_status"] == status.as_dict()
+
+
+def _quaternion(roll_deg: float, pitch_deg: float, yaw_deg: float) -> list[float]:
+    """Yaw-pitch-roll Euler angles as a MAVLink (w, x, y, z) quaternion."""
+    import math
+
+    cr, sr = math.cos(math.radians(roll_deg) / 2), math.sin(math.radians(roll_deg) / 2)
+    cp, sp = math.cos(math.radians(pitch_deg) / 2), math.sin(math.radians(pitch_deg) / 2)
+    cy, sy = math.cos(math.radians(yaw_deg) / 2), math.sin(math.radians(yaw_deg) / 2)
+    return [
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    ]
+
+
+def _gimbal_device_status(
+    flags: int, yaw_deg: float, delta_yaw: float = float("nan"), *, roll_deg: float = 2.0, pitch_deg: float = -30.0
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        get_type=lambda: "GIMBAL_DEVICE_ATTITUDE_STATUS",
+        target_system=0,
+        target_component=0,
+        flags=flags,
+        q=_quaternion(roll_deg, pitch_deg, yaw_deg),
+        delta_yaw=delta_yaw,
+    )
+
+
+_LOCKS = mavlink2.GIMBAL_DEVICE_FLAGS_ROLL_LOCK | mavlink2.GIMBAL_DEVICE_FLAGS_PITCH_LOCK
+
+
+@pytest.mark.parametrize(
+    ("flags", "reported_yaw_deg", "delta_yaw_deg", "expected_yaw_deg"),
+    [
+        # ArduPilot's flags: yaw already relative to the nose; the 90 deg heading must not apply.
+        (_LOCKS | mavlink2.GIMBAL_DEVICE_FLAGS_YAW_IN_VEHICLE_FRAME, 20.0, None, 20.0),
+        # Earth-frame yaw without delta_yaw: the vehicle heading (90) converts it.
+        (mavlink2.GIMBAL_DEVICE_FLAGS_YAW_IN_EARTH_FRAME, 110.0, None, 20.0),
+        # Earth-frame yaw with the message's own delta_yaw (80): it wins over the heading sample.
+        (mavlink2.GIMBAL_DEVICE_FLAGS_YAW_IN_EARTH_FRAME, 110.0, 80.0, 30.0),
+        # Devices predating the frame flags: YAW_LOCK means earth frame, no lock vehicle frame;
+        # delta_yaw is ignored without a frame flag.
+        (mavlink2.GIMBAL_DEVICE_FLAGS_YAW_LOCK, 110.0, 80.0, 20.0),
+        (0, 20.0, 80.0, 20.0),
+        # Wrapped into [-180, 180).
+        (mavlink2.GIMBAL_DEVICE_FLAGS_YAW_IN_EARTH_FRAME, -100.0, None, 170.0),
+    ],
+)
+def test_gimbal_device_status_yaw_is_reported_relative_to_the_vehicle_nose(
+    flags: int, reported_yaw_deg: float, delta_yaw_deg: float | None, expected_yaw_deg: float
+) -> None:
+    import math
+
+    link = MavlinkFlightLink(FlightSettings(), connection=FakeConnection())
+    link._consume(SimpleNamespace(get_type=lambda: "ATTITUDE", roll=0.0, pitch=0.0, yaw=math.radians(90.0)))
+    delta = float("nan") if delta_yaw_deg is None else math.radians(delta_yaw_deg)
+    link._consume(_gimbal_device_status(flags, reported_yaw_deg, delta))
+
+    status = link.telemetry().mount_status
+    assert status is not None
+    assert status.mount_mode is None
+    assert (status.pitch_deg, status.roll_deg, status.yaw_deg) == (
+        pytest.approx(-30.0), pytest.approx(2.0), pytest.approx(expected_yaw_deg)
+    )
+
+
+@pytest.mark.parametrize(
+    ("lean_roll_deg", "lean_pitch_deg", "reported_roll_deg", "reported_pitch_deg"),
+    [
+        # ArduPilot servo demand while braking nose-up 8 deg: -30 deg horizon target minus the lean.
+        (0.0, 8.0, 0.0, -38.0),
+        # Banked 5 deg right: the servo rolls the camera 5 deg left to keep it level.
+        (5.0, 0.0, -5.0, 0.0),
+    ],
+)
+@pytest.mark.parametrize("body_frame", [True, False])
+def test_body_frame_gimbal_reports_are_composed_with_the_vehicle_lean(
+    lean_roll_deg: float, lean_pitch_deg: float, reported_roll_deg: float, reported_pitch_deg: float, body_frame: bool
+) -> None:
+    import math
+
+    link = MavlinkFlightLink(FlightSettings(gimbal_status_body_frame=body_frame), connection=FakeConnection())
+    link._consume(SimpleNamespace(
+        get_type=lambda: "ATTITUDE", roll=math.radians(lean_roll_deg), pitch=math.radians(lean_pitch_deg),
+        yaw=math.radians(90.0),
+    ))
+    link._consume(_gimbal_device_status(
+        _LOCKS | mavlink2.GIMBAL_DEVICE_FLAGS_YAW_IN_VEHICLE_FRAME, 0.0,
+        roll_deg=reported_roll_deg, pitch_deg=reported_pitch_deg,
+    ))
+
+    status = link.telemetry().mount_status
+    assert status is not None
+    expected = (
+        (reported_pitch_deg + lean_pitch_deg, reported_roll_deg + lean_roll_deg) if body_frame
+        else (reported_pitch_deg, reported_roll_deg)
+    )
+    assert (status.pitch_deg, status.roll_deg, status.yaw_deg) == (
+        pytest.approx(expected[0], abs=1e-6), pytest.approx(expected[1], abs=1e-6), pytest.approx(0.0, abs=1e-6)
+    )
+
+
+def test_unusable_gimbal_device_samples_leave_the_gimbal_unmeasured(monkeypatch) -> None:
+    clock = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    horizon = MavlinkFlightLink(FlightSettings(gimbal_status_body_frame=False), connection=FakeConnection())
+    # Earth-frame yaw with no delta_yaw and no vehicle heading yet cannot be made vehicle-relative.
+    horizon._consume(_gimbal_device_status(mavlink2.GIMBAL_DEVICE_FLAGS_YAW_IN_EARTH_FRAME, 110.0))
+    nan_attitude = _gimbal_device_status(mavlink2.GIMBAL_DEVICE_FLAGS_YAW_IN_VEHICLE_FRAME, 0.0)
+    nan_attitude.q = [float("nan")] * 4
+    horizon._consume(nan_attitude)
+    assert horizon.telemetry().mount_status is None
+
+    # A body-frame report needs a fresh vehicle lean: never received, then too old.
+    body = MavlinkFlightLink(FlightSettings(), connection=FakeConnection())
+    vehicle_frame = _gimbal_device_status(mavlink2.GIMBAL_DEVICE_FLAGS_YAW_IN_VEHICLE_FRAME, 0.0)
+    body._consume(vehicle_frame)
+    assert body.telemetry().mount_status is None
+    body._consume(SimpleNamespace(get_type=lambda: "ATTITUDE", roll=0.0, pitch=0.0, yaw=0.0))
+    clock[0] += 1.5
+    body._consume(vehicle_frame)
+    assert body.telemetry().mount_status is None
+    clock[0] += 0.1
+    body._consume(SimpleNamespace(get_type=lambda: "ATTITUDE", roll=0.0, pitch=0.0, yaw=0.0))
+    body._consume(vehicle_frame)
+    assert body.telemetry().mount_status is not None
 
 
 def test_system_time_exposes_sitl_boot_clock():
@@ -332,3 +447,25 @@ def test_attitude_roll_pitch_and_mount_samples_carry_their_own_freshness(monkeyp
     assert (pose["vehicle_roll_deg"], pose["gimbal_pitch_deg"]) == (pytest.approx(4.0), -45.0)
     # The autopilot clock sample keeps its own age, so a frame's autopilot time can be estimated.
     assert (pose["time_boot_ms"], pose["time_boot_age_s"]) == (42_000, pytest.approx(3.0))
+
+
+def test_velocity_comes_from_the_message_that_supplies_the_pose():
+    link = MavlinkFlightLink(FlightSettings(), connection=FakeConnection())
+
+    def global_position(vx_cm_s: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            get_type=lambda: "GLOBAL_POSITION_INT", vx=vx_cm_s, vy=-50, vz=20, hdg=0,
+            lat=-353632620, lon=1491652370, relative_alt=2000,
+        )
+
+    # Without LOCAL_POSITION_NED the GLOBAL_POSITION_INT fallback supplies pose and velocity.
+    link._consume(global_position(150))
+    assert link.telemetry().velocity.as_dict() == {"north_m_s": 1.5, "east_m_s": -0.5, "down_m_s": 0.2}
+
+    # Once local NED arrives it alone feeds pose and velocity.
+    link._consume(SimpleNamespace(
+        get_type=lambda: "LOCAL_POSITION_NED", x=1.0, y=2.0, z=-3.0, vx=0.25, vy=0.5, vz=-0.125))
+    link._consume(global_position(900))
+    telemetry = link.telemetry()
+    assert telemetry.pose.as_dict() == {"north_m": 1.0, "east_m": 2.0, "up_m": 3.0}
+    assert telemetry.velocity.as_dict() == {"north_m_s": 0.25, "east_m_s": 0.5, "down_m_s": -0.125}

@@ -5,15 +5,13 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import math
-import re
 import subprocess
-from typing import Iterable, Iterator
+
+from sim.campaign.gz_topics import named_poses, scalar, topic_messages
 
 DEFAULT_TOPIC = "/world/horus_indoor/pose/info"
 DEFAULT_VEHICLE = "horus_iris"
 DEFAULT_PAD = "home_apriltag_pad"
-_NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
-_POSE_START = re.compile(r"(?m)^[ \t]*pose\s*\{")
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,73 +34,18 @@ def parse_pose_info(
 ) -> LandingError | None:
     """Parse one Gazebo ``gz.msgs.Pose_V`` text message; return ``None`` if incomplete."""
     poses: dict[str, tuple[float, float]] = {}
-    for block in _pose_blocks(message):
-        name_match = re.search(r'\bname\s*:\s*"([^"]+)"', block)
-        if name_match is None or name_match.group(1) not in (vehicle_name, pad_name):
+    for name, position, _orientation in named_poses(message):
+        if name not in (vehicle_name, pad_name):
             continue
-        position_match = re.search(r"\bposition\s*\{([^{}]*)\}", block, re.DOTALL)
-        if position_match is None:
-            continue
-        position = position_match.group(1)
-        x = _number_field(position, "x")
-        y = _number_field(position, "y")
-        poses[name_match.group(1)] = (
-            0.0 if x is None else x,
-            0.0 if y is None else y,
-        )
+        # Protobuf text omits zero-valued fields, so a missing coordinate is 0.
+        x, y = scalar(position, "x"), scalar(position, "y")
+        poses[name] = (0.0 if x is None else x, 0.0 if y is None else y)
     if vehicle_name not in poses or pad_name not in poses:
         return None
     vehicle_x, vehicle_y = poses[vehicle_name]
     pad_x, pad_y = poses[pad_name]
     dx, dy = vehicle_x - pad_x, vehicle_y - pad_y
     return LandingError(dx, dy, math.hypot(dx, dy), vehicle_x, vehicle_y, pad_x, pad_y)
-
-
-def _number_field(message: str, field: str) -> float | None:
-    match = re.search(rf"\b{re.escape(field)}\s*:\s*({_NUMBER})(?![\w.])", message)
-    if match is None:
-        return None
-    value = float(match.group(1))
-    return value if math.isfinite(value) else None
-
-
-def _pose_blocks(message: str) -> Iterator[str]:
-    """Yield balanced top-level ``pose { ... }`` entries from protobuf text format."""
-    offset = 0
-    while (match := _POSE_START.search(message, offset)) is not None:
-        opening = message.find("{", match.start())
-        depth = 1
-        cursor = opening + 1
-        while cursor < len(message) and depth:
-            character = message[cursor]
-            if character == "{":
-                depth += 1
-            elif character == "}":
-                depth -= 1
-            cursor += 1
-        if depth:
-            return
-        yield message[opening + 1 : cursor - 1]
-        offset = cursor
-
-
-def _messages(stream: Iterable[str]) -> Iterator[str]:
-    """Frame Pose_V messages from the header that starts each protobuf text sample."""
-    buffer: list[str] = []
-    depth = 0
-    for line in stream:
-        if depth == 0 and buffer and re.match(r"^[ \t]*header\s*\{", line):
-            yield "".join(buffer)
-            buffer.clear()
-        if depth == 0 and not buffer and "{" not in line:
-            continue
-        buffer.append(line)
-        depth += line.count("{") - line.count("}")
-        if depth < 0:
-            buffer.clear()
-            depth = 0
-    if buffer:
-        yield "".join(buffer)
 
 
 def _format(error: LandingError) -> str:
@@ -133,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     interrupted = False
     try:
         if process.stdout is not None:
-            for message in _messages(process.stdout):
+            for message, _truncated in topic_messages(process.stdout):
                 error = parse_pose_info(message, args.vehicle, args.pad)
                 if error is not None:
                     print(_format(error), flush=True)

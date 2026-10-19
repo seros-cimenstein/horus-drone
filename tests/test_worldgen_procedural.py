@@ -19,7 +19,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sim.scripts.civilian_life import MotionEngine, load_scenario
+from sim.campaign.civilian_spec import load_scenario
+from sim.scripts.civilian_life import MotionEngine
 from sim.worldgen import build_world
 from sim.worldgen.assets import ASSETS
 from sim.worldgen.geometry import CollisionWorld, load_collisions
@@ -43,7 +44,7 @@ CANONICAL = [("forest", None), ("urban", None)]
 # Canonical worlds keep the 60 m actor inset and 60 m cruise legs they shipped with; generated
 # worlds carry their flight profile's limits in the manifest (actor_geofence_m / flight.*).
 GEOFENCE_INSET = 60.0
-RTL_ALT_M = 45.0  # config/ardupilot/horus_sitl_outdoor.parm
+RTL_ALT_M = 45.0  # config/ardupilot/outdoor.parm
 ROLES_OF_INTEREST = {"forest": ("missing_hiker", "injured"), "urban": ("red_shirt", "collapsed")}
 
 
@@ -102,20 +103,11 @@ def worlds(tmp_path_factory):
     return functools.cache(lambda kind, seed: World(kind, seed, root))
 
 
-def _all(kind_seeds, canonical_defects: dict[str, str] | None = None):
-    """Parametrize over worlds; known canonical-world defects are strict expected failures.
-
-    The canonical worlds are frozen (missions S9–S13 depend on their geometry), so defects
-    found in them stay visible here instead of being silently exempted.
-    """
-    defects = canonical_defects or {}
-    params = [
-        pytest.param(kind, seed, id=f"{kind}-{seed or 'canonical'}",
-                     marks=[pytest.mark.xfail(strict=True, reason=defects[kind])]
-                     if seed is None and kind in defects else [])
-        for kind, seed in kind_seeds
-    ]
-    return pytest.mark.parametrize("kind,seed", params)
+def _all(kind_seeds):
+    """Parametrize over worlds (seed None is the canonical world)."""
+    return pytest.mark.parametrize("kind,seed", [
+        pytest.param(kind, seed, id=f"{kind}-{seed or 'canonical'}") for kind, seed in kind_seeds
+    ])
 
 
 @pytest.mark.parametrize("kind", ["forest", "urban"])
@@ -130,7 +122,7 @@ def test_canonical_worlds_pass_the_procedural_validation(kind):
     layout = canonical_forest_layout(seed) if kind == "forest" else canonical_urban_layout(seed)
     stem = f"horus_{kind}"
     dressing = canonical_dressing()
-    sdf, agents, _rows, files = _build(kind, layout, stem, f"{stem}_terrain", dressing, textures=False)
+    sdf, agents, _rows, files = _build(kind, layout, f"{stem}_terrain", dressing, textures=False)
     manifest = _manifest(layout, kind, stem, f"../scenarios/{stem}.yaml",
                          "../scenarios/horus_forest_ground.npy" if kind == "forest" else None,
                          f"{stem}.sdf", agents, dressing)
@@ -415,14 +407,6 @@ def test_procedural_forest_scenery_matches_the_design(worlds, kind, seed):
     assert len(trails) >= 5 and len(clearings) >= 4, f"{w.label}: network {len(trails)}/{len(clearings)}"
     assert 1 <= len(w.manifest["areas"]["camps"]) <= 3, f"{w.label}: camps"
 
-    # No primitive vegetation anywhere in the scenery tiles.
-    root = ET.parse(w.sdf_path).getroot()
-    for model in root.iter("model"):
-        if (model.get("name") or "").startswith("scenery_"):
-            for tag in ("sphere", "cone", "cylinder", "box"):
-                assert model.find(f".//{tag}") is None, \
-                    f"{w.label}: scenery tile {model.get('name')} contains a primitive <{tag}>"
-
     # Trees keep their tops under the 23 m cap and stay out of trails/clearings, except the
     # two designated mission pieces: the missing hiker's canopy and the follow occluder.
     missing = next(person for person in w.manifest["people"] if person["role"] == "missing_hiker")
@@ -594,7 +578,7 @@ def test_procedural_urban_traffic_is_mesh_vehicles_only(worlds, kind, seed):
 @_all([("urban", seed) for seed in SEEDS])
 def test_procedural_urban_scenery_matches_the_design(worlds, kind, seed):
     """Roads, sidewalks, zebra crossings, plazas, parks, trees, lamps and shelters are all
-    merged/instanced scenery meshes; no scenery tile contains primitive geometry."""
+    merged/instanced scenery meshes."""
     w = worlds(kind, seed)
     names = [visual["name"] or "" for visual in _scenery_tile_visuals(w)]
     for prefix in ("facade_", "roof_", "asphalt_", "sidewalk_", "crosswalk_", "plaza_",
@@ -608,6 +592,11 @@ def test_procedural_urban_scenery_matches_the_design(worlds, kind, seed):
     assert len(benches) >= 4, f"{w.label}: {len(benches)} benches"
     assert any(name.startswith("bus_stop_shelter") for name in names), f"{w.label}: no bus shelter"
     assert any(name.startswith("follow_shelter") for name in names), f"{w.label}: no follow shelter"
+
+
+@_all([(kind, seed) for kind in ("forest", "urban") for seed in SEEDS])
+def test_procedural_scenery_tiles_contain_no_primitive_geometry(worlds, kind, seed):
+    w = worlds(kind, seed)
     root = ET.parse(w.sdf_path).getroot()
     for model in root.iter("model"):
         if (model.get("name") or "").startswith("scenery_"):

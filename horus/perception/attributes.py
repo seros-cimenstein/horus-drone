@@ -5,14 +5,15 @@ human-usable person evidence, so it must agree with the simulation's garment reg
 (``sim/worldgen/appearance.py``: every fabric lists the classifier colours it may
 plausibly produce). Achromatic and off-hue fabrics - white, light grey, grey, charcoal,
 black, beige, khaki, sand, stone, brown, yellow, mustard - list *no* colour: a saturated
-label on them is a false positive, and because the tracker keeps the first accepted
-attribute for the life of a track, a single false positive mislabels that person for the
-whole run. Missing a colour is the safe direction (the commander reports no match instead
-of selecting the wrong actor).
+label on them is a false positive. The tracker publishes a track's colour as a bounded
+majority vote over its recent classifications (``vote_shirt_colour``), so repeated false
+positives can still settle a wrong colour on a person. Missing a colour is the safe
+direction (the commander reports no match instead of selecting the wrong actor).
 """
 
 from __future__ import annotations
 
+from collections import Counter, deque
 import math
 from typing import Any
 
@@ -124,3 +125,31 @@ def _in_hue_range(hue: Any, bands: tuple[tuple[float, float], ...]) -> Any:
     for low, high in bands:
         mask |= (hue >= low) & (hue < high)
     return mask
+
+
+def vote_shirt_colour(
+    detection_attributes: Any, votes: deque[str], *, window: int, min_votes: int
+) -> dict[str, Any]:
+    """Record this frame's accepted classification and publish the vote's decision.
+
+    ``votes`` (oldest first) is trimmed to ``window``; an inconclusive frame (no colour) does
+    not vote, so it neither decides nor erases a settled colour. A colour is published only with
+    at least ``min_votes`` votes and strictly more votes than any other colour, so an undecided
+    track (and a tie) publishes none. Any upstream ``shirt_colour`` is replaced by the decision,
+    keeping the published attribute and its confidence (the colour's vote share) consistent.
+    """
+    attributes = dict(detection_attributes or {})
+    colour = attributes.pop("shirt_colour", None)
+    attributes.pop("shirt_colour_confidence", None)
+    if isinstance(colour, str) and colour:
+        votes.append(colour)
+        while len(votes) > window:
+            votes.popleft()
+    if votes:
+        counts = Counter(votes)
+        winner, count = max(counts.items(), key=lambda item: (item[1], item[0]))
+        runner_up = max((value for name, value in counts.items() if name != winner), default=0)
+        if count >= min_votes and count > runner_up:
+            attributes["shirt_colour"] = winner
+            attributes["shirt_colour_confidence"] = count / len(votes)
+    return attributes

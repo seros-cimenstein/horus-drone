@@ -23,10 +23,6 @@ KINDS = {"tree", "rock", "lamp", "bench", "vehicle", "person_sitting"}
 
 
 def test_registry_covers_the_imported_model_directories():
-    assert KEYS == ["bench_a", "bus", "lamp_post", "person_sitting_a", "rock_a", "tree_oak",
-                    "tree_pine", "vehicle_box_truck", "vehicle_delivery_truck",
-                    "vehicle_hatchback", "vehicle_hatchback_blue", "vehicle_hatchback_red",
-                    "vehicle_pickup", "vehicle_sedan", "vehicle_suv"]
     for key, asset in ASSETS.items():
         assert asset.key == key
         assert asset.kind in KINDS

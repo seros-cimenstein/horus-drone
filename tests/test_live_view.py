@@ -34,6 +34,7 @@ def test_render_failure_never_reaches_the_camera_loop_and_stops_rendering(caplog
     view(broken)
 
     assert publisher.images == []
-    assert sum("Disabling live perception view" in record.message for record in caplog.records) == 1
-    # Throughput logging continues on its interval even after rendering is disabled.
-    assert sum(record.message.startswith("perception ") for record in caplog.records) == 2
+    records = [record for record in caplog.records if record.name == "horus.mcp_server.live_view"]
+    # One warning when rendering is disabled; throughput logging continues on its interval.
+    assert [record.levelno for record in records].count(logging.WARNING) == 1
+    assert [record.levelno for record in records].count(logging.INFO) == 2

@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 
 from horus.grounder.backends import MODEL_IDS, create_backend
+from horus.perception.grounding import DEFAULT_BOX_THRESHOLD, DEFAULT_TEXT_THRESHOLD
 
 _LOG = logging.getLogger(__name__)
 
@@ -30,15 +31,15 @@ class GrounderService:
 
     @property
     def model(self) -> str:
-        return str(getattr(self.backend, "model_id", getattr(self.backend, "model", "unknown")))
+        return self.backend.model_id
 
     def detect(
         self,
         image_bgr: np.ndarray,
         prompts: Sequence[str],
         *,
-        box_threshold: float = 0.30,
-        text_threshold: float = 0.25,
+        box_threshold: float = DEFAULT_BOX_THRESHOLD,
+        text_threshold: float = DEFAULT_TEXT_THRESHOLD,
     ) -> dict[str, Any]:
         started = time.perf_counter()
         with self._inference_lock:
@@ -93,8 +94,8 @@ class GrounderRequestHandler(BaseHTTPRequestHandler):
             request = self._read_json()
             image = self._decode_image(request)
             prompts = self._prompts(request)
-            box_threshold = self._threshold(request, "box_threshold", 0.30)
-            text_threshold = self._threshold(request, "text_threshold", 0.25)
+            box_threshold = self._threshold(request, "box_threshold", DEFAULT_BOX_THRESHOLD)
+            text_threshold = self._threshold(request, "text_threshold", DEFAULT_TEXT_THRESHOLD)
         except (ValueError, KeyError, TypeError, binascii.Error) as exc:
             self._send_json(400, {"error": str(exc)})
             return

@@ -99,21 +99,23 @@ RUN apt-get update \
 RUN groupadd --gid 1000 sim \
     && useradd --uid 1000 --gid sim --create-home --shell /bin/bash sim
 RUN /opt/horus-venv/bin/pip install --no-cache-dir 'setuptools>=68' wheel
-COPY pyproject.toml README.md /tmp/horus-source/
-COPY horus /tmp/horus-source/horus
-RUN /opt/horus-venv/bin/pip install --no-cache-dir --no-build-isolation \
-        '/tmp/horus-source[server,perception,test]' \
-    && rm -rf /tmp/horus-source
 RUN gz sim --version && command -v sim_vehicle.py
 RUN output="$(gz sim -s -r --headless-rendering -v4 --iterations 50 shapes.sdf 2>&1)" \
     && printf '%s\n' "$output" \
     && ! printf '%s\n' "$output" | grep -E 'Failed to (load|find plugin)'
+# The Qt GUI plugin depends only on sim/gui; build it before the HORUS source so README or
+# package edits rebuild only the pip layer below.
 COPY sim/gui/install_build_deps.sh /tmp/install_horus_gui_build_deps.sh
 RUN bash /tmp/install_horus_gui_build_deps.sh \
     && rm /tmp/install_horus_gui_build_deps.sh
 COPY sim/gui /tmp/horus-gui-source
 RUN bash /tmp/horus-gui-source/build_plugin.sh /tmp/horus-gui-source \
     && rm -rf /tmp/horus-gui-source
+COPY pyproject.toml README.md /tmp/horus-source/
+COPY horus /tmp/horus-source/horus
+RUN /opt/horus-venv/bin/pip install --no-cache-dir --no-build-isolation \
+        '/tmp/horus-source[server,perception,test]' \
+    && rm -rf /tmp/horus-source
 
 
 USER sim

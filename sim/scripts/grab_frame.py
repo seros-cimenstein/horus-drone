@@ -4,18 +4,14 @@
 from __future__ import annotations
 
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
 
+from sim.campaign.camera_stream import enable_camera_stream
+
 
 FRAME_PATH = Path("/horus/sim/logs/s0_frame.jpg")
-
-
-def run(*args: str) -> str:
-    result = subprocess.run(args, check=True, text=True, capture_output=True)
-    return result.stdout
 
 
 def main() -> int:
@@ -33,31 +29,7 @@ def main() -> int:
     if match is None or match.group(1) != "YES":
         raise RuntimeError("OpenCV was not built with GStreamer support")
 
-    topics = run("gz", "topic", "-l").splitlines()
-    streaming_topics = [
-        topic.strip()
-        for topic in topics
-        if topic.strip().endswith("/enable_streaming")
-        and "/camera/image/" in topic
-    ]
-    if not streaming_topics:
-        raise RuntimeError(
-            "No camera enable_streaming topic found; check that iris_runway.sdf "
-            "is running and its camera sensor loaded"
-        )
-    preferred = [topic for topic in streaming_topics if "/iris_with_gimbal/" in topic]
-    topic = (preferred or streaming_topics)[0]
-    run(
-        "gz",
-        "topic",
-        "-t",
-        topic,
-        "-m",
-        "gz.msgs.Boolean",
-        "-p",
-        "data: 1",
-    )
-    print(f"Enabled camera stream: {topic}", flush=True)
+    enable_camera_stream(prefer="/iris_with_gimbal/", log=lambda line: print(line, flush=True))
 
     pipeline = (
         'udpsrc port=5600 caps="application/x-rtp, media=(string)video, '
@@ -87,8 +59,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except subprocess.CalledProcessError as exc:
-        print(f"Command failed: {exc.cmd}\n{exc.stderr}", file=sys.stderr)
-        raise
+    raise SystemExit(main())

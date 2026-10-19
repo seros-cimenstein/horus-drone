@@ -9,24 +9,13 @@
 set -Eeuo pipefail
 trials="${1:-5}"
 delays="${2:-0,0.5,1,2,3}"
-project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd -- "${project_dir}"
-remote="${HORUS_REMOTE:-koko}"
-container="${HORUS_REMOTE_SIM_CONTAINER_NAME:-horus-sim}"
-horus_bin="${HORUS_HOST_VENV:-${project_dir}/.venv-host}/bin"
-token_file="${XDG_RUNTIME_DIR:-/tmp}/horus-$(id -u)/${remote}/mcp-token"
+source "$(dirname -- "${BASH_SOURCE[0]}")/trial_lib.sh"
 walk_delay_s="${HORUS_S7_WALK_DELAY:-13}"  # route holds 8 s of sim time before walking (~12 s wall at RTF 0.65)
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 out_dir="runs/s7/${stamp}"
 log="sim/logs/s7/sweep_${stamp}.log"
 mkdir -p "${out_dir}" sim/logs/s7
-export HORUS_MCP_URL="http://127.0.0.1:${HORUS_MCP_LOCAL_PORT:-8000}/mcp"
-
-stop_remote() { bash scripts/koko/remote_down.sh >/dev/null 2>&1 || true; }
-trap stop_remote EXIT
-bash scripts/koko/remote_up.sh > sim/logs/s7/remote_up.log 2>&1
-HORUS_MCP_TOKEN="$(cat "${token_file}")"
-export HORUS_MCP_TOKEN
+trial_remote_up sim/logs/s7/remote_up.log
 call() { "${horus_bin}/horus-mcp-call" "$@"; }
 wait_task() {
   local task_id="$1" status

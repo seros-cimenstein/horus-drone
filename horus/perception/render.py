@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Sequence
 
-from .types import Candidate, Frame, SetOfMarkPayload
+from .types import Frame, SetOfMarkPayload
 
 _PERSON_COLOR = (80, 220, 40)
 _OBJECT_COLOR = (0, 165, 255)
@@ -121,7 +121,6 @@ def _label_block(cv2: Any, image: Any, lines: Sequence[str], origin: tuple[int, 
 
 def render_set_of_marks(
     frame: Frame,
-    candidates: Sequence[Candidate] | None = None,
     *,
     max_dimension: int = 640,
     jpeg_quality: int = 82,
@@ -136,7 +135,6 @@ def render_set_of_marks(
     except ImportError as exc:
         raise RuntimeError("OpenCV is required to render set-of-mark JPEG frames") from exc
 
-    candidates = frame.candidates if candidates is None else tuple(candidates)
     image = frame.image
     if image is None or len(image.shape) < 2:
         raise ValueError("frame.image must be a non-empty image array")
@@ -152,7 +150,7 @@ def render_set_of_marks(
         rendered = cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
 
     table: list[dict[str, object]] = []
-    for candidate in candidates:
+    for candidate in frame.candidates:
         x1, y1, x2, y2 = (
             int(round(coordinate * scale)) for coordinate in candidate.bbox
         )

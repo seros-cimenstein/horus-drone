@@ -1,0 +1,5 @@
+# Generated 1.2 km worlds (horus_<kind>_p<seed>): loaded after outdoor.parm. The fence covers the
+# map corners: map half extent 600 m -> corner distance 600*sqrt(2) = 848.5 m; 870 m leaves ~21 m
+# of margin beyond the corners (plus FENCE_MARGIN 5 m) so the executor's +-585 m polygon, not the
+# fence, is always the limit that stops a mission target.
+FENCE_RADIUS 870

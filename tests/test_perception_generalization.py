@@ -3,8 +3,8 @@ from __future__ import annotations
 import threading
 import time
 
-import cv2
 import numpy as np
+import pytest
 
 from horus.perception import (
     Detection,
@@ -14,18 +14,14 @@ from horus.perception import (
     PersistentTracker,
 )
 
+from tests.fakes import FixedDetector, feed_frame
+
+cv2 = pytest.importorskip("cv2")
+
 
 class _EmptyDetector:
     def detect(self, image):
         return []
-
-
-class _FixedDetector:
-    def __init__(self, detection):
-        self.detection = detection
-
-    def detect(self, image):
-        return [self.detection]
 
 
 class _RecordingEventBus:
@@ -112,7 +108,7 @@ def test_seeded_csrt_track_persists_without_detector_detections():
 
 def test_point_seeds_new_tracker_id_for_untracked_current_box():
     system = PerceptionSystem(_EmptyDetector(), PersistentTracker())
-    observation = system.process_frame(_moving_square(100), timestamp=20.0)
+    observation = feed_frame(system, _moving_square(100), 20.0)
 
     result = system.point(observation.frame_id, box=[100, 170, 160, 230])
 
@@ -132,7 +128,7 @@ def test_open_vocabulary_seeds_new_boxes_and_deduplicates_detector_tracks():
     )
     event_bus = _RecordingEventBus()
     system = PerceptionSystem(
-        _FixedDetector(Detection(detector_box, class_name="cup", class_id=41)),
+        FixedDetector(Detection(detector_box, class_name="cup", class_id=41)),
         PersistentTracker(),
         grounder=grounder,
         open_vocab_hz=20.0,
@@ -142,7 +138,7 @@ def test_open_vocabulary_seeds_new_boxes_and_deduplicates_detector_tracks():
     cv2.rectangle(image, (300, 170), (359, 229), (235, 235, 235), -1)
     cv2.rectangle(image, (314, 184), (344, 214), (10, 10, 10), -1)
     try:
-        system.process_frame(image, timestamp=30.0)
+        feed_frame(system, image, 30.0)
         system.set_vocabulary([" red mug ", "red mug"])
         assert grounder.called.wait(2.0)
         assert _wait_for(
@@ -175,7 +171,7 @@ def test_person_prompt_maps_a_repeated_span_onto_the_vocabulary_term():
         open_vocab_hz=20.0,
     )
     try:
-        system.process_frame(_moving_square(100), timestamp=50.0)
+        feed_frame(system, _moving_square(100), 50.0)
         system.set_vocabulary(["person", "person lying on the ground"])
         assert grounder.called.wait(2.0)
         assert _wait_for(lambda: any(row["source"] == "open_vocab" for row in system.list_candidates()))
@@ -202,7 +198,7 @@ def test_person_prompt_maps_a_fragment_span_onto_its_vocabulary_term():
         open_vocab_hz=20.0,
     )
     try:
-        system.process_frame(_moving_square(100), timestamp=55.0)
+        feed_frame(system, _moving_square(100), 55.0)
         system.set_vocabulary(["person", "person lying on the ground"])
         assert grounder.called.wait(2.0)
         assert _wait_for(lambda: any(row["source"] == "open_vocab" for row in system.list_candidates()))
@@ -223,7 +219,7 @@ def test_object_prompt_keeps_its_own_label_next_to_a_person_prompt():
         open_vocab_hz=20.0,
     )
     try:
-        system.process_frame(_moving_square(100), timestamp=60.0)
+        feed_frame(system, _moving_square(100), 60.0)
         system.set_vocabulary(["person", "red mug"])
         assert grounder.called.wait(2.0)
         assert _wait_for(lambda: any(row["source"] == "open_vocab" for row in system.list_candidates()))
@@ -248,7 +244,7 @@ def test_open_vocabulary_seed_never_gains_a_shirt_colour_without_a_detector_pers
     )
     try:
         for step in range(4):
-            system.process_frame(_moving_square(100), timestamp=80.0 + 0.2 * step)
+            feed_frame(system, _moving_square(100), 80.0 + 0.2 * step)
         system.set_vocabulary(["person"])
         assert grounder.called.wait(2.0)
         assert _wait_for(lambda: any(row["source"] == "open_vocab" for row in system.list_candidates()))
@@ -266,16 +262,15 @@ def test_person_vocabulary_without_a_grounder_stays_detector_only():
     # Outdoor profiles carry a prone-pass vocabulary; with grounder_url unset the pass must be
     # inert (no worker, no error) rather than a startup failure.
     system = PerceptionSystem(
-        _FixedDetector(Detection((100, 170, 160, 230), class_name="person")),
+        FixedDetector(Detection((100, 170, 160, 230), class_name="person")),
         PersistentTracker(),
         open_vocab_hz=20.0,
         vocabulary=["person", "person lying on the ground"],
     )
     try:
-        observations = [system.process_frame(_moving_square(100 + index), timestamp=70.0 + index)
-                        for index in range(2)]
+        observations = [feed_frame(system, _moving_square(100 + index), 70.0 + index) for index in range(2)]
         assert [item.frame_id for item in observations] == [1, 2]
-        assert system._open_vocab_thread is None
+        assert system.open_vocab.thread is None
         assert {row["source"] for row in system.list_candidates()} == {"detector"}
     finally:
         system.close()
@@ -292,7 +287,7 @@ def test_grounder_failure_does_not_stop_frame_processing():
     try:
         system.set_vocabulary(["red mug"])
         observations = [
-            system.process_frame(_moving_square(100 + index), timestamp=40.0 + index / 10)
+            feed_frame(system, _moving_square(100 + index), 40.0 + index / 10)
             for index in range(3)
         ]
         assert grounder.called.wait(2.0)
@@ -309,9 +304,9 @@ def test_point_on_an_old_frame_catches_up_while_the_camera_keeps_delivering(monk
     import horus.perception.grounding as grounding
 
     system = PerceptionSystem(_EmptyDetector(), PersistentTracker())
-    old = system.process_frame(_moving_square(100), timestamp=20.0)
+    old = feed_frame(system, _moving_square(100), 20.0)
     for step in range(1, 4):
-        system.process_frame(_moving_square(100 + 4 * step), timestamp=20.0 + step / 5)
+        feed_frame(system, _moving_square(100 + 4 * step), 20.0 + step / 5)
     arrivals = iter([112, 116, 120])
 
     class CameraTicksDuringCatchUp(grounding.BoxCompensator):
@@ -319,7 +314,7 @@ def test_point_on_an_old_frame_catches_up_while_the_camera_keeps_delivering(monk
             box = super().advance(frames)
             x = next(arrivals, None)  # a new frame lands after every catch-up round
             if x is not None:
-                system.process_frame(_moving_square(x), timestamp=21.0 + x / 100)
+                feed_frame(system, _moving_square(x), 21.0 + x / 100)
             return box
 
     monkeypatch.setattr(grounding, "BoxCompensator", CameraTicksDuringCatchUp)
@@ -334,9 +329,9 @@ def test_point_on_an_old_frame_catches_up_while_the_camera_keeps_delivering(monk
 
 def test_large_box_around_a_small_person_seeds_instead_of_claiming_that_person():
     person = Detection((300, 300, 330, 380), confidence=0.9, class_name="person", class_id=0)
-    system = PerceptionSystem(_FixedDetector(person), PersistentTracker())
+    system = PerceptionSystem(FixedDetector(person), PersistentTracker())
     image = _moving_square(100)
-    observation = system.process_frame(image, timestamp=30.0)
+    observation = feed_frame(system, image, 30.0)
     person_id = observation.candidates[0].id
 
     result = system.point(observation.frame_id, box=[250, 150, 450, 400], compensate=False)
@@ -358,7 +353,7 @@ def test_open_vocabulary_seed_survives_while_redetected_and_drops_when_the_groun
     grounder = SwitchableGrounder()
     system = PerceptionSystem(_EmptyDetector(), PersistentTracker(), grounder=grounder, open_vocab_hz=50.0)
     try:
-        system.process_frame(_moving_square(100), timestamp=40.0)
+        feed_frame(system, _moving_square(100), 40.0)
         system.set_vocabulary(["red mug"])
         assert _wait_for(lambda: grounder.calls >= 6)
         seeded = [row for row in system.list_candidates() if row["source"] == "open_vocab"]

@@ -7,7 +7,6 @@ import threading
 import time
 from urllib.request import Request, urlopen
 
-import cv2
 import numpy as np
 import pytest
 
@@ -15,9 +14,11 @@ from horus.grounder.client import GrounderClient, GrounderUnavailable
 from horus.grounder.server import make_server
 from horus.perception.types import GroundingBox
 
+cv2 = pytest.importorskip("cv2")
+
 
 class FakeBackend:
-    model = "fake-grounder"
+    model_id = "fake-grounder"
 
     def __init__(self, delay_s: float = 0.0) -> None:
         self.delay_s = delay_s

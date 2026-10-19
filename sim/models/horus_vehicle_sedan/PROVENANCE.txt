@@ -4,7 +4,8 @@ Archive SHA-256: ea5d10f1a2c4e89f8a0441f2c9e623575ecd9a7670c81c3f23bb9204ca32b1a
 Author (model.config): Ian Chen
 Licence: Creative Commons Zero v1.0 Universal (CC0 1.0) (Fuel model-level publisher metadata at import time; the archive itself embeds no licence text)
 Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used.
-Files: materials/textures/Hybrid.png, materials/textures/Hybrid_Interior.png, materials/textures/Wheels3.png, meshes/Hybrid.obj
+Files: materials/textures/Hybrid.png, materials/textures/Hybrid_Interior.png, meshes/Hybrid.obj
+Shared: texture Wheels3.png references sim/models/horus_vehicle_hatchback/materials/textures/wheels3.png (the Prius archive's Wheels3.png imports byte-identical to the base Hatchback v3 archive's wheels3.png, CC0 1.0); not copied
 
 Upstream model.config (verbatim):
 <?xml version="1.0"?>

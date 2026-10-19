@@ -61,6 +61,16 @@ horus_koko_init() {
   return 0
 }
 
+horus_koko_remote_script() {
+  # Run the bash script on stdin on HORUS_REMOTE with ARGS as "$@", after defining project_dir
+  # as the remote project directory (a relative HORUS_REMOTE_DIR is relative to the remote
+  # $HOME). Usage: horus_koko_remote_script [ARG...] <<'EOF' ... EOF
+  {
+    printf 'project_dir=%q\n' "${HORUS_REMOTE_DIR}"
+    printf '%s\n' '[[ "${project_dir}" == /* ]] || project_dir="${HOME}/${project_dir}"'
+    cat
+  } | ssh -T "${HORUS_REMOTE}" bash -s -- "$@"
+}
 
 horus_koko_resolve_remote_ipv4() {
   if [[ -n "${HORUS_REMOTE_IP:-}" ]]; then

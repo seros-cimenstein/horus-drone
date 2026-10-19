@@ -28,27 +28,17 @@ import time
 from typing import Any
 import uuid
 
+from horus.candidates import candidate_bbox
+from horus.events import TERMINAL_TASK_STATUSES
+from horus.mcp_client import DEFAULT_MCP_URL, call_json, open_session
+
 
 DELAY_POINTS = (0.0, 0.5, 1.0, 2.0, 3.0)
-DEFAULT_SERVER_URL = "http://127.0.0.1:8000/mcp"
+# Success needs the target centered in this many successive fresh frames.
+CENTERED_OBSERVATIONS = 2
+# Calls one MCP tool and returns its decoded JSON result.
 ToolCall = Callable[[str, dict[str, Any]], Awaitable[Any]]
 AsyncSleep = Callable[[float], Awaitable[None]]
-
-
-def _bbox(candidate: Mapping[str, Any]) -> tuple[float, float, float, float] | None:
-    value = candidate.get("bbox", candidate.get("box"))
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or len(value) != 4:
-        return None
-    try:
-        coords = tuple(float(item) for item in value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    if not all(math.isfinite(item) for item in coords):
-        return None
-    x1, y1, x2, y2 = coords
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return coords  # type: ignore[return-value]
 
 
 def _candidate_id(candidate: Mapping[str, Any]) -> int | None:
@@ -84,44 +74,12 @@ def select_largest_blue_candidate(
         if not isinstance(candidate, Mapping) or _shirt_colour(candidate) != "blue":
             continue
         candidate_id = _candidate_id(candidate)
-        box = _bbox(candidate)
+        box = candidate_bbox(candidate)
         if candidate_id is None or box is None:
             continue
         area = (box[2] - box[0]) * (box[3] - box[1])
         ranked.append((-area, candidate_id, order, candidate))
     return min(ranked, default=(0.0, 0, 0, None))[3]
-
-
-def _decode_tool_result(response: Any) -> Any:
-    """Decode HORUS's JSON text result while also accepting mappings from test fakes."""
-    if isinstance(response, Mapping):
-        return response
-    if getattr(response, "isError", False):
-        texts = [getattr(block, "text", "") for block in getattr(response, "content", ())]
-        raise RuntimeError("MCP tool error: " + " ".join(text for text in texts if text))
-    structured = getattr(response, "structuredContent", None)
-    if structured is not None:
-        # FastMCP wraps a str return value as {"result": "<text>"}; HORUS tools return JSON text.
-        if isinstance(structured, Mapping) and set(structured) == {"result"} and isinstance(structured["result"], str):
-            try:
-                return json.loads(structured["result"])
-            except json.JSONDecodeError:
-                return {"text": structured["result"]}
-        return structured
-    content = getattr(response, "content", None)
-    if content is not None:
-        chunks = [getattr(block, "text", "") for block in content]
-        text = "\n".join(chunk for chunk in chunks if chunk)
-    elif isinstance(response, str):
-        text = response
-    else:
-        return response
-    if not text:
-        return {}
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return {"text": text}
 
 
 def _frame_candidates(frame: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -159,7 +117,7 @@ def _candidate_centered(
         (row for row in candidates if isinstance(row, Mapping) and _candidate_id(row) == candidate_id),
         None,
     )
-    box = _bbox(candidate) if candidate is not None else None
+    box = candidate_bbox(candidate) if candidate is not None else None
     if box is None:
         return False
     # Horizontal only: follow steers heading, not camera pitch or altitude, and a standing person
@@ -240,7 +198,7 @@ def _task_status(value: Any) -> str | None:
 
 
 def _terminal_status(status: str | None) -> bool:
-    return status in {"succeeded", "failed", "cancelled", "expired"}
+    return status in TERMINAL_TASK_STATUSES
 
 
 def _int_field(value: Any) -> int | None:
@@ -284,7 +242,6 @@ async def run_trial(
     timeout_s: float = 30.0,
     poll_interval_s: float = 0.25,
     center_tolerance: float = 0.10,
-    centered_observations: int = 2,
     delay_source: str = "in_process_sleep",
 ) -> dict[str, Any]:
     """Run one trial using SITL time for in-process delay and target latency.
@@ -335,11 +292,8 @@ async def run_trial(
         "raw_cleanup_data": None,
     }
 
-    async def invoke(tool: str, arguments: dict[str, Any]) -> Any:
-        return _decode_tool_result(await call(tool, arguments))
-
     async def read_sim_time_ms() -> int:
-        return _time_boot_ms(await invoke("get_state", {}))
+        return _time_boot_ms(await call("get_state", {}))
 
     async def wait_for_sim_delay() -> tuple[int, int, float, float]:
         start_ms = await read_sim_time_ms()
@@ -371,7 +325,7 @@ async def run_trial(
     try:
         trial_start_ms = await read_sim_time_ms()
         result["sim_time_boot_ms_start"] = trial_start_ms
-        source = await invoke("get_frame", {})
+        source = await call("get_frame", {})
         if not isinstance(source, Mapping):
             raise RuntimeError("get_frame did not return a JSON object")
         result["raw_tracking_data"].append(
@@ -385,7 +339,7 @@ async def run_trial(
             result["result_status"] = "no_blue_candidate"
             return result
         selected_id = _candidate_id(selected)
-        selected_box = _bbox(selected)
+        selected_box = candidate_bbox(selected)
         if selected_id is None or selected_box is None:
             result["result_status"] = "invalid_blue_candidate"
             return result
@@ -422,7 +376,7 @@ async def run_trial(
             }
             if compensate is not None:
                 point_arguments["compensate"] = compensate
-            point_result = await invoke("point", point_arguments)
+            point_result = await call("point", point_arguments)
             result["raw_matching_data"] = point_result
             if not isinstance(point_result, Mapping):
                 result["result_status"] = "point_missing_candidate"
@@ -447,7 +401,7 @@ async def run_trial(
         target_start_ms = await read_sim_time_ms()
         target_start_wall = clock()
         follow_arguments = {"id": action_id, "ttl_s": timeout_s}
-        action_result = await invoke("follow", follow_arguments)
+        action_result = await call("follow", follow_arguments)
         result["raw_action_data"] = action_result
         task_id = _task_id(action_result)
         previous_frame_id = reference_frame_id
@@ -460,7 +414,7 @@ async def run_trial(
         centered_streak = 0
 
         while True:
-            observation = await invoke("get_frame", {})
+            observation = await call("get_frame", {})
             if not isinstance(observation, Mapping):
                 raise RuntimeError("get_frame did not return a JSON object while tracking")
             frame_id = _int_field(observation.get("frame_id"))
@@ -493,7 +447,7 @@ async def run_trial(
                 )
                 if centered:
                     centered_streak += 1
-                    if centered_streak >= centered_observations:
+                    if centered_streak >= CENTERED_OBSERVATIONS:
                         target_end_ms = await read_sim_time_ms()
                         target_elapsed = _sim_clock_delta_s(target_start_ms, target_end_ms)
                         if target_elapsed is None:
@@ -518,7 +472,7 @@ async def run_trial(
                         result["wrong_target"] = True
 
             if task_id is not None:
-                task_status_data = await invoke(
+                task_status_data = await call(
                     "get_task_status", {"task_id": task_id}
                 )
                 result["raw_task_status_data"].append(task_status_data)
@@ -541,7 +495,7 @@ async def run_trial(
     finally:
         if task_id is not None and not _terminal_status(last_task_status):
             try:
-                result["raw_cleanup_data"] = await invoke(
+                result["raw_cleanup_data"] = await call(
                     "cancel", {"task_id": task_id}
                 )
             except Exception as cleanup_exc:
@@ -619,73 +573,66 @@ def _netem(delay_s: float, interface: str, action: str) -> None:
 
 
 async def run_client(args: argparse.Namespace) -> Path:
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
-
-    server_url = args.server_url or os.environ.get("HORUS_MCP_URL", DEFAULT_SERVER_URL)
+    server_url = args.server_url or os.environ.get("HORUS_MCP_URL", DEFAULT_MCP_URL)
     token = args.token or os.environ.get("HORUS_MCP_TOKEN")
     if not token:
         raise RuntimeError("set --token or HORUS_MCP_TOKEN for MCP bearer authentication")
     output_dir = args.output_dir or Path(__file__).resolve().parents[1] / "runs" / "s7"
     output_path = _create_output_file(output_dir)
-    headers = {"Authorization": f"Bearer {token}"}
-    async with streamablehttp_client(server_url, headers=headers) as (read_stream, write_stream, _):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
+    async with open_session(server_url, token) as session:
 
-            async def call(tool: str, arguments: dict[str, Any]) -> Any:
-                return await session.call_tool(tool, arguments)
+        async def call(tool: str, arguments: dict[str, Any]) -> Any:
+            return await call_json(session, tool, arguments)
 
-            with output_path.open("a", encoding="utf-8") as records:
-                trial_number = 0
-                for delay_s in args.delays:
-                    external_netem = args.netem_interface is not None
-                    netem_attempted = False
-                    try:
-                        if external_netem:
-                            netem_attempted = True
-                            _netem(delay_s, args.netem_interface, "up")
-                        for mode in args.modes:
-                            if mode == "id":
-                                compensation_values: tuple[bool | None, ...] = (None,)
-                            elif args.compensation == "both":
-                                compensation_values = (True, False)
-                            elif args.compensation == "on":
-                                compensation_values = (True,)
-                            elif args.compensation == "off":
-                                compensation_values = (False,)
-                            else:
-                                compensation_values = (None,)
-                            for compensate in compensation_values:
-                                for repetition in range(args.n):
-                                    trial_number += 1
-                                    trial = await run_trial(
-                                        call,
-                                        delay_s=delay_s,
-                                        mode=mode,
-                                        compensate=compensate,
-                                        wait=asyncio.sleep,
-                                        timeout_s=args.timeout,
-                                        poll_interval_s=args.poll_interval,
-                                        center_tolerance=args.center_tolerance,
-                                        delay_source="netem" if external_netem else "in_process_sleep",
-                                    )
-                                    trial["trial_number"] = trial_number
-                                    trial["repetition"] = repetition + 1
-                                    records.write(json.dumps(
-                                        trial, ensure_ascii=False, allow_nan=False, separators=(",", ":")
-                                    ) + "\n")
-                                    records.flush()
-                                    print(
-                                        f"trial {trial_number}: D={delay_s:g}s mode={mode} "
-                                        f"compensation={trial['compensation']} "
-                                        f"status={trial['result_status']} success={trial['success']}"
-                                    )
-                    finally:
-                        if netem_attempted:
-                            _netem(delay_s, args.netem_interface, "down")
-
-
+        with output_path.open("a", encoding="utf-8") as records:
+            trial_number = 0
+            for delay_s in args.delays:
+                external_netem = args.netem_interface is not None
+                netem_attempted = False
+                try:
+                    if external_netem:
+                        netem_attempted = True
+                        _netem(delay_s, args.netem_interface, "up")
+                    for mode in args.modes:
+                        if mode == "id":
+                            compensation_values: tuple[bool | None, ...] = (None,)
+                        elif args.compensation == "both":
+                            compensation_values = (True, False)
+                        elif args.compensation == "on":
+                            compensation_values = (True,)
+                        elif args.compensation == "off":
+                            compensation_values = (False,)
+                        else:
+                            compensation_values = (None,)
+                        for compensate in compensation_values:
+                            for repetition in range(args.n):
+                                trial_number += 1
+                                trial = await run_trial(
+                                    call,
+                                    delay_s=delay_s,
+                                    mode=mode,
+                                    compensate=compensate,
+                                    wait=asyncio.sleep,
+                                    timeout_s=args.timeout,
+                                    poll_interval_s=args.poll_interval,
+                                    center_tolerance=args.center_tolerance,
+                                    delay_source="netem" if external_netem else "in_process_sleep",
+                                )
+                                trial["trial_number"] = trial_number
+                                trial["repetition"] = repetition + 1
+                                records.write(json.dumps(
+                                    trial, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+                                ) + "\n")
+                                records.flush()
+                                print(
+                                    f"trial {trial_number}: D={delay_s:g}s mode={mode} "
+                                    f"compensation={trial['compensation']} "
+                                    f"status={trial['result_status']} success={trial['success']}"
+                                )
+                finally:
+                    if netem_attempted:
+                        _netem(delay_s, args.netem_interface, "down")
+    return output_path
 
 
 def build_parser() -> argparse.ArgumentParser:

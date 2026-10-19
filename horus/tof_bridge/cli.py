@@ -15,32 +15,28 @@ from .bridge import (
     RING_BEAMS,
     RingSensorSpec,
     SensorSpec,
-    sensor_ids,
+    validate_rate_hz,
 )
 from .transport import subscribe_laser_scan
 
 BRIDGE_SOURCE_SYSTEM = 254
 BRIDGE_SOURCE_COMPONENT = 196  # MAV_COMP_ID_OBSTACLE_AVOIDANCE
 
+# The downward rangefinder (MAVLink PITCH_270), identical in both payload layouts.
+PAYLOAD_DOWN_SENSOR = ("range_down", 25, 6)
 # The standard HORUS ToF payload (sim/models/horus_sensor_payload): sensor name, MAVLink
-# DISTANCE_SENSOR orientation, and sensor ID. Orientations follow the MAVLink clockwise
-# 45-degree steps; the payload SDF yaws each beam to the matching body direction.
+# DISTANCE_SENSOR orientation and sensor ID, in id order. The horizontal sensors are the named
+# RING_BEAMS directions; the payload SDF yaws each beam to the matching body direction.
 PAYLOAD_SENSORS: tuple[tuple[str, int, int], ...] = (
-    ("proximity_front", 0, 0),
-    ("proximity_front_right", 1, 1),
-    ("proximity_right", 2, 2),
-    ("proximity_rear", 4, 3),
-    ("proximity_left", 6, 4),
-    ("proximity_front_left", 7, 5),
-    ("range_down", 25, 6),
+    *sorted(((beam.name, beam.orientation, beam.sensor_id) for beam in RING_BEAMS if beam.name),
+            key=lambda sensor: sensor[2]),
+    PAYLOAD_DOWN_SENSOR,
 )
 PAYLOAD_LINK = "payload"
-# Generated worlds (horus_forest_p*/horus_urban_p*) carry horus_sensor_payload_procedural: the
-# six horizontal single-beam ToFs replaced by one 8-beam ring (RING_BEAMS). The downward
-# rangefinder is identical in both layouts.
+# Generated worlds (horus_forest_p*/horus_urban_p*) carry horus_sensor_payload_procedural: one
+# 8-beam ring fanned out over every RING_BEAMS direction, plus the downward rangefinder.
 PAYLOAD_RING_SENSOR = "proximity_ring"
 PAYLOAD_LAYOUTS = ("seven", "ring")
-PAYLOAD_DOWN_SENSOR = PAYLOAD_SENSORS[-1]
 
 
 def payload_topic_root(world: str, model_chain: str) -> str:
@@ -114,31 +110,26 @@ def _parser() -> argparse.ArgumentParser:
         description="Forward multiple Gazebo LaserScan topics over one MAVLink link.",
         epilog=(
             "Example: python -m horus.tof_bridge --mavlink tcp:127.0.0.1:5763 "
-            "--sensor /world/indoor/model/iris/link/lidar/sensor/scan:1:0"
+            "--world horus_indoor --model-chain horus_iris/horus_sensor_payload"
         ),
     )
     parser.add_argument(
-        "--sensor",
-        action="append",
-        metavar="TOPIC:ORIENTATION[:ID]",
-        help="LaserScan topic and MAVLink orientation; repeat once per sensor "
-             "(alternative to --world/--model-chain)",
-    )
-    parser.add_argument(
         "--world",
-        help="Gazebo world name; with --model-chain, bridges the payload's seven sensors "
-             "(or its 8-beam ring with --layout ring)",
+        required=True,
+        help="Gazebo world name; bridges the payload's seven sensors (or its 8-beam ring "
+             "with --layout ring)",
     )
     parser.add_argument(
         "--model-chain",
+        required=True,
         help="model names between the world and the payload, slash- or comma-separated "
              "(e.g. horus_iris/iris_with_gimbal/horus_sensor_payload)",
     )
     parser.add_argument(
         "--layout",
         choices=PAYLOAD_LAYOUTS,
-        default=None,
-        help="payload layout for --world/--model-chain: seven single-beam ToF sensors "
+        default="seven",
+        help="payload layout: seven single-beam ToF sensors "
              "(indoor, canonical outdoor; the default) or ring, one proximity_ring scan fanned "
              "out to one DISTANCE_SENSOR per beam (generated worlds)",
     )
@@ -156,9 +147,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--startup-timeout",
         type=float,
-        default=15.0,
-        help="seconds before warning that no scan arrived yet (never fatal; the lockstep "
-             "world does not run until a flight client connects)",
+        default=60.0,
+        help="seconds before warning that no scan arrived yet (default: 60; never fatal: the "
+             "lockstep world does not run until a flight client connects)",
     )
     return parser
 
@@ -189,19 +180,6 @@ class _StartupWatch:
         self._next_warning = now + self._interval
         return (f"waiting for first scan (no flight client holding SITL yet?): "
                 f"{', '.join(missing)}")
-
-
-def _parse_sensor(value: str, default_sensor_id: int) -> SensorSpec:
-    parts = value.rsplit(":", 2)
-    if len(parts) not in (2, 3):
-        raise ValueError("--sensor must use TOPIC:ORIENTATION[:ID]")
-    topic = parts[0].strip()
-    try:
-        orientation = int(parts[1])
-        sensor_id = int(parts[2]) if len(parts) == 3 else default_sensor_id
-    except ValueError as exc:
-        raise ValueError("--sensor orientation and ID must be integers") from exc
-    return SensorSpec(topic, orientation, sensor_id)
 
 
 def _open_mavlink(endpoint: str) -> Any:
@@ -289,28 +267,13 @@ def _serve(
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
-    if not math.isfinite(args.rate_hz) or not 10 <= args.rate_hz <= 20:
-        parser.error("--rate-hz must be between 10 and 20")
     if not math.isfinite(args.startup_timeout) or args.startup_timeout < 0:
         parser.error("--startup-timeout must be finite and non-negative")
-    if bool(args.world) != bool(args.model_chain):
-        parser.error("--world and --model-chain must be given together")
-    if args.world and args.sensor:
-        parser.error("--sensor cannot be combined with --world/--model-chain")
-    if args.sensor and args.layout:
-        parser.error("--layout cannot be combined with --sensor")
-    if not args.world and not args.sensor:
-        parser.error("one of --sensor or --world/--model-chain is required")
     try:
-        sensors = (payload_specs(args.world, args.model_chain, args.layout or "seven") if args.world
-                   else [_parse_sensor(value, index) for index, value in enumerate(args.sensor)])
+        validate_rate_hz(args.rate_hz)
+        sensors = payload_specs(args.world, args.model_chain, args.layout)
     except ValueError as exc:
         parser.error(str(exc))
-    if len({sensor.topic for sensor in sensors}) != len(sensors):
-        parser.error("--sensor topics must be unique")
-    ids = [sensor_id for sensor in sensors for sensor_id in sensor_ids(sensor)]
-    if len(set(ids)) != len(ids):
-        parser.error("--sensor IDs must be unique")
     try:
         link = _open_mavlink(args.mavlink)
         print(

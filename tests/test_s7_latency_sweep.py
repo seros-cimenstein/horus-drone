@@ -5,33 +5,7 @@ import json
 
 import pytest
 
-from horus.perception.grounding import FrameBuffer, GroundingPointer
-from horus.perception.types import (
-    Candidate,
-    Frame,
-    GroundingBox,
-    NoGroundingMatch,
-    StaleFrameError,
-)
 from scripts.latency_sweep import run_trial, select_largest_blue_candidate
-
-
-def _candidate(
-    candidate_id: int,
-    bbox: tuple[float, float, float, float],
-    *,
-    frame_id: int = 1,
-    timestamp: float = 1.0,
-) -> Candidate:
-    return Candidate(
-        id=candidate_id,
-        bbox=bbox,
-        class_name="person",
-        confidence=0.9,
-        frame_id=frame_id,
-        timestamp=timestamp,
-        attributes={"shirt_colour": "blue"},
-    )
 
 
 def test_blue_candidate_selection_is_largest_then_lowest_id():
@@ -44,77 +18,6 @@ def test_blue_candidate_selection_is_largest_then_lowest_id():
 
     assert select_largest_blue_candidate(candidates) is candidates[3]
     assert select_largest_blue_candidate(candidates[1:2]) is None
-
-
-class _GeometryOnlyTracker:
-    def __init__(self, current: Candidate):
-        self.current = current
-        self.encode_calls = 0
-
-    def validate_candidate(self, candidate_id: int):
-        return self.current if candidate_id == self.current.id else None
-
-    def encode(self, image, bbox):
-        self.encode_calls += 1
-        return None
-
-
-class _DescriptionGrounder:
-    def ground(self, image, description):
-        assert description == "blue-shirt person"
-        return [GroundingBox((0.0, 0.0, 10.0, 10.0), 0.95, description)]
-
-
-def _buffer_with_reidentified_target() -> tuple[FrameBuffer, _GeometryOnlyTracker]:
-    old = _candidate(1, (0.0, 0.0, 10.0, 10.0), frame_id=1, timestamp=1.0)
-    middle = _candidate(3, (5.0, 0.0, 15.0, 10.0), frame_id=2, timestamp=2.0)
-    current = _candidate(3, (10.0, 0.0, 20.0, 10.0), frame_id=3, timestamp=3.0)
-    frames = FrameBuffer(max_seconds=10, max_frames=10)
-    for frame_id, timestamp, candidates in (
-        (1, 1.0, (old,)),
-        (2, 2.0, (middle,)),
-        (3, 3.0, (current,)),
-    ):
-        frames.append(Frame(frame_id, timestamp, image=None, candidates=candidates))
-    return frames, _GeometryOnlyTracker(current)
-
-
-def test_box_compensation_replays_multiple_buffered_frames_only_when_enabled():
-    frames, tracker = _buffer_with_reidentified_target()
-    pointer = GroundingPointer(frames, tracker)
-
-    with pytest.raises(NoGroundingMatch, match="compensation disabled"):
-        pointer.point(1, [0, 0, 10, 10], compensate=False)
-    assert tracker.encode_calls == 0
-
-    result = pointer.point(1, box=[0, 0, 10, 10], compensate=True)
-    assert result.frame_id == 3
-    assert result.candidate.id == 3
-    assert tracker.encode_calls == 1
-
-
-def test_legacy_description_still_grounds_and_revalidates():
-    frames, tracker = _buffer_with_reidentified_target()
-    pointer = GroundingPointer(frames, tracker, _DescriptionGrounder())
-
-    result = pointer.point(1, "blue-shirt person")
-
-    assert result.candidate.id == 3
-    assert result.grounded_box.label == "blue-shirt person"
-
-
-def test_box_rejects_malformed_and_expired_references_clearly():
-    frames, tracker = _buffer_with_reidentified_target()
-    pointer = GroundingPointer(frames, tracker)
-
-    with pytest.raises(ValueError, match="finite"):
-        pointer.point(1, box=[0, 0, float("nan"), 10])
-
-    expired = FrameBuffer(max_seconds=10, max_frames=2)
-    for frame in frames.snapshot()[1:]:
-        expired.append(frame)
-    with pytest.raises(StaleFrameError, match="frame 1 is no longer"):
-        GroundingPointer(expired, tracker).point(1, box=[0, 0, 10, 10])
 
 
 def _wire_candidate(candidate_id: int, bbox: list[float]) -> dict:
@@ -351,11 +254,14 @@ def test_centered_red_distractor_sets_wrong_target_metric():
 def test_decodes_fastmcp_wrapped_json_text_result():
     from mcp.types import CallToolResult, TextContent
 
-    from scripts.latency_sweep import _decode_tool_result, _time_boot_ms
+    from horus.mcp_client import tool_json
+    from scripts.latency_sweep import _time_boot_ms
 
     text = '{"state": "IDLE", "vehicle": {"time_boot_ms": 49050}}'
     response = CallToolResult(content=[TextContent(type="text", text=text)], structuredContent={"result": text})
-    assert _time_boot_ms(_decode_tool_result(response)) == 49050
+    assert _time_boot_ms(tool_json(response)) == 49050
+    wrapped_only = CallToolResult(content=[], structuredContent={"result": text})
+    assert _time_boot_ms(tool_json(wrapped_only)) == 49050
 
 
 
@@ -366,3 +272,37 @@ def test_target_below_image_center_counts_as_centered_for_heading_tracking():
     assert _candidate_centered(frame, 3, 0.10)  # 50 px below centre, horizontally centred
     frame["candidate_table"][0]["bbox"] = [400, 180, 440, 300]
     assert not _candidate_centered(frame, 3, 0.10)  # 100 px right of centre
+
+
+def test_run_client_returns_the_jsonl_file_it_wrote(monkeypatch, tmp_path):
+    import contextlib
+
+    import mcp
+    import mcp.client.streamable_http as streamable_http
+
+    from scripts.latency_sweep import build_parser, run_client
+
+    @contextlib.asynccontextmanager
+    async def fake_transport(url, headers):
+        yield None, None, None
+
+    class FakeSession:
+        def __init__(self, read, write):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def initialize(self):
+            pass
+
+    monkeypatch.setattr(streamable_http, "streamablehttp_client", fake_transport)
+    monkeypatch.setattr(mcp, "ClientSession", FakeSession)
+    args = build_parser().parse_args(["--token", "t", "--output-dir", str(tmp_path), "-n", "0"])
+
+    output = asyncio.run(run_client(args))
+
+    assert output.parent == tmp_path and output.is_file()

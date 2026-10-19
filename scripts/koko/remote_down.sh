@@ -26,16 +26,9 @@ if [[ -f "${started_file}" ]]; then
     printf 'Remote state names unexpected container %s; refusing to stop it.\n' \
       "${recorded_container:-<empty>}" >&2
     status=1
-  elif ssh -T "${HORUS_REMOTE}" bash -s -- \
-    "${HORUS_REMOTE_DIR}" "${recorded_container}" <<'REMOTE_STOP'
+  elif horus_koko_remote_script "${recorded_container}" <<'REMOTE_STOP'
 set -Eeuo pipefail
-remote_dir="$1"
-container="$2"
-if [[ "${remote_dir}" == /* ]]; then
-  project_dir="${remote_dir}"
-else
-  project_dir="${HOME}/${remote_dir}"
-fi
+container="$1"
 if docker container inspect "${container}" >/dev/null 2>&1; then
   cd -- "${project_dir}"
   HORUS_SIM_CONTAINER_NAME="${container}" ./sim/run.sh stop

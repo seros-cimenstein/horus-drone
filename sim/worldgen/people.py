@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .appearance import BODIES, COLOURS, HAIR, TROUSERS, Appearance, garment_texture
 from .png import solid_png
-from .sdf import ACTOR_COLLIDE_BITMASK
+from .sdf import ACTOR_COLLIDE_BITMASK, collide_surface, floats, rgba
 
 MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
 TEMPLATES = MODELS_DIR / "horus_human_textures" / "materials" / "textures"
@@ -172,14 +172,14 @@ def _envelope_collision(envelope: dict[str, float]) -> str:
             envelope["top_z_m"])
     centre = ((envelope["x_max_m"] + envelope["x_min_m"]) / 2, (envelope["y_max_m"] + envelope["y_min_m"]) / 2,
               envelope["top_z_m"] / 2)
-    return _collision("body_envelope", _xyz(*centre), f"<box><size>{_p(*size)}</size></box>")
+    return _collision("body_envelope", _xyz(*centre), f"<box><size>{floats(*size)}</size></box>")
 
 
 def _person_model_sdf(
-    model_name: str, shirt_rgb: tuple[int, int, int], *, lying: bool = False
+    model_name: str, shirt_rgb: tuple[int, int, int], texture_model: str, *, lying: bool = False
 ) -> str:
-    shirt_colour = " ".join(f"{channel / 255:.3f}" for channel in shirt_rgb) + " 1"
-    texture_uri = f"model://{model_name}/materials/textures/tshirt_{model_name}.png"
+    shirt_colour = rgba(shirt_rgb)
+    texture_uri = f"model://{texture_model}/materials/textures/tshirt_{texture_model}.png"
     # The mesh faces its -y axis; standing figures are turned to face +x (the driven heading).
     visual_pose = "0 0.963 0.252 1.5708 0 0" if lying else f"0 0 0.02 0.04 0 {FACING_YAW:.4f}"
     visuals = []
@@ -231,22 +231,19 @@ def _write_mesh_person(
     model_name: str,
     rgb: tuple[int, int, int],
     description: str,
+    texture_model: str,
     *,
     lying: bool = False,
 ) -> None:
+    """Write one kinematic person; ``texture_model`` owns (and writes) its shirt texture."""
     model = model_dir / model_name
-    texture_dir = model / "materials" / "textures"
-    texture_dir.mkdir(parents=True, exist_ok=True)
-    texture_name = f"tshirt_{model_name}.png"
-    for old_texture in texture_dir.glob("tshirt_*.png"):
-        if old_texture.name != texture_name:
-            old_texture.unlink()
-    stale_mesh = model / "meshes" / "standing.dae"
-    if stale_mesh.exists():
-        stale_mesh.unlink()
-    (texture_dir / texture_name).write_bytes(solid_png(rgb))
+    model.mkdir(parents=True, exist_ok=True)
+    if texture_model == model_name:
+        texture_dir = model / "materials" / "textures"
+        texture_dir.mkdir(parents=True, exist_ok=True)
+        (texture_dir / f"tshirt_{model_name}.png").write_bytes(solid_png(rgb))
     (model / "model.sdf").write_text(
-        _person_model_sdf(model_name, rgb, lying=lying), encoding="utf-8"
+        _person_model_sdf(model_name, rgb, texture_model, lying=lying), encoding="utf-8"
     )
     (model / "model.config").write_text(
         _model_config(
@@ -285,25 +282,26 @@ def _write_sitting_person(model_dir: Path) -> None:
 
 
 def write_person_models(model_dir: Path) -> None:
-    """Write outdoor person models using the one shared standing COLLADA mesh."""
-    model_dir = Path(model_dir)
-    for model_name, (rgb, label) in _PERSON_VARIANTS.items():
-        _write_mesh_person(model_dir, model_name, rgb, label)
+    """Write outdoor person models using the one shared standing COLLADA mesh.
 
-    # Outdoor emergency figures retain the former lying mesh placement and
-    # contact geometry while using distinct, Ogre-cache-safe shirt textures.
-    for model_name, rgb, label in (
-        ("person_laying_kinematic", (250, 92, 14), "orange missing hiker"),
-        ("person_collapsed_kinematic", (27, 38, 52), "dark-clothed collapsed person"),
-        ("person_laying_dark_kinematic", (27, 38, 52), "dark-clothed lying person"),
-    ):
-        _write_mesh_person(model_dir, model_name, rgb, label, lying=True)
+    Each shirt colour gets one texture file, owned by the first model of that colour and
+    referenced by the rest; file names stay unique per colour, so Ogre's by-name texture cache
+    never hands one colour's texture to another.
+    """
+    model_dir = Path(model_dir)
+    standing = [(name, rgb, label, False) for name, (rgb, label) in _PERSON_VARIANTS.items()]
+    # Outdoor emergency figures share the lying mesh placement and contact geometry.
+    lying = [
+        ("person_laying_kinematic", (250, 92, 14), "orange missing hiker", True),
+        ("person_collapsed_kinematic", (27, 38, 52), "dark-clothed collapsed person", True),
+        ("person_laying_dark_kinematic", (27, 38, 52), "dark-clothed lying person", True),
+    ]
+    texture_owner: dict[tuple[int, int, int], str] = {}
+    for model_name, rgb, label, is_lying in standing + lying:
+        owner = texture_owner.setdefault(rgb, model_name)
+        _write_mesh_person(model_dir, model_name, rgb, label, owner, lying=is_lying)
 
     _write_sitting_person(model_dir)
-
-
-def _unit_rgb(rgb: tuple[float, ...], scale: float = 255.0) -> str:
-    return " ".join(f"{min(1.0, value / scale):.3f}" for value in rgb) + " 1"
 
 
 def _textured(texture_uri: str | None, tint: str) -> str:
@@ -313,25 +311,17 @@ def _textured(texture_uri: str | None, tint: str) -> str:
 
 
 def _flat(rgb: tuple[int, int, int]) -> str:
-    colour = _unit_rgb(rgb)
+    colour = rgba(rgb)
     return f"<material><ambient>{colour}</ambient><diffuse>{colour}</diffuse></material>"
 
 
-def _surface() -> str:
-    return (f"<surface><contact><collide_bitmask>{ACTOR_COLLIDE_BITMASK:#06x}</collide_bitmask>"
-            "</contact></surface>")
-
-
 def _collision(name: str, pose: str, geometry: str) -> str:
-    return f'<collision name="{name}"><pose>{pose}</pose><geometry>{geometry}</geometry>{_surface()}</collision>'
-
-
-def _p(*values: float) -> str:
-    return " ".join(f"{value:.4f}".rstrip("0").rstrip(".") or "0" for value in values)
+    return (f'<collision name="{name}"><pose>{pose}</pose><geometry>{geometry}</geometry>'
+            f"{collide_surface(ACTOR_COLLIDE_BITMASK)}</collision>")
 
 
 def _xyz(x: float, y: float, z: float) -> str:
-    return _p(x, y, z, 0, 0, 0)
+    return floats(x, y, z, 0, 0, 0)
 
 
 def _body_materials(asset: str, appearance: Appearance, textures: bool) -> dict[str, str | None]:
@@ -341,14 +331,14 @@ def _body_materials(asset: str, appearance: Appearance, textures: bool) -> dict[
                  else f"{DERIVED_TEXTURES}/female_hair_neutral.png")
     garment_uri = f"model://{asset}/materials/textures/garment_{asset}.png"
     trousers = TROUSERS[appearance.trousers]
-    skin = _unit_rgb(appearance.skin_multiplier, 1.0)
+    skin = rgba(appearance.skin_multiplier, 1.0)
     return {
         "skin": _textured(skin_base, skin),
-        "hair": None if appearance.hair is None else _textured(hair_base, _unit_rgb(HAIR[appearance.hair])),
+        "hair": None if appearance.hair is None else _textured(hair_base, rgba(HAIR[appearance.hair])),
         # Male trousers are a separate mesh with a neutral denim base; the female outfit atlas
         # carries the trousers inside the generated garment texture.
         "trousers": _textured(f"{DERIVED_TEXTURES}/male_denim_neutral.png" if textures else None,
-                              _unit_rgb(trousers)),
+                              rgba(trousers)),
         "garment": (_textured(garment_uri, "1 1 1 1") if textures
                     else _flat(appearance.top.rgb(0))),
     }
@@ -363,19 +353,19 @@ def _accessories(appearance: Appearance, height: float, width: float, *, lying: 
         rgb = COLOURS[colour_name][0]
         if kind == "backpack":
             x = BODIES[appearance.body]["forward_m"][0] * width - 0.09
-            geometry = f"<box><size>{_p(0.18, 0.32 * width, 0.42 * height / 1.8)}</size></box>"
-            pose = _p(x, 0, height * 0.66, 0, 0, 0)
+            geometry = f"<box><size>{floats(0.18, 0.32 * width, 0.42 * height / 1.8)}</size></box>"
+            pose = floats(x, 0, height * 0.66, 0, 0, 0)
             parts.append(f'<visual name="acc_{index}_backpack"><pose>{pose}</pose><geometry>{geometry}</geometry>{_flat(rgb)}</visual>')
         elif kind == "cap":
-            parts.append(f'<visual name="acc_{index}_cap"><pose>{_p(head_x, 0, height - 0.05, 0, 0, 0)}</pose>'
-                         f"<geometry><cylinder><radius>{_p(0.105 * width)}</radius><length>0.09</length></cylinder></geometry>{_flat(rgb)}</visual>")
-            parts.append(f'<visual name="acc_{index}_cap_peak"><pose>{_p(head_x + 0.12 * width, 0, height - 0.085, 0, 0, 0)}</pose>'
-                         f"<geometry><box><size>{_p(0.1, 0.16 * width, 0.015)}</size></box></geometry>{_flat(rgb)}</visual>")
+            parts.append(f'<visual name="acc_{index}_cap"><pose>{floats(head_x, 0, height - 0.05, 0, 0, 0)}</pose>'
+                         f"<geometry><cylinder><radius>{floats(0.105 * width)}</radius><length>0.09</length></cylinder></geometry>{_flat(rgb)}</visual>")
+            parts.append(f'<visual name="acc_{index}_cap_peak"><pose>{floats(head_x + 0.12 * width, 0, height - 0.085, 0, 0, 0)}</pose>'
+                         f"<geometry><box><size>{floats(0.1, 0.16 * width, 0.015)}</size></box></geometry>{_flat(rgb)}</visual>")
         elif kind == "sun_hat":
-            parts.append(f'<visual name="acc_{index}_hat_brim"><pose>{_p(head_x, 0, height - 0.07, 0, 0, 0)}</pose>'
-                         f"<geometry><cylinder><radius>{_p(0.22 * width)}</radius><length>0.015</length></cylinder></geometry>{_flat(rgb)}</visual>")
-            parts.append(f'<visual name="acc_{index}_hat_crown"><pose>{_p(head_x, 0, height - 0.01, 0, 0, 0)}</pose>'
-                         f"<geometry><cylinder><radius>{_p(0.11 * width)}</radius><length>0.11</length></cylinder></geometry>{_flat(rgb)}</visual>")
+            parts.append(f'<visual name="acc_{index}_hat_brim"><pose>{floats(head_x, 0, height - 0.07, 0, 0, 0)}</pose>'
+                         f"<geometry><cylinder><radius>{floats(0.22 * width)}</radius><length>0.015</length></cylinder></geometry>{_flat(rgb)}</visual>")
+            parts.append(f'<visual name="acc_{index}_hat_crown"><pose>{floats(head_x, 0, height - 0.01, 0, 0, 0)}</pose>'
+                         f"<geometry><cylinder><radius>{floats(0.11 * width)}</radius><length>0.11</length></cylinder></geometry>{_flat(rgb)}</visual>")
         else:
             raise ValueError(f"unknown accessory {kind!r}")
     return "".join(parts)
@@ -385,9 +375,9 @@ def _sitting_model(appearance: Appearance) -> str:
     """The seated actor visual: the measured ``person_sitting_a`` mesh, facing +x, scaled."""
     s, w = appearance.stature_scale, appearance.width_scale
     scale = (SITTING_MESH_SCALE * w, SITTING_MESH_SCALE * w, SITTING_MESH_SCALE * s)
-    return (f'<visual name="sitting"><pose>{_p(0, 0, SITTING_MESH_LIFT_M * s, 0, 0, FACING_YAW)}</pose>'
+    return (f'<visual name="sitting"><pose>{floats(0, 0, SITTING_MESH_LIFT_M * s, 0, 0, FACING_YAW)}</pose>'
             f"<geometry><mesh><uri>{SITTING_MESH}</uri>"
-            f"<scale>{_p(*scale)}</scale></mesh></geometry></visual>")
+            f"<scale>{floats(*scale)}</scale></mesh></geometry></visual>")
 
 
 def actor_model_files(asset: str, appearance: Appearance, posture: str, *,
@@ -406,7 +396,7 @@ def actor_model_files(asset: str, appearance: Appearance, posture: str, *,
     size_y = envelope["y_max_m"] - envelope["y_min_m"]
     centre_x = (envelope["x_max_m"] + envelope["x_min_m"]) / 2
     envelope_box = _collision("body_envelope", _xyz(centre_x, 0, envelope["top_z_m"] / 2),
-                              f"<box><size>{_p(size_x, size_y, envelope['top_z_m'])}</size></box>")
+                              f"<box><size>{floats(size_x, size_y, envelope['top_z_m'])}</size></box>")
     if posture == "sitting":
         body = envelope_box + _sitting_model(appearance)
         mass, inertia = 75, (7, 7, 7)
@@ -417,9 +407,9 @@ def actor_model_files(asset: str, appearance: Appearance, posture: str, *,
         mesh = SHARED_STANDING_MESH if appearance.body == "male_a" else FEMALE_MESH
         if lying:
             # Roll the upright mesh face-down along -y; lift it by its front depth.
-            visual_pose = _p(0, 0.5 * height, base["forward_m"][1] * w, math.pi / 2, 0, 0)
+            visual_pose = floats(0, 0.5 * height, base["forward_m"][1] * w, math.pi / 2, 0, 0)
         else:
-            visual_pose = _p(0, 0, 0.02, 0.04, 0, FACING_YAW)
+            visual_pose = floats(0, 0, 0.02, 0.04, 0, FACING_YAW)
         visuals = []
         for index, (submesh, role) in enumerate(BODY_SUBMESHES[appearance.body]):
             material = "" if role is None else materials[role]
@@ -427,7 +417,7 @@ def actor_model_files(asset: str, appearance: Appearance, posture: str, *,
                 continue  # bald
             visuals.append(
                 f'<visual name="mesh_{index}"><pose>{visual_pose}</pose><geometry><mesh>'
-                f"<uri>{mesh}</uri><scale>{_p(w, w, s)}</scale>"
+                f"<uri>{mesh}</uri><scale>{floats(w, w, s)}</scale>"
                 f"<submesh><name>{submesh}</name><center>false</center></submesh>"
                 f"</mesh></geometry>{material or ''}</visual>")
         body = envelope_box + "".join(visuals) + _accessories(appearance, height, w, lying=lying)

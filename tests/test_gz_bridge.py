@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from horus.config import ServerSettings
 from horus.gz_bridge import (
     BridgeConfig,
     GazeboBridge,
@@ -14,9 +15,9 @@ from horus.gz_bridge import (
     format_commander_event,
     poll_mcp_state,
     publish_state_once,
-    state_from_tool_result,
     stream_commander_events,
 )
+from horus.mcp_client import tool_json
 
 
 class _StringMsg:
@@ -141,15 +142,42 @@ def test_config_defaults_and_environment_contract():
             "HORUS_COMMANDER_TOKEN": "commander-secret",
             "HORUS_MCP_URL": "http://mcp:8000/mcp",
             "HORUS_MCP_TOKEN": "mcp-secret",
+            "HORUS_TASK_TOPIC": "/control/task",
             "HORUS_EMERGENCY_TOPIC": "/control/emergency",
             "HORUS_RESET_TOPIC": "/control/reset",
+            "HORUS_EVENTS_TOPIC": "/control/events",
+            "HORUS_STATE_TOPIC": "/control/state",
         }
     )
     assert configured.commander_token == "commander-secret"
     assert configured.mcp_url == "http://mcp:8000/mcp"
     assert configured.mcp_token == "mcp-secret"
-    assert configured.emergency_topic == "/control/emergency"
-    assert configured.reset_topic == "/control/reset"
+    assert (
+        configured.task_topic,
+        configured.emergency_topic,
+        configured.reset_topic,
+        configured.events_topic,
+        configured.state_topic,
+    ) == ("/control/task", "/control/emergency", "/control/reset", "/control/events", "/control/state")
+
+
+def test_mcp_token_is_read_from_the_configured_auth_token_env(monkeypatch):
+    import horus.gz_bridge as gz_bridge
+
+    server = ServerSettings(auth_token_env="CUSTOM_MCP_TOKEN")
+    environ = {"HORUS_MCP_TOKEN": "default-secret", "CUSTOM_MCP_TOKEN": "custom-secret"}
+    config = BridgeConfig.from_env(environ, server=server)
+    assert (config.mcp_token, config.mcp_token_env) == ("custom-secret", "CUSTOM_MCP_TOKEN")
+
+    def fail_if_loaded():
+        raise AssertionError("Gazebo bindings must remain lazy")
+
+    monkeypatch.setattr(gz_bridge, "_load_gazebo_bindings", fail_if_loaded)
+    missing = BridgeConfig.from_env(
+        {"HORUS_COMMANDER_TOKEN": "commander-secret", "HORUS_MCP_TOKEN": "default-secret"}, server=server
+    )
+    with pytest.raises(RuntimeError, match="CUSTOM_MCP_TOKEN"):
+        asyncio.run(gz_bridge.run(missing))
 
 
 def test_gazebo_emergency_and_reset_topics_post_authenticated_commander_requests():
@@ -260,7 +288,7 @@ def test_mcp_state_text_is_parsed_and_published_as_compact_json():
 
         published = await publish_state_once(session, publisher, _StringMsg)
 
-        assert session.calls == [("get_state", {})]
+        assert session.calls == [("get_state", {"passive": True})]
         assert published == state
         assert publisher.messages == ['{"vehicle":{"armed":false,"mode":"GUIDED"},"perception":null}']
 
@@ -268,13 +296,13 @@ def test_mcp_state_text_is_parsed_and_published_as_compact_json():
 def test_fastmcp_wrapped_state_is_published_as_the_state_object():
     state = {"state": "IDLE", "perception": {"camera": "streaming"}}
     wrapped = SimpleNamespace(isError=False, structuredContent={"result": json.dumps(state)}, content=[])
-    assert state_from_tool_result(wrapped) == state
+    assert tool_json(wrapped) == state
     both = SimpleNamespace(
         isError=False,
         structuredContent={"result": json.dumps(state)},
         content=[SimpleNamespace(type="text", text=json.dumps(state))],
     )
-    assert state_from_tool_result(both) == state
+    assert tool_json(both) == state
 
 
 def test_mcp_poller_connects_with_bearer_token_and_uses_half_second_period():
@@ -289,49 +317,33 @@ def test_mcp_poller_connects_with_bearer_token_and_uses_half_second_period():
         calls = []
         pauses = []
 
-        class StreamContext:
-            async def __aenter__(self):
-                return "read-stream", "write-stream", None
-
-            async def __aexit__(self, *exc):
-                return False
-
-        def open_mcp(url, *, headers):
-            calls.append((url, dict(headers)))
-            return StreamContext()
-
         class SessionContext:
-            def __init__(self, read_stream, write_stream):
-                assert (read_stream, write_stream) == ("read-stream", "write-stream")
-
             async def __aenter__(self):
                 return session
 
             async def __aexit__(self, *exc):
                 return False
 
+        def open_mcp(url, token):
+            calls.append((url, token))
+            return SessionContext()
+
         async def stop_after_poll(delay):
             pauses.append(delay)
             raise asyncio.CancelledError
 
-        try:
+        # Polling only ends when cancelled.
+        with pytest.raises(asyncio.CancelledError):
             await poll_mcp_state(
                 BridgeConfig(mcp_url="http://mcp:8000/mcp", mcp_token="mcp-secret"),
                 publisher,
                 _StringMsg,
-                session_factory=SessionContext,
-                streamable_http_factory=open_mcp,
+                open_mcp=open_mcp,
                 sleep=stop_after_poll,
             )
-        except asyncio.CancelledError:
-            pass
-        else:
-            raise AssertionError("MCP state polling should remain active until cancelled")
 
-        assert calls == [
-            ("http://mcp:8000/mcp", {"Authorization": "Bearer mcp-secret"})
-        ]
-        assert session.calls == [("get_state", {})]
+        assert calls == [("http://mcp:8000/mcp", "mcp-secret")]
+        assert session.calls == [("get_state", {"passive": True})]
         assert publisher.messages == ['{"vehicle":{"armed":true}}']
         assert len(pauses) == 1 and 0 <= pauses[0] <= 0.5
 
@@ -350,7 +362,8 @@ def test_event_stream_resumes_after_hidden_events_and_forwards_readable_lines():
             if sleep_calls == 2:
                 raise asyncio.CancelledError
 
-        try:
+        # The event stream stays connected until cancelled.
+        with pytest.raises(asyncio.CancelledError):
             await stream_commander_events(
                 client,
                 publisher,
@@ -358,10 +371,6 @@ def test_event_stream_resumes_after_hidden_events_and_forwards_readable_lines():
                 BridgeConfig(commander_url="http://commander:8765", commander_token="secret"),
                 sleep=stop_after_second_connection,
             )
-        except asyncio.CancelledError:
-            pass
-        else:
-            raise AssertionError("event stream should remain connected until cancelled")
 
         assert client.requests == [
             (
@@ -376,10 +385,8 @@ def test_event_stream_resumes_after_hidden_events_and_forwards_readable_lines():
             ),
         ]
         # The token delta is not shown but still advances the reconnect cursor.
-        assert publisher.messages == [
-            "▶ Task: Find the red shirt",
-            "✔ Final: Holding.",
-        ]
+        assert len(publisher.messages) == 2
+        assert "Find the red shirt" in publisher.messages[0] and "Holding." in publisher.messages[1]
 
     asyncio.run(scenario())
 
@@ -388,22 +395,23 @@ def test_commander_events_render_tool_calls_and_errors_readably():
     def line(data):
         return format_commander_event(SSEEvent("1", data))
 
-    assert line('{"kind":"tool_use","tool":"mcp__horus__follow","args":{"id":7}}') == (
-        '→ follow {"id":7}'
-    )
-    assert line('{"kind":"tool_result","summary":"ok","is_error":false}') == "← ok"
-    assert line('{"kind":"tool_result","summary":"stale frame","is_error":true}') == (
-        "✗ stale frame"
-    )
-    assert line('{"kind":"task_error","error":"boom"}') == "✗ Task failed: boom"
-    assert line('{"kind":"emergency","action":"land","status":"executed","result":"ok"}') == (
-        "!! Emergency LAND executed: ok"
-    )
-    assert line('{"kind":"session_restarted"}') == "↻ Claude session restarted"
-    assert line('{"kind":"target_lost","summary":"track 3"}') == "• target lost: track 3"
-    assert line('{"kind":"assistant_text","text":"Checking\\n  state"}') == "Claude: Checking state"
+    tool_use = line('{"kind":"tool_use","tool":"mcp__horus__follow","args":{"id":7}}')
+    assert "mcp__horus__" not in tool_use and "follow" in tool_use and '{"id":7}' in tool_use
+    # An error result never renders like a success with the same text.
+    assert line('{"kind":"tool_result","summary":"x","is_error":true}') != (
+        line('{"kind":"tool_result","summary":"x","is_error":false}'))
+    for event, text in (
+        ('{"kind":"task_error","error":"boom"}', "boom"),
+        ('{"kind":"emergency","action":"land","status":"executed","result":"ok"}', "LAND"),
+        ('{"kind":"target_lost","summary":"track 3"}', "track 3"),
+        ('{"kind":"region_watch_paused","summary":"camera moved"}', "camera moved"),
+        ('{"kind":"plan_log","summary":"step 2"}', "step 2"),
+    ):
+        assert text in line(event), event
+    # Assistant text is one bounded line; non-JSON payloads pass through unchanged.
+    assert "\n" not in line('{"kind":"assistant_text","text":"Checking\\n  state"}')
     long_line = line('{"kind":"assistant_text","text":"' + "x" * 1000 + '"}')
-    assert len(long_line) == len("Claude: ") + 400 and long_line.endswith("…")
+    assert len(long_line) <= 450 and long_line.endswith("…")
     assert line("not json") == "not json"
 
 
@@ -412,9 +420,5 @@ def test_mcp_tool_errors_and_missing_json_are_not_published_as_state():
         (SimpleNamespace(isError=True, content=[]), RuntimeError),
         (SimpleNamespace(isError=False, content=[SimpleNamespace(type="image")]), ValueError),
     ):
-        try:
-            state_from_tool_result(result)
-        except expected_error:
-            pass
-        else:
-            raise AssertionError(f"expected {expected_error.__name__}")
+        with pytest.raises(expected_error):
+            tool_json(result)

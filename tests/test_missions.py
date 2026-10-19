@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from horus.repl.app import _select_candidate, _write_reacquisition_result, run_mission
+from horus.repl.missions import _select_candidate, _write_reacquisition_result, run_mission
 
 
 class _TextCommander:
@@ -25,7 +25,7 @@ class _TextCommander:
         self.instances.append(self)
 
     async def run(self):
-        await self.stopped.wait()
+        await asyncio.wait_for(self.stopped.wait(), timeout=5)
 
     async def submit_task(self, text):
         self.tasks.append(text)
@@ -40,7 +40,7 @@ class TestCommanderMissions:
         _TextCommander.instances.clear()
         output = io.StringIO()
         mission = Path(__file__).parents[1] / "missions" / "S6_find_red_shirt.yaml"
-        with patch("horus.repl.app.HorusCommander", _TextCommander):
+        with patch("horus.repl.missions.HorusCommander", _TextCommander):
             with redirect_stdout(output):
                 asyncio.run(
                     run_mission(
@@ -99,7 +99,7 @@ class TestCommanderMissions:
                 return {"candidate_table": candidates}
             if name == "follow":
                 return {"task_id": "follow-1"}
-            if name == "get_task_status":
+            if name == "wait_for_task":
                 return terminal
             raise AssertionError(f"unexpected tool {name}")
 
@@ -121,11 +121,11 @@ class TestCommanderMissions:
             arguments["config"] = config
             return _write_reacquisition_result(**arguments)
 
-        with patch("horus.repl.app.asyncio.create_subprocess_exec", start_driver):
-            with patch("horus.repl.app._tool_call", call_tool):
-                with patch("horus.repl.app.asyncio.sleep", sleep):
+        with patch("horus.repl.missions.asyncio.create_subprocess_exec", start_driver):
+            with patch("horus.repl.missions.call_json", call_tool):
+                with patch("horus.repl.missions.asyncio.sleep", sleep):
                     with patch(
-                        "horus.repl.app._write_reacquisition_result",
+                        "horus.repl.missions._write_reacquisition_result",
                         side_effect=write_result,
                     ):
                         asyncio.run(run_mission(session=object(), path=mission))
@@ -136,7 +136,7 @@ class TestCommanderMissions:
             "list_candidates",
             "<driver>",
             "follow",
-            "get_task_status",
+            "wait_for_task",
         ]
         start_driver.assert_awaited_once_with(
             sys.executable,
@@ -209,8 +209,8 @@ class TestCommanderMissions:
 
         call_tool = AsyncMock(side_effect=tool_call)
         sleep = AsyncMock()
-        with patch("horus.repl.app._tool_call", call_tool):
-            with patch("horus.repl.app.asyncio.sleep", sleep):
+        with patch("horus.repl.missions.call_json", call_tool):
+            with patch("horus.repl.missions.asyncio.sleep", sleep):
                 with redirect_stdout(io.StringIO()):
                     asyncio.run(run_mission(session=object(), path=mission))
 
@@ -252,7 +252,7 @@ class TestCommanderMissions:
             raise AssertionError(f"unexpected tool {name}")
 
         call_tool = AsyncMock(side_effect=tool_call)
-        with patch("horus.repl.app._tool_call", call_tool):
+        with patch("horus.repl.missions.call_json", call_tool):
             with redirect_stdout(io.StringIO()):
                 with pytest.raises(TimeoutError) as exc_info:
                     asyncio.run(run_mission(session=object(), path=mission))
@@ -277,8 +277,8 @@ class TestCommanderMissions:
         )
         call_tool = AsyncMock(return_value={"candidate_table": []})
         sleep = AsyncMock()
-        with patch("horus.repl.app._tool_call", call_tool):
-            with patch("horus.repl.app.asyncio.sleep", sleep):
+        with patch("horus.repl.missions.call_json", call_tool):
+            with patch("horus.repl.missions.asyncio.sleep", sleep):
                 with redirect_stdout(io.StringIO()):
                     with pytest.raises(RuntimeError, match="no candidate matched"):
                         asyncio.run(run_mission(session=object(), path=mission))
@@ -303,7 +303,7 @@ class TestCommanderMissions:
             encoding="utf-8",
         )
         call_tool = AsyncMock(return_value={"candidate_table": []})
-        with patch("horus.repl.app._tool_call", call_tool):
+        with patch("horus.repl.missions.call_json", call_tool):
             with redirect_stdout(io.StringIO()):
                 with pytest.raises(
                     ValueError, match="timeout_s must be a finite positive number"
@@ -347,7 +347,7 @@ class TestMissionDriverArgs:
 
         process = BackgroundDriver()
         launch = AsyncMock(return_value=process)
-        with patch("horus.repl.app.asyncio.create_subprocess_exec", launch):
+        with patch("horus.repl.missions.asyncio.create_subprocess_exec", launch):
             asyncio.run(run_mission(session=object(), path=mission))
 
         launch.assert_awaited_once_with(

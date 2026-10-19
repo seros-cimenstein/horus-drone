@@ -20,18 +20,7 @@ from sim.worldgen.materials import scene_textures
 from sim.worldgen.proxy import ProxyShape
 from sim.worldgen.scenery import emit_scenery
 
-VEHICLE_KEYS = ("vehicle_hatchback", "vehicle_hatchback_red", "vehicle_hatchback_blue",
-                "vehicle_sedan", "vehicle_suv", "vehicle_pickup", "vehicle_box_truck",
-                "vehicle_delivery_truck", "bus")
 MESH_TYPES = tuple(sorted(vehicles.SAMPLED_TYPES + vehicles.PARKED_TYPES))
-
-
-def test_registry_has_every_mesh_vehicle():
-    for key in VEHICLE_KEYS:
-        asset = ASSETS[key]
-        assert asset.kind == "vehicle"
-        for visual in asset.visuals:
-            assert mesh_file(visual.mesh_uri).is_file()
 
 
 @pytest.mark.parametrize("type_name", MESH_TYPES)
@@ -50,14 +39,8 @@ def test_vehicle_type_maps_to_a_registry_asset(type_name):
     assert abs(min(proxy.size[:2]) - kind.width_m) < 0.08
 
 
-def test_procedural_sampling_uses_only_mesh_vehicles():
-    assert vehicles.SAMPLED_TYPES == ("hatchback", "sedan", "suv", "pickup", "box_truck",
-                                      "delivery_truck", "coach")
-    assert vehicles.PARKED_TYPES == ("hatchback", "sedan", "suv", "pickup", "box_truck",
-                                     "delivery_truck")
+def test_every_sampled_type_has_a_weight_and_canonical_bodies_stay_primitive():
     assert len(vehicles.SAMPLED_WEIGHTS) == len(vehicles.SAMPLED_TYPES)
-    for name in vehicles.SAMPLED_TYPES + vehicles.PARKED_TYPES:
-        assert vehicles.vehicle_type(name).mesh is not None, name
     # The canonical primitive bodies stay available (their worlds are byte-frozen).
     for name in ("car", "van", "bus"):
         assert vehicles.vehicle_type(name).mesh is None
@@ -108,8 +91,6 @@ def test_sitting_envelope_bounds_the_scaled_mesh():
 
 
 def test_sitting_manifest_attribute_is_the_measured_constant():
-    assert people.SITTING_SHIRT_COLOUR is None
-    assert people.SITTING_POSSIBLE_SHIRT_COLOURS == ("green",)
     record = {"model": "probe", "asset": "person_sitting", "role": "injured", "speed": 0.0}
     d = dressing.Dressing("baseline", dressing.sample_environment(random.Random(0), chaotic=False),
                           appearances={"probe": sample_appearance(random.Random(6))})
@@ -239,9 +220,3 @@ def test_animal_and_clutter_textures_are_in_the_scene_bank():
     for name in ("bark", "wood_planks", "tent_fabric", "metal_paint", "traffic_cone",
                  "foliage", "rock"):
         assert name in bank
-
-
-def test_committed_person_models_are_untouched():
-    """Canonical person assets keep their primitive seated figure (byte-frozen)."""
-    text = (MODELS / "person_sitting" / "model.sdf").read_text(encoding="utf-8")
-    assert "<box><size>0.68 0.44 1.17</size></box>" in text

@@ -1,53 +1,6 @@
-flight:
-  connection: tcp:127.0.0.1:5760
-  baud: 115200
-  heartbeat_timeout_s: 30.0
-  source_system: 255
-  source_component: 190
-  gps_free_mode: false
-  global_origin_latitude_deg: -35.363262
-  global_origin_longitude_deg: 149.165237
-  global_origin_altitude_m: 584.0
+# S3 fixture: the default 8 m circular geofence (no polygon) and the Anthropic API commander.
 executor:
-  control_hz: 15.0
-  command_ttl_s: 30.0
-  max_speed_m_s: 1.0
-  max_vertical_speed_m_s: 0.5
-  max_distance_m: 8.0
-  min_altitude_m: 0.5
-  max_altitude_m: 5.0
   geofence_radius_m: 8.0
-  geofence_margin_m: 0.0
-  arrival_tolerance_m: 0.25
-  follow_distance_m: 2.0
-  target_width_m: null
-  # Monocular range from box height. The simulated people (MakeHuman mesh) are 1.90 m tall;
-  # real deployments should use the expected person height (~1.7 m).
   target_height_m: 1.9
-  target_match_threshold: 0.72
-  camera_horizontal_fov_deg: 114.59155902616465
-  link_loss_rth_delay_s: 30.0
-perception:
-  enabled: true
-  point_compensation_enabled: true
-  source: udp://0.0.0.0:5600
-  detector_model: models/yolov8n.onnx
-  embedding_model: models/osnet_x0_25_msmt17.onnx
-  grounder_url: http://127.0.0.1:8100
-  max_fps: 5.0
-  open_vocab_hz: 0.5
-  vocabulary: []
-  onnx_intra_op_num_threads: 2
-  onnx_inter_op_num_threads: 1
-  ring_buffer_s: 5.0
-  render_width_px: 640
-server:
-  host: 127.0.0.1
-  port: 8000
-  auth_token_env: HORUS_MCP_TOKEN
 commander:
   provider: anthropic
-  model: claude-3-5-sonnet-latest
-  base_url: null
-  api_key_env: ANTHROPIC_API_KEY
-  max_tokens: 800

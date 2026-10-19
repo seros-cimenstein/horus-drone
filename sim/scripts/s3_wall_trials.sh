@@ -6,25 +6,13 @@
 # Usage: sim/scripts/s3_wall_trials.sh [TRIALS] (default 3). Results: sim/logs/s3/.
 set -Eeuo pipefail
 trials="${1:-3}"
-project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd -- "${project_dir}"
-remote="${HORUS_REMOTE:-koko}"
-remote_dir="${HORUS_REMOTE_DIR:-horus}"
-container="${HORUS_REMOTE_SIM_CONTAINER_NAME:-horus-sim}"
-horus_bin="${HORUS_HOST_VENV:-${project_dir}/.venv-host}/bin"
-token_file="${XDG_RUNTIME_DIR:-/tmp}/horus-$(id -u)/${remote}/mcp-token"
+source "$(dirname -- "${BASH_SOURCE[0]}")/trial_lib.sh"
 out_dir="sim/logs/s3"
 mkdir -p "${out_dir}"
-export HORUS_MCP_URL="http://127.0.0.1:${HORUS_MCP_LOCAL_PORT:-8000}/mcp"
-stop_remote() { bash scripts/koko/remote_down.sh >/dev/null 2>&1 || true; }
-trap stop_remote EXIT
 
 for ((i = 1; i <= trials; i++)); do
-  HORUS_REMOTE_CONFIG=/horus/config/horus_s3.yaml bash scripts/koko/remote_up.sh > "${out_dir}/trial${i}_remote_up.log" 2>&1
-  HORUS_MCP_TOKEN="$(cat "${token_file}")"
-  export HORUS_MCP_TOKEN
-  ssh "${remote}" docker exec --detach "${container}" /opt/horus-venv/bin/python \
-    /horus/sim/scripts/gt_trace.py "/horus/sim/logs/s3_trial${i}_gt.jsonl" --rate-hz 10
+  HORUS_REMOTE_CONFIG=/horus/config/horus_s3.yaml trial_remote_up "${out_dir}/trial${i}_remote_up.log"
+  trial_gt_start "s3_trial${i}_gt.jsonl" --rate-hz 10
   sleep 10
   "${horus_bin}/horus-mcp-call" take_off --args '{"altitude_m": 1.5, "heading_deg": 90.0, "ttl_s": 90}' > "${out_dir}/trial${i}.log"
   sleep 35
@@ -33,8 +21,7 @@ for ((i = 1; i <= trials; i++)); do
   "${horus_bin}/horus-mcp-call" get_state > "${out_dir}/trial${i}_state.json"
   "${horus_bin}/horus-mcp-call" rth >> "${out_dir}/trial${i}.log" || true
   sleep 30
-  ssh "${remote}" "docker exec ${container} pkill -INT -f gt_trace.py; sleep 1"
-  scp -q "${remote}:${remote_dir}/sim/logs/s3_trial${i}_gt.jsonl" "${out_dir}/trial${i}_gt.jsonl"
+  trial_gt_stop "s3_trial${i}_gt.jsonl" "${out_dir}/trial${i}_gt.jsonl"
   bash scripts/koko/remote_down.sh > /dev/null 2>&1
 done
 

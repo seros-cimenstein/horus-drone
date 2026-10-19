@@ -42,6 +42,7 @@ class FakeVisual:
     double_sided: bool = False
     metalness: float = 0.0
     roughness: float = 0.8
+    cast_shadows: bool = True
 
 
 @dataclass(frozen=True)

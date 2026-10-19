@@ -1,0 +1,8 @@
+# Indoor room (horus_indoor): loaded after common.parm.
+
+# The mount holds its MAVLink-targeted angle.
+MNT1_DEFLT_MODE 2
+
+# Indoor return altitude (m): RTL returns at max(2 m, current altitude) instead of the 15 m default,
+# staying below the 2.5 m room walls.
+RTL_ALT_M 2

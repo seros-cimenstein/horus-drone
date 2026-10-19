@@ -7,7 +7,7 @@ from typing import Sequence
 
 from sim.worldgen.png import png_rgb, solid_png
 from sim.worldgen.layout import distance_to_path
-from sim.worldgen.sdf import TERRAIN_COLLIDE_BITMASK, f
+from sim.worldgen.sdf import TERRAIN_COLLIDE_BITMASK, collide_surface, f
 from sim.worldgen.surface import CANONICAL_MAP, MapSpec
 
 
@@ -163,7 +163,7 @@ def terrain_model_files(rows: Sequence[Sequence[float]], seed: int, model_name: 
         f"models/{model_name}/meshes/terrain.dae": terrain_dae(rows, map_spec, uv_tile_m=uv_tile_m),
         f"models/{model_name}/model.sdf": f'''<?xml version="1.0"?>
 <sdf version="1.9"><model name="{model_name}"><static>true</static><link name="ground">
-  <collision name="terrain_collision"><geometry><mesh><uri>model://{model_name}/meshes/terrain.dae</uri></mesh></geometry><surface><contact><collide_bitmask>{TERRAIN_COLLIDE_BITMASK:#06x}</collide_bitmask></contact></surface></collision>
+  <collision name="terrain_collision"><geometry><mesh><uri>model://{model_name}/meshes/terrain.dae</uri></mesh></geometry>{collide_surface(TERRAIN_COLLIDE_BITMASK)}</collision>
   <visual name="terrain_visual"><geometry><mesh><uri>model://{model_name}/meshes/terrain.dae</uri></mesh></geometry></visual>
 </link></model></sdf>
 ''',

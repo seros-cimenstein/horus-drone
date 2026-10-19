@@ -27,16 +27,102 @@
                 <pose>0 0 0.02 0.04 0 0</pose>
                 <geometry>
                     <mesh>
-                        <uri>model://person_standing/meshes/standing.dae</uri>
+                        <uri>model://person_blue/meshes/standing.dae</uri>
                     </mesh>
                 </geometry>
             </collision>
-            <!-- Own DAE copy so the mesh loads this model's green tshirt02_texture.png. -->
-            <visual name="visual">
+            <!-- Shared standing mesh, one visual per submesh; only the T-shirt submesh overrides its material with this model's tshirt_green.png (the other submeshes keep the mesh's own textures). -->
+            <visual name="mesh_0">
                 <pose>0 0 0.02 0.04 0 0</pose>
                 <geometry>
                     <mesh>
-                        <uri>model://person_green/meshes/standing.dae</uri>
+                        <uri>model://person_blue/meshes/standing.dae</uri>
+                        <submesh>
+                            <name>v2_Body</name>
+                            <center>false</center>
+                        </submesh>
+                    </mesh>
+                </geometry>
+            </visual>
+            <visual name="mesh_1">
+                <pose>0 0 0.02 0.04 0 0</pose>
+                <geometry>
+                    <mesh>
+                        <uri>model://person_blue/meshes/standing.dae</uri>
+                        <submesh>
+                            <name>v2_jeans01</name>
+                            <center>false</center>
+                        </submesh>
+                    </mesh>
+                </geometry>
+            </visual>
+            <visual name="mesh_2">
+                <pose>0 0 0.02 0.04 0 0</pose>
+                <geometry>
+                    <mesh>
+                        <uri>model://person_blue/meshes/standing.dae</uri>
+                        <submesh>
+                            <name>v2_tshirt02</name>
+                            <center>false</center>
+                        </submesh>
+                    </mesh>
+                </geometry>
+                <material>
+                    <ambient>1 1 1 1</ambient>
+                    <diffuse>1 1 1 1</diffuse>
+                    <pbr>
+                        <metal>
+                            <metalness>0.0</metalness>
+                            <albedo_map>model://person_green/materials/textures/tshirt_green.png</albedo_map>
+                        </metal>
+                    </pbr>
+                </material>
+            </visual>
+            <visual name="mesh_3">
+                <pose>0 0 0.02 0.04 0 0</pose>
+                <geometry>
+                    <mesh>
+                        <uri>model://person_blue/meshes/standing.dae</uri>
+                        <submesh>
+                            <name>v2_mhair02</name>
+                            <center>false</center>
+                        </submesh>
+                    </mesh>
+                </geometry>
+            </visual>
+            <visual name="mesh_4">
+                <pose>0 0 0.02 0.04 0 0</pose>
+                <geometry>
+                    <mesh>
+                        <uri>model://person_blue/meshes/standing.dae</uri>
+                        <submesh>
+                            <name>v2_Low-Poly</name>
+                            <center>false</center>
+                        </submesh>
+                    </mesh>
+                </geometry>
+            </visual>
+            <visual name="mesh_5">
+                <pose>0 0 0.02 0.04 0 0</pose>
+                <geometry>
+                    <mesh>
+                        <uri>model://person_blue/meshes/standing.dae</uri>
+                        <submesh>
+                            <name>v2_Eyebrow001</name>
+                            <center>false</center>
+                        </submesh>
+                    </mesh>
+                </geometry>
+            </visual>
+            <visual name="mesh_6">
+                <pose>0 0 0.02 0.04 0 0</pose>
+                <geometry>
+                    <mesh>
+                        <uri>model://person_blue/meshes/standing.dae</uri>
+                        <submesh>
+                            <name>v2_Teeth_Base</name>
+                            <center>false</center>
+                        </submesh>
                     </mesh>
                 </geometry>
             </visual>
