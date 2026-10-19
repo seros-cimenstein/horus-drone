@@ -22,6 +22,12 @@ _SEED_CONFIRM_OVERLAP = 0.3
 _SEED_MAX_MISSES = 3
 # Each seeded track costs one CSRT update (~18 ms on Koko) per processed frame.
 _MAX_SEEDED_TRACKS = 6
+# A grounder hit names its vocabulary term only at this score or above; weaker hits are kept as
+# generic "object" seeds (grounder_span still shows what was matched). Over urban seed 21 the
+# false person boxes on empty grass/road scored 0.30-0.37, just over the 0.30 grounder floor.
+# A seed renames to its term (and is announced) once a later grounder cycle scores it this high.
+TERM_LABEL_MIN_CONFIDENCE = 0.40
+GENERIC_SEED_LABEL = "object"
 # Poll interval while there is no vocabulary or no grounder.
 _IDLE_POLL_S = 0.25
 
@@ -171,7 +177,8 @@ class OpenVocabSeeder:
             # The configured term names the seed for selection and display; the raw span stays on
             # the candidate so the commander can see what the grounder actually matched. A grounder
             # label never grants person evidence by itself.
-            label = matched_vocabulary_term(span, vocabulary) or span or vocabulary[0]
+            term = matched_vocabulary_term(span, vocabulary) or span or vocabulary[0]
+            label = term if item.confidence >= TERM_LABEL_MIN_CONFIDENCE else GENERIC_SEED_LABEL
             try:
                 compensator = BoxCompensator(item.bbox, self._buffer.frames_after(frame_id)[0])
             except (StaleFrameError, RuntimeError, ValueError):
@@ -184,7 +191,7 @@ class OpenVocabSeeder:
                 candidate = commit_on_latest(self._buffer, compensator, self._state_lock, commit)
             except StaleFrameError:
                 continue
-            if candidate is not None and self._event_bus is not None:
+            if candidate is not None and candidate.class_name != GENERIC_SEED_LABEL and self._event_bus is not None:
                 self._event_bus.publish(
                     "object_detected",
                     f"Open-vocabulary object detected: {label}",
@@ -208,7 +215,10 @@ class OpenVocabSeeder:
         span: str,
         confirmed: set[int],
     ) -> Candidate | None:
-        """Confirm, skip or seed one compensated grounder box on the newest frame (under lock)."""
+        """Confirm, skip or seed one compensated grounder box on the newest frame (under lock).
+
+        Returns the candidate to announce: a new seed or a seed renamed to its term.
+        """
         if placed_box is None or current_frame is None:
             return None
         candidates = current_frame.candidates
@@ -219,13 +229,20 @@ class OpenVocabSeeder:
         )
         best_overlap = overlap_score(placed_box, best.bbox) if best is not None else 0.0
         if best is not None and best.source == "open_vocab" and best_overlap >= _SEED_CONFIRM_OVERLAP:
-            # Re-detected: snap the drifting CSRT seed back onto the grounder box.
+            # Re-detected: snap the drifting CSRT seed back onto the grounder box; a generic seed
+            # takes its term once the grounder scores it above the label floor.
             try:
-                self._tracker.confirm_seed(best.id, placed_box, current_frame, confidence=item.confidence)
+                renamed = self._tracker.confirm_seed(
+                    best.id, placed_box, current_frame, confidence=item.confidence,
+                    label=label if label != GENERIC_SEED_LABEL and best.class_name == GENERIC_SEED_LABEL else None,
+                )
             except (RuntimeError, ValueError):
                 return None
             confirmed.add(best.id)
-            return None
+            if not renamed:
+                return None
+            current_frame.candidates = self._tracker.current_candidates
+            return self._tracker.candidate(best.id)
         # Already tracked by the detector or a point seed: keep that ID.
         if best_overlap >= _SEED_DEDUPE_OVERLAP:
             return None

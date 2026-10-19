@@ -113,7 +113,13 @@ def point(
 
 
 def set_vocabulary(ctx: ToolContext, terms: list[str]) -> str:
-    """Continuously detect up to sixteen free-text object terms in incoming frames."""
+    """Continuously detect up to sixteen free-text object terms in incoming frames.
+
+    A match becomes an ``open_vocab`` candidate named after its term and raises an
+    ``object_detected`` event. A weak match (grounder score below 0.40) is listed with
+    ``class_name`` ``object`` and its matched text in ``attributes.grounder_span``, without an
+    event, until a later frame scores it high enough to take the term.
+    """
     return to_json(ctx.require_perception().set_vocabulary(terms))
 
 

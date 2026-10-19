@@ -210,6 +210,50 @@ def test_person_prompt_maps_a_fragment_span_onto_its_vocabulary_term():
         system.close()
 
 
+class _SwitchableScoreGrounder:
+    """Returns one person box per call: weak until ``strong`` is set, then above the label floor."""
+
+    def __init__(self):
+        self.calls = 0
+        self.strong = threading.Event()
+
+    def detect(self, image, prompts, *, box_threshold=0.30, text_threshold=0.25):
+        self.calls += 1
+        return [GroundingBox((100, 170, 160, 230), 0.52 if self.strong.is_set() else 0.32, "person person")]
+
+
+def test_weak_grounder_hit_is_a_generic_object_until_a_later_cycle_scores_it_as_its_term():
+    grounder = _SwitchableScoreGrounder()
+    event_bus = _RecordingEventBus()
+    system = PerceptionSystem(
+        _EmptyDetector(), PersistentTracker(), grounder=grounder, open_vocab_hz=20.0, event_bus=event_bus,
+    )
+    try:
+        feed_frame(system, _moving_square(100), 60.0)
+        system.set_vocabulary(["person", "person lying on the ground"])
+        assert _wait_for(lambda: grounder.calls >= 1 and any(
+            row["source"] == "open_vocab" for row in system.list_candidates()))
+        weak = [row for row in system.list_candidates() if row["source"] == "open_vocab"]
+        assert [row["class_name"] for row in weak] == ["object"]
+        assert weak[0]["attributes"]["grounder_span"] == "person person"
+        assert not [event for event in event_bus.events if event["kind"] == "object_detected"]
+
+        # Keep frames arriving so the seed survives until a strong cycle confirms it.
+        grounder.strong.set()
+        for step in range(1, 60):
+            feed_frame(system, _moving_square(100), 60.0 + step * 0.05)
+            if any(event["kind"] == "object_detected" for event in event_bus.events):
+                break
+            time.sleep(0.05)
+        detected = [event for event in event_bus.events if event["kind"] == "object_detected"]
+        assert len(detected) == 1
+        assert detected[0]["data"]["label"] == "person"
+        assert detected[0]["data"]["id"] == weak[0]["id"]
+        assert [row["class_name"] for row in system.list_candidates() if row["source"] == "open_vocab"] == ["person"]
+    finally:
+        system.close()
+
+
 def test_object_prompt_keeps_its_own_label_next_to_a_person_prompt():
     grounder = _PromptRecordingGrounder([GroundingBox((100, 170, 160, 230), 0.51, "red mug")])
     system = PerceptionSystem(

@@ -35,6 +35,9 @@ Usage: ./sim/run.sh <build|start [--procedural [--seed N] [--kind forest|urban] 
   --stratum NAME    Force a dressing stratum: baseline or chaotic (implies --procedural;
                     default: sampled from the seed)
   --gui             Run Gazebo GUI beside the local server and SITL
+                    HORUS_SIM_GUI_CONFIG=/horus/sim/gui/<layout>.config picks the panel layout
+                    (default horus_demo.config; horus_compact.config: untitled corner insets)
+                    HORUS_SIM_GUI_SCALE=<factor> scales the GUI chrome (Qt scale, default 1)
   gui-client        Run only the local Gazebo GUI and commander bridge for a remote server
   HORUS_SIM_GPU=auto|amd|mesa|on|off selects NVIDIA/Mesa rendering or CPU fallback
   stop [--purge]    Stop the container; optionally delete its active run directory
@@ -229,11 +232,23 @@ case "${command}" in
         exit 1
       fi
       xauthority_file="$(realpath -e -- "${xauthority_source}")"
+      gui_config="${HORUS_SIM_GUI_CONFIG:-/horus/sim/gui/horus_demo.config}"
+      if [[ ! "${gui_config}" =~ ^/horus/[A-Za-z0-9_./-]+\.config$ ]]; then
+        printf 'HORUS_SIM_GUI_CONFIG must be a .config path under /horus (got %s).\n' "${gui_config}" >&2
+        exit 2
+      fi
+      gui_scale="${HORUS_SIM_GUI_SCALE:-1}"
+      if [[ ! "${gui_scale}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || [[ "${gui_scale}" =~ ^0+(\.0*)?$ ]]; then
+        printf 'HORUS_SIM_GUI_SCALE must be a positive number (got %s).\n' "${gui_scale}" >&2
+        exit 2
+      fi
       gui_args=(
         --user "$(id -u):$(id -g)"
         --env DISPLAY=:0
         --env "XAUTHORITY=${xauthority_file}"
         --env QT_QPA_PLATFORM=xcb
+        --env "QT_SCALE_FACTOR=${gui_scale}"
+        --env "HORUS_SIM_GUI_CONFIG=${gui_config}"
         --volume "${xauthority_file}:${xauthority_file}:ro"
         --volume /tmp/.X11-unix:/tmp/.X11-unix
       )
