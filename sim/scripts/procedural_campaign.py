@@ -236,8 +236,8 @@ def _one_episode(args: argparse.Namespace, kind: str, seed: int | None) -> dict[
         record["manifest"] = str(manifest.relative_to(ROOT))
         record["sdf"] = str(sdf.relative_to(ROOT))
         # run.sh start returns once the world is running (up to 900 s for 1.2 km generated worlds).
-        _run_before_deadline([str(RUNNER), "start", "/horus/" + str(sdf.relative_to(ROOT))],
-                             episode_deadline, cap=960.0)
+        start = [str(RUNNER), "start", *(["--gui"] if args.gui else []), "/horus/" + str(sdf.relative_to(ROOT))]
+        _run_before_deadline(start, episode_deadline, cap=960.0)
         active_id = (ROOT / "sim" / "run" / ".active").read_text(encoding="utf-8").strip()
         active_run = ROOT / "sim" / "run" / active_id
         record["sim_run_id"] = active_id
@@ -259,6 +259,8 @@ def _one_episode(args: argparse.Namespace, kind: str, seed: int | None) -> dict[
 def _parse_cli(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--canonical", action="store_true", help="run each canonical world once")
+    parser.add_argument("--gui", action="store_true",
+                        help="show the Gazebo GUI on the host display (:0) beside each episode's server")
     parser.add_argument("--kinds", nargs="+", choices=("forest", "urban"), default=("forest", "urban"))
     parser.add_argument("--seeds", nargs="+", type=int, default=None,
                         help="procedural seeds per kind (default: 1 2 3)")

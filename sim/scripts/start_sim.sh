@@ -352,16 +352,16 @@ fi
 
 gui_pid=""
 if [[ "${gui_enabled}" == 1 ]]; then
-  gui_config=/horus/sim/gui/horus_demo.config
+  gui_config="${HORUS_SIM_GUI_CONFIG:-/horus/sim/gui/horus_demo.config}"
   if [[ ! -r "${gui_config}" ]]; then
     printf 'Gazebo GUI config is not readable: %s\n' "${gui_config}" >&2
     exit 1
   fi
-  # The demo config binds a few panels to indoor world topics; retarget them for any other world.
+  # The GUI layouts bind a few panels to indoor world topics; retarget them for any other world.
   if [[ "${world_stem}" != horus_indoor ]]; then
-    gui_config="${run_dir}/horus_demo-${world_stem}.config"
-    sed "s#/world/horus_indoor/#/world/${world_stem}/#g" \
-      /horus/sim/gui/horus_demo.config > "${gui_config}"
+    layout_config="${gui_config}"
+    gui_config="${run_dir}/$(basename -- "${layout_config}" .config)-${world_stem}.config"
+    sed "s#/world/horus_indoor/#/world/${world_stem}/#g" "${layout_config}" > "${gui_config}"
     printf 'GUI panels bound to /world/%s/ topics.\n' "${world_stem}"
   fi
   gz sim -g --gui-config "${gui_config}" > "${log_dir}/gui.log" 2>&1 &

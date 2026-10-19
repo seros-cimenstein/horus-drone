@@ -139,19 +139,21 @@ def test_persistent_session_restarts_after_process_crash(tmp_path, monkeypatch):
     assert any(record["kind"] == "session_restarted" for record in records)
 
 
-def test_claude_stream_records_keep_tool_and_final_result_details():
+def test_claude_stream_records_keep_thinking_tool_and_final_result_details():
     from horus.commander.backends import _claude_stream_records
 
     records = _claude_stream_records({
         "type": "assistant",
         "message": {
             "content": [
+                {"type": "thinking", "thinking": "The pose is stale; read state first.", "signature": "x"},
                 {"type": "text", "text": "Checking."},
                 {"type": "tool_use", "name": "mcp__horus__get_state", "input": {"id": 3}},
             ]
         },
     })
-    assert [record["kind"] for record in records] == ["assistant_text", "tool_use"]
+    assert [record["kind"] for record in records] == ["thinking", "assistant_text", "tool_use"]
+    assert records[0]["text"] == "The pose is stale; read state first."
     result = _claude_stream_records({"type": "result", "subtype": "success", "result": "Done"})
     assert result == [{"kind": "final_result", "text": "Done", "subtype": "success"}]
 

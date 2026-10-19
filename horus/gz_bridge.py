@@ -170,6 +170,8 @@ def format_commander_event(event: SSEEvent) -> str | None:
         return f"• {_clip(kind.replace('_', ' '))}: {_clip(value.get('summary', ''))}"
     if kind == "assistant_text":
         return f"Claude: {_clip(value.get('text', ''))}"
+    if kind == "thinking":
+        return f"Claude thinking: {_clip(value.get('text', ''), 600)}"
     if kind == "tool_use":
         tool = str(value.get("tool", "")).removeprefix("mcp__horus__")
         return f"→ {tool} {_clip(compact_json(value.get('args', {})), 200)}"

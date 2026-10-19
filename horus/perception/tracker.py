@@ -121,16 +121,27 @@ class PersistentTracker:
         self._current = (*self._current, candidate)
         return candidate
 
-    def confirm_seed(self, track_id: int, bbox: BBox, frame: Frame, *, confidence: float) -> None:
-        """Snap an open-vocabulary seed back onto a fresh grounder box and reset its miss count."""
+    def confirm_seed(
+        self, track_id: int, bbox: BBox, frame: Frame, *, confidence: float, label: str | None = None
+    ) -> bool:
+        """Snap an open-vocabulary seed back onto a fresh grounder box and reset its miss count.
+
+        ``label`` renames the seed (a generic ``object`` seed whose grounder score now passes the
+        term-label floor); returns True when the label changed.
+        """
         track = self._tracks.get(track_id)
         if track is None or track.source != "open_vocab":
-            return
+            return False
         box = validate_box(bbox, frame.image, require_image=True)
         track.csrt_tracker = initialize_csrt(frame.image, box)
         track.bbox = box
         track.confidence = float(confidence)
         track.seed_misses = 0
+        if label is None or label == track.class_name:
+            return False
+        track.class_name = label
+        self._current = tuple(track.candidate() if item.id == track_id else item for item in self._current)
+        return True
 
     def age_unconfirmed_seeds(self, confirmed: set[int], *, max_misses: int = 3) -> list[int]:
         """Count a grounder cycle against open-vocabulary seeds it did not re-detect; drop stale ones."""

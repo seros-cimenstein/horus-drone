@@ -533,6 +533,8 @@ def _claude_stream_records(event: Any) -> list[dict[str, Any]]:
             block_type = block.get("type")
             if event_type == "assistant" and block_type == "text":
                 records.append({"kind": "assistant_text", "text": str(block.get("text", ""))})
+            elif event_type == "assistant" and block_type == "thinking":
+                records.append({"kind": "thinking", "text": str(block.get("thinking", ""))})
             elif event_type == "assistant" and block_type == "tool_use":
                 records.append({
                     "kind": "tool_use",
@@ -582,6 +584,8 @@ def _print_stream_record(record: Mapping[str, Any]) -> None:
         print(str(record.get("text", "")), end="", flush=True)
     elif kind == "assistant_text":
         print(str(record.get("text", "")), end="", flush=True)
+    elif kind == "thinking":
+        print(f"\n[claude thinking] {record.get('text', '')}", flush=True)
     elif kind == "tool_use":
         print(
             f"\n[claude tool] {record.get('tool', '')} "
