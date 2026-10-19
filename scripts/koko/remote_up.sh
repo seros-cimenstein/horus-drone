@@ -4,6 +4,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 source "${SCRIPT_DIR}/common.sh"
+source "${PROJECT_DIR}/sim/scripts/procedural_world.sh"
 horus_koko_init
 
 for required in ssh rsync docker python3 ip getent; do
@@ -27,11 +28,6 @@ if [[ ! "${HORUS_REMOTE_SIM_GPU}" =~ ^(auto|amd|mesa|off|on)$ ]]; then
   printf 'HORUS_REMOTE_SIM_GPU must be auto, amd, mesa, off, or on.\n' >&2
   exit 2
 fi
-sitl_param_file="${HORUS_SITL_PARAM_FILE:-/horus/config/ardupilot/horus_sitl.parm}"
-if [[ ! "${sitl_param_file}" =~ ^[A-Za-z0-9_./-]+$ ]]; then
-  printf 'HORUS_SITL_PARAM_FILE must be a simple container path.\n' >&2
-  exit 2
-fi
 # Default stays the indoor demo; a procedural world passes an absolute container SDF path
 # (its bundle must already exist locally so the rsync below ships it to the remote).
 remote_world="${1:-${HORUS_REMOTE_WORLD:-horus_indoor.sdf}}"
@@ -39,40 +35,22 @@ if [[ ! "${remote_world}" =~ ^[A-Za-z0-9/_.-]+$ ]]; then
   printf 'Remote world must be a simple world name or container SDF path (got %s).\n' "${remote_world}" >&2
   exit 2
 fi
-# The executor config and SITL parameters follow the world: generated worlds
-# (horus_<kind>_p<seed>) get the procedural profile and parameter file, canonical
-# horus_forest/horus_urban worlds the outdoor ones. Explicit overrides still win.
-remote_world_stem="${remote_world##*/}"
-remote_procedural=0
-case "${remote_world_stem}" in
-  horus_forest_p*|horus_urban_p*) remote_procedural=1 ;;
-esac
-case "${remote_world_stem}" in
-  horus_forest*) remote_kind=forest ;;
-  horus_urban*) remote_kind=urban ;;
-  *) remote_kind="" ;;
-esac
-remote_config_default="/horus/config/horus.yaml"
-sitl_param_default=""
-if [[ -n "${remote_kind}" ]]; then
-  if (( remote_procedural == 1 )); then
-    remote_config_default="/horus/config/horus_procedural_${remote_kind}.yaml"
-    sitl_param_default="/horus/config/ardupilot/horus_sitl_procedural.parm"
-  else
-    remote_config_default="/horus/config/horus_${remote_kind}.yaml"
-    sitl_param_default="/horus/config/ardupilot/horus_sitl_outdoor.parm"
-  fi
+# The executor config and SITL parameter files follow the world (sim/scripts/world_profiles.py);
+# worlds without a profile get the indoor one. Explicit overrides still win.
+world_profile="$(horus_world_profile "${remote_world}")"
+if [[ -z "${world_profile}" ]]; then
+  world_profile="$(horus_world_profile horus_indoor)"
 fi
-remote_config="${HORUS_REMOTE_CONFIG:-}"
-if [[ -z "${remote_config}" ]]; then
-  remote_config="${remote_config_default}"
-fi
+read -r remote_config_default sitl_param_default <<< "${world_profile}"
+remote_config="${HORUS_REMOTE_CONFIG:-${remote_config_default}}"
 if [[ ! "${remote_config}" =~ ^[A-Za-z0-9/_.-]+$ ]]; then
   printf 'HORUS_REMOTE_CONFIG must be a simple container path (got %s).\n' "${remote_config}" >&2
   exit 2
 fi
-if [[ -z "${HORUS_SITL_PARAM_FILE:-}" && -n "${remote_kind}" ]]; then
-  sitl_param_file="${sitl_param_default}"
+sitl_param_file="${HORUS_SITL_PARAM_FILE:-${sitl_param_default}}"
+if [[ ! "${sitl_param_file}" =~ ^[A-Za-z0-9_./:-]+$ ]]; then
+  printf 'HORUS_SITL_PARAM_FILE must be a simple container path or colon-separated list.\n' >&2
+  exit 2
 fi
 
 state_dir="${HORUS_REMOTE_STATE_DIR}"
@@ -118,16 +96,9 @@ close_tunnel() {
 }
 stop_remote_stack() {
   local status=0
-  ssh -T "${HORUS_REMOTE}" bash -s -- \
-    "${HORUS_REMOTE_DIR}" "${remote_container}" <<'REMOTE_STOP' || status=$?
+  horus_koko_remote_script "${remote_container}" <<'REMOTE_STOP' || status=$?
 set -Eeuo pipefail
-remote_dir="$1"
-container="$2"
-if [[ "${remote_dir}" == /* ]]; then
-  project_dir="${remote_dir}"
-else
-  project_dir="${HOME}/${remote_dir}"
-fi
+container="$1"
 if docker container inspect "${container}" >/dev/null 2>&1; then
   cd -- "${project_dir}"
   HORUS_SIM_CONTAINER_NAME="${container}" ./sim/run.sh stop
@@ -212,31 +183,17 @@ if [[ "${remote_image_arch}" != "${remote_arch}" \
   else
     printf 'Building %s natively on %s; no matching local image is available.\n' \
       "${HORUS_REMOTE_SIM_IMAGE}" "${HORUS_REMOTE}"
-    ssh -T "${HORUS_REMOTE}" bash -s -- \
-      "${HORUS_REMOTE_DIR}" "${HORUS_REMOTE_SIM_IMAGE}" <<'REMOTE_BUILD'
+    horus_koko_remote_script "${HORUS_REMOTE_SIM_IMAGE}" <<'REMOTE_BUILD'
 set -Eeuo pipefail
-remote_dir="$1"
-image="$2"
-if [[ "${remote_dir}" == /* ]]; then
-  project_dir="${remote_dir}"
-else
-  project_dir="${HOME}/${remote_dir}"
-fi
 cd -- "${project_dir}"
-HORUS_SIM_IMAGE="${image}" ./sim/run.sh build
+HORUS_SIM_IMAGE="$1" ./sim/run.sh build
 REMOTE_BUILD
   fi
 fi
 
 printf 'Ensuring perception model cache on %s.\n' "${HORUS_REMOTE}"
-ssh -T "${HORUS_REMOTE}" bash -s -- "${HORUS_REMOTE_DIR}" <<'REMOTE_MODELS'
+horus_koko_remote_script <<'REMOTE_MODELS'
 set -Eeuo pipefail
-remote_dir="$1"
-if [[ "${remote_dir}" == /* ]]; then
-  project_dir="${remote_dir}"
-else
-  project_dir="${HOME}/${remote_dir}"
-fi
 cd -- "${project_dir}"
 if [[ ! -f models/yolov8n.onnx || ! -f models/osnet_x0_25_msmt17.onnx ]]; then
   model_tools_dir="$(mktemp -d "${TMPDIR:-/tmp}/horus-model-tools.XXXXXX")"
@@ -252,30 +209,24 @@ printf 'Starting headless Gazebo/SITL on %s (%s).\n' "${HORUS_REMOTE}" "${remote
 printf 'MCP config: %s (SITL params: %s)\n' "${remote_config}" "${sitl_param_file}"
 remote_gz_override="${HORUS_REMOTE_GZ_IP:--}"
 remote_relay="${HORUS_GZ_RELAY_REMOTE:--}"
-ssh -T "${HORUS_REMOTE}" bash -s -- \
-  "${HORUS_REMOTE_DIR}" "${HORUS_LOCAL_IP}" "${remote_gz_override}" \
+horus_koko_remote_script \
+  "${HORUS_LOCAL_IP}" "${remote_gz_override}" \
   "${HORUS_GZ_PARTITION}" "${remote_relay}" "${HORUS_REMOTE_SIM_IMAGE}" \
   "${remote_container}" "${HORUS_REMOTE_SIM_GPU}" "${sitl_param_file}" \
   "${HORUS_REMOTE_SIM_MEMORY_LIMIT:-8g}" "${HORUS_REMOTE_SIM_MEMORY_SWAP_LIMIT:-9g}" \
   "${remote_world}" <<'REMOTE_START'
 set -Eeuo pipefail
-remote_dir="$1"
-local_ip="$2"
-remote_gz_ip="$3"
-partition="$4"
-relay="$5"
-image="$6"
-container="$7"
-gpu_mode="$8"
-param_file="$9"
-memory_limit="${10}"
-memory_swap_limit="${11}"
-world="${12}"
-if [[ "${remote_dir}" == /* ]]; then
-  project_dir="${remote_dir}"
-else
-  project_dir="${HOME}/${remote_dir}"
-fi
+local_ip="$1"
+remote_gz_ip="$2"
+partition="$3"
+relay="$4"
+image="$5"
+container="$6"
+gpu_mode="$7"
+param_file="$8"
+memory_limit="$9"
+memory_swap_limit="${10}"
+world="${11}"
 if [[ "${remote_gz_ip}" == - ]]; then
   route="$(ip -4 -o route get "${local_ip}")"
   read -r -a route_fields <<< "${route}"
@@ -310,10 +261,7 @@ REMOTE_START
 remote_started=1
 printf '%s\n' "${remote_container}" > "${started_file}"
 
-remote_project_dir="${HORUS_REMOTE_DIR}"
-if [[ "${remote_project_dir}" != /* ]]; then
-  remote_project_dir="\$HOME/${remote_project_dir}"
-fi
+# start_sim.sh already started the optional grounder; wait for its health check before MCP.
 printf 'Checking optional text grounder on %s before MCP startup.\n' "${HORUS_REMOTE}"
 ssh -T "${HORUS_REMOTE}" bash -s -- "${remote_container}" <<'REMOTE_GROUNDER'
 set -Eeuo pipefail
@@ -322,7 +270,6 @@ if ! docker exec "${container}" test -x /horus/models/grounder-venv/bin/python; 
   printf '%s\n' 'Optional grounder venv is absent; continuing without text grounding.'
   exit 0
 fi
-docker exec "${container}" bash /horus/scripts/start_grounder.sh
 for ((attempt = 0; attempt < 120; attempt++)); do
   if docker exec "${container}" /opt/horus-venv/bin/python -c \
     'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8100/health", timeout=0.4)' \
@@ -334,8 +281,10 @@ for ((attempt = 0; attempt < 120; attempt++)); do
 done
 printf '%s\n' 'Optional grounder did not become healthy within 120 seconds; starting MCP without it.' >&2
 REMOTE_GROUNDER
+# Remote commands start in the remote $HOME, so a relative HORUS_REMOTE_DIR resolves there
+# (as for rsync above).
 printf '%s\n' "${HORUS_MCP_TOKEN}" | ssh -T "${HORUS_REMOTE}" \
-  bash "${remote_project_dir}/scripts/koko/start_mcp.sh" "${remote_container}" \
+  bash "${HORUS_REMOTE_DIR}/scripts/koko/start_mcp.sh" "${remote_container}" \
   "${remote_config}" "${HORUS_LOG_LEVEL:-INFO}"
 
 ssh -T "${HORUS_REMOTE}" bash -s -- "${remote_container}" <<'REMOTE_READY'
@@ -360,17 +309,9 @@ REMOTE_READY
 # SITL (and so Gazebo's lockstep world) only runs once MCP has connected on 5760, so the camera
 # renders frames only after this point.
 printf 'Enabling Koko camera RTP.\n'
-ssh -T "${HORUS_REMOTE}" bash -s -- \
-  "${HORUS_REMOTE_DIR}" "${remote_container}" <<'REMOTE_CAMERA'
+horus_koko_remote_script "${remote_container}" <<'REMOTE_CAMERA'
 set -Eeuo pipefail
-remote_dir="$1"
-container="$2"
-if [[ "${remote_dir}" == /* ]]; then
-  project_dir="${remote_dir}"
-else
-  project_dir="${HOME}/${remote_dir}"
-fi
-"${project_dir}/sim/scripts/enable_camera_stream.sh" "${container}"
+"${project_dir}/sim/scripts/enable_camera_stream.sh" "$1"
 REMOTE_CAMERA
 
 nohup ssh -M -S "${control_socket}" -N -T \

@@ -5,52 +5,27 @@
 # Usage: sim/scripts/s5_follow_trials.sh [RUNS] (default 5). Results: runs/S5_*.json, sim/logs/s5/.
 set -Eeuo pipefail
 runs="${1:-5}"
-project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd -- "${project_dir}"
-remote="${HORUS_REMOTE:-koko}"
-remote_dir="${HORUS_REMOTE_DIR:-horus}"
-container="${HORUS_REMOTE_SIM_CONTAINER_NAME:-horus-sim}"
-horus_bin="${HORUS_HOST_VENV:-${project_dir}/.venv-host}/bin"
-token_file="${XDG_RUNTIME_DIR:-/tmp}/horus-$(id -u)/${remote}/mcp-token"
+source "$(dirname -- "${BASH_SOURCE[0]}")/trial_lib.sh"
 out_dir="sim/logs/s5"
 mkdir -p "${out_dir}" runs
-export HORUS_MCP_URL="http://127.0.0.1:${HORUS_MCP_LOCAL_PORT:-8000}/mcp"
-
-stop_remote() { bash scripts/koko/remote_down.sh >/dev/null 2>&1 || true; }
-trap stop_remote EXIT
-bash scripts/koko/remote_up.sh > "${out_dir}/remote_up.log" 2>&1
-HORUS_MCP_TOKEN="$(cat "${token_file}")"
-export HORUS_MCP_TOKEN
-
-wait_disarmed() {
-  local armed_seen=0 deadline=$((SECONDS + 240)) state
-  while (( SECONDS < deadline )); do
-    state="$("${horus_bin}/horus-mcp-call" get_state 2>/dev/null)" || { sleep 2; continue; }
-    grep -q '"armed": *true' <<< "${state}" && armed_seen=1
-    if (( armed_seen )) && grep -q '"armed": *false' <<< "${state}"; then return 0; fi
-    sleep 2
-  done
-  return 1
-}
+trial_remote_up "${out_dir}/remote_up.log"
 
 for ((i = 1; i <= runs; i++)); do
   log="${out_dir}/run${i}.log"
   run_marker="$(ssh "${remote}" 'mktemp')"
-  ssh "${remote}" docker exec --detach "${container}" /opt/horus-venv/bin/python \
-    /horus/sim/scripts/gt_trace.py "/horus/sim/logs/s5_run${i}_gt.jsonl" --rate-hz 5
+  trial_gt_start "s5_run${i}_gt.jsonl" --rate-hz 5
   printf '%s\n' "${HORUS_MCP_TOKEN}" | ssh "${remote}" \
     "IFS= read -r t; docker exec --env HORUS_MCP_TOKEN=\"\$t\" --workdir /horus ${container} \
      /opt/horus-venv/bin/horus --server-url http://127.0.0.1:8000/mcp \
      --mission missions/S5_follow_occlusion.yaml" > "${log}" 2>&1 || printf 'run %d mission exited non-zero\n' "${i}" >> "${log}"
   "${horus_bin}/horus-mcp-call" rth >> "${log}" 2>&1 || true
-  wait_disarmed || printf 'run %d did not disarm within 240 s\n' "${i}" >> "${log}"
+  trial_wait_disarmed 240 || printf 'run %d did not disarm within 240 s\n' "${i}" >> "${log}"
   # The mover stops mid-route; put the target back at its start pose (facing the room) for the next run.
   ssh "${remote}" docker exec "${container}" gz service -s /world/horus_indoor/set_pose \
     --reqtype gz.msgs.Pose --reptype gz.msgs.Boolean --timeout 3000 \
     --req "'name: \"person_blue\", position: {x: -1.8, y: 3.0, z: 0}, orientation: {z: -0.7071068, w: 0.7071068}'" \
     >> "${log}" 2>&1 || true
-  ssh "${remote}" "docker exec ${container} pkill -INT -f gt_trace.py; sleep 1"
-  scp -q "${remote}:${remote_dir}/sim/logs/s5_run${i}_gt.jsonl" "${out_dir}/run${i}_gt.jsonl" || true
+  trial_gt_stop "s5_run${i}_gt.jsonl" "${out_dir}/run${i}_gt.jsonl" || true
   result="$(ssh "${remote}" "find ${remote_dir}/runs -name 'S5_*.json' -newer ${run_marker} | sort | tail -1")"
   ssh "${remote}" "rm -f ${run_marker}"
   if [[ -n "${result}" ]]; then

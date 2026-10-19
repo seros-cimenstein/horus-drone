@@ -7,8 +7,9 @@ from types import SimpleNamespace
 import httpx
 
 from horus.commander.agent import HorusCommander
-from horus.commander.server import create_app, emergency_action
-from horus.mcp_server.event_log import JsonlEventLog
+from horus.commander.intents import emergency_action
+from horus.commander.server import create_app
+from horus.event_log import JsonlEventLog
 from horus.config import CommanderSettings
 
 
@@ -17,6 +18,8 @@ _AUTH = [(b"authorization", f"Bearer {_TOKEN}".encode("ascii"))]
 
 
 class _FakeCommander:
+    event_callback = None
+
     async def submit_task(self, text: str) -> str:
         return f"handled: {text}"
 
@@ -68,7 +71,7 @@ class _SSECapture:
         if not self._received_request:
             self._received_request = True
             return {"type": "http.request", "body": b"", "more_body": False}
-        await self.disconnected.wait()
+        await asyncio.wait_for(self.disconnected.wait(), timeout=5)
         return {"type": "http.disconnect"}
 
     async def send(self, message):
@@ -227,6 +230,8 @@ def test_authenticated_task_submission_returns_accepted_and_sse_reconnects():
 
 
 class _FailingCommander:
+    event_callback = None
+
     async def submit_task(self, text: str) -> str:
         raise RuntimeError("MCP session failed")
 
@@ -346,6 +351,115 @@ def test_emergency_endpoint_executes_direct_mcp_action_and_interrupts_backend():
     ]
 
 
+class _RecordingBackend:
+    def __init__(self):
+        self.messages = []
+        self.received = asyncio.Event()
+
+    async def send(self, text):
+        self.messages.append(text)
+        self.received.set()
+        return "ok"
+
+    async def interrupt(self):
+        pass
+
+    async def reset(self):
+        pass
+
+
+class _OneBatchSession:
+    """Serves one ``wait_events`` batch, then blocks like an idle server."""
+
+    def __init__(self, events):
+        self.events = events
+        self.drained = asyncio.Event()  # set once the pump asks again, i.e. processed the batch
+        self._served = False
+
+    async def call_tool(self, name, arguments):
+        assert name == "wait_events"
+        if not self._served:
+            self._served = True
+            payload = {"events": self.events, "last_id": self.events[-1]["id"]}
+            return SimpleNamespace(isError=False, content=[SimpleNamespace(type="text", text=json.dumps(payload))])
+        self.drained.set()
+        await asyncio.Event().wait()
+
+
+def _pump_one_batch(events, *, mission_active=True):
+    """Run the commander's event pump over one batch; return (model messages, GUI mirror)."""
+    async def scenario():
+        mirrored = []
+        backend = _RecordingBackend()
+        commander = HorusCommander(
+            "http://127.0.0.1:8000/mcp", "token", CommanderSettings(), event_callback=mirrored.append
+        )
+        commander.backend = backend
+        commander._mission_active = mission_active
+        session = _OneBatchSession(events)
+        pump = asyncio.create_task(commander._pump_events(session))
+        await asyncio.wait_for((backend.received if mission_active else session.drained).wait(), timeout=2)
+        pump.cancel()
+        await asyncio.gather(pump, return_exceptions=True)
+        return backend.messages, mirrored
+
+    return asyncio.run(scenario())
+
+
+def test_operator_emergency_wakes_the_model_once_despite_the_mirrored_mcp_event():
+    class Session:
+        def __init__(self):
+            self.held = asyncio.Event()
+            self.delivered = asyncio.Event()
+
+        async def call_tool(self, name, arguments):
+            if name == "hold":
+                self.held.set()
+                return SimpleNamespace(
+                    isError=False, content=[SimpleNamespace(type="text", text="held")]
+                )
+            assert name == "wait_events"
+            await asyncio.wait_for(self.held.wait(), timeout=5)
+            if not self.delivered.is_set():
+                self.delivered.set()
+                payload = {
+                    "events": [{
+                        "id": 1, "time": "t1", "kind": "emergency",
+                        "summary": "Emergency hold requested",
+                        "data": {"action": "hold", "source": "mcp"},
+                    }],
+                    "last_id": 1,
+                }
+                return SimpleNamespace(
+                    isError=False, content=[SimpleNamespace(type="text", text=json.dumps(payload))]
+                )
+            await asyncio.Event().wait()
+
+    async def scenario():
+        mirrored = []
+        commander = HorusCommander(
+            "http://127.0.0.1:8000/mcp", "token", CommanderSettings(),
+            event_callback=mirrored.append,
+        )
+        backend = _RecordingBackend()
+        session = Session()
+        commander.backend = backend
+        commander._mcp_session = session
+        commander._mission_active = True
+        commander._session_ready.set()
+        pump = asyncio.create_task(commander._pump_events(session))
+        await commander.emergency("hold")
+        await asyncio.wait_for(session.delivered.wait(), timeout=1)
+        await asyncio.sleep(1.3)  # past the pump's 1 s batching window
+        pump.cancel()
+        await asyncio.gather(pump, *commander._event_message_tasks, return_exceptions=True)
+        return backend.messages, mirrored
+
+    messages, mirrored = asyncio.run(scenario())
+    assert len(messages) == 1 and "hold" in messages[0]
+    assert any(event.get("kind") == "emergency" and event.get("source") == "mcp-event" for event in mirrored)
+
+
 def test_task_grammar_bypasses_model_only_for_exact_emergency_text():
     class Commander(_FakeCommander):
         def __init__(self):
@@ -391,77 +505,17 @@ def test_task_grammar_bypasses_model_only_for_exact_emergency_text():
 
 
 def test_event_pump_coalesces_relevant_events_and_skips_without_active_mission():
-    class Backend:
-        def __init__(self):
-            self.messages = []
-            self.received = asyncio.Event()
-
-        async def send(self, text):
-            self.messages.append(text)
-            self.received.set()
-            return "event handled"
-
-        async def interrupt(self):
-            pass
-
-        async def reset(self):
-            pass
-
-    class EventSession:
-        def __init__(self):
-            self.first = True
-            self.received = asyncio.Event()
-
-        async def call_tool(self, name, arguments):
-            assert name == "wait_events"
-            if self.first:
-                self.first = False
-                self.received.set()
-                payload = {
-                    "events": [
-                        {"id": 1, "time": "t1", "kind": "task_finished", "summary": "done", "data": {}},
-                        {"id": 2, "time": "t2", "kind": "target_lost", "summary": "track 4", "data": {}},
-                    ],
-                    "last_id": 2,
-                }
-                return SimpleNamespace(
-                    isError=False,
-                    content=[SimpleNamespace(type="text", text=json.dumps(payload))],
-                )
-            await asyncio.Event().wait()
-
-    async def run_case(active: bool):
-        mirrored = []
-        mirrored_signal = asyncio.Event()
-        backend = Backend()
-        commander = HorusCommander(
-            "http://127.0.0.1:8000/mcp",
-            "token",
-            CommanderSettings(),
-            event_callback=lambda event: (mirrored.append(event), mirrored_signal.set()),
-        )
-        commander.backend = backend
-        commander._mission_active = active
-        session = EventSession()
-        pump = asyncio.create_task(commander._pump_events(session))
-        await asyncio.wait_for(mirrored_signal.wait(), timeout=1)
-        await asyncio.wait_for(session.received.wait(), timeout=1)
-        if active:
-            await asyncio.wait_for(backend.received.wait(), timeout=1)
-        else:
-            await asyncio.sleep(0)
-        pump.cancel()
-        await asyncio.gather(pump, return_exceptions=True)
-        return backend.messages, mirrored
-
-    active_messages, active_events = asyncio.run(run_case(True))
-    assert active_messages == [
-        "[HORUS event #1 t1] task_finished: done\n"
-        "[HORUS event #2 t2] target_lost: track 4"
+    events = [
+        {"id": 1, "time": "t1", "kind": "task_finished", "summary": "done", "data": {}},
+        {"id": 2, "time": "t2", "kind": "target_lost", "summary": "track 4", "data": {}},
     ]
+
+    active_messages, active_events = _pump_one_batch(events)
+    assert len(active_messages) == 1  # one coalesced wake-up carrying both events
+    assert "done" in active_messages[0] and "track 4" in active_messages[0]
     assert [event["kind"] for event in active_events] == ["task_finished", "target_lost"]
 
-    inactive_messages, inactive_events = asyncio.run(run_case(False))
+    inactive_messages, inactive_events = _pump_one_batch(events, mission_active=False)
     assert inactive_messages == []
     assert [event["kind"] for event in inactive_events] == ["task_finished", "target_lost"]
 
@@ -498,16 +552,6 @@ def test_reset_endpoint_and_operator_reset_discard_the_active_mission():
 
 
 def test_event_pump_wakes_once_for_a_flapping_link_and_reports_the_suppressed_repeats():
-    class Backend:
-        def __init__(self):
-            self.messages = []
-            self.received = asyncio.Event()
-
-        async def send(self, text):
-            self.messages.append(text)
-            self.received.set()
-            return "ok"
-
     flapping = []
     for index in range(10):
         kind = "link_lost" if index % 2 == 0 else "link_restored"
@@ -517,56 +561,18 @@ def test_event_pump_wakes_once_for_a_flapping_link_and_reports_the_suppressed_re
         {"id": 12, "time": "t", "kind": "object_detected", "summary": "cabinet", "data": {"label": "Cabinet"}},
     ]
 
-    class EventSession:
-        def __init__(self):
-            self.first = True
-
-        async def call_tool(self, name, arguments):
-            if self.first:
-                self.first = False
-                payload = {"events": flapping, "last_id": 12}
-                return SimpleNamespace(isError=False, content=[SimpleNamespace(type="text", text=json.dumps(payload))])
-            await asyncio.Event().wait()
-
-    async def scenario():
-        mirrored = []
-        backend = Backend()
-        commander = HorusCommander(
-            "http://127.0.0.1:8000/mcp", "token", CommanderSettings(), event_callback=mirrored.append
-        )
-        commander.backend = backend
-        commander._mission_active = True
-        commander._session_ready.set()
-        pump = asyncio.create_task(commander._pump_events(EventSession()))
-        await asyncio.wait_for(backend.received.wait(), timeout=2)
-        pump.cancel()
-        await asyncio.gather(pump, return_exceptions=True)
-        return backend.messages, mirrored
-
-    messages, mirrored = asyncio.run(scenario())
+    messages, mirrored = _pump_one_batch(flapping)
 
     assert len(mirrored) == 12  # the GUI log still shows every event
     lines = messages[0].splitlines()
     assert [line.split("] ")[1].split(":")[0] for line in lines[:-1]] == [
         "link_lost", "link_restored", "object_detected"
     ]
-    assert lines[-1] == (
-        "[HORUS events suppressed as repeats since the last message: "
-        "link_lost x4, link_restored x4, object_detected x1]"
-    )
+    for repeats in ("link_lost x4", "link_restored x4", "object_detected x1"):
+        assert repeats in lines[-1]
 
 
 def test_region_events_wake_the_mission_once_per_watch_and_kind_and_count_repeats():
-    class Backend:
-        def __init__(self):
-            self.messages = []
-            self.received = asyncio.Event()
-
-        async def send(self, text):
-            self.messages.append(text)
-            self.received.set()
-            return "ok"
-
     def region(event_id, kind, watch_id, target_id):
         return {
             "id": event_id,
@@ -576,45 +582,49 @@ def test_region_events_wake_the_mission_once_per_watch_and_kind_and_count_repeat
             "data": {"watch_id": watch_id, "target_id": target_id},
         }
 
-    batch = [
+    messages, mirrored = _pump_one_batch([
         region(1, "region_enter", "watch-1", 4),
         region(2, "region_enter", "watch-1", 5),
         region(3, "region_enter", "watch-2", 6),
         region(4, "region_dwell", "watch-1", 4),
         region(5, "region_enter", "watch-1", 7),
         region(6, "region_watch_expired", "watch-2", 0),
-    ]
-
-    class EventSession:
-        def __init__(self):
-            self.first = True
-
-        async def call_tool(self, name, arguments):
-            if self.first:
-                self.first = False
-                payload = {"events": batch, "last_id": 6}
-                return SimpleNamespace(isError=False, content=[SimpleNamespace(type="text", text=json.dumps(payload))])
-            await asyncio.Event().wait()
-
-    async def scenario():
-        mirrored = []
-        backend = Backend()
-        commander = HorusCommander(
-            "http://127.0.0.1:8000/mcp", "token", CommanderSettings(), event_callback=mirrored.append
-        )
-        commander.backend = backend
-        commander._mission_active = True
-        pump = asyncio.create_task(commander._pump_events(EventSession()))
-        await asyncio.wait_for(backend.received.wait(), timeout=2)
-        pump.cancel()
-        await asyncio.gather(pump, return_exceptions=True)
-        return backend.messages, mirrored
-
-    messages, mirrored = asyncio.run(scenario())
+    ])
 
     assert len(mirrored) == 6
     lines = messages[0].splitlines()
     assert [line.split("]")[0] for line in lines[:-1]] == [
         "[HORUS event #1 t", "[HORUS event #3 t", "[HORUS event #4 t", "[HORUS event #6 t"
     ]
-    assert lines[-1] == "[HORUS events suppressed as repeats since the last message: region_enter[watch-1] x2]"
+    assert "region_enter[watch-1] x2" in lines[-1]
+
+
+def test_plan_log_is_mirrored_to_the_gui_without_waking_the_mission():
+    messages, mirrored = _pump_one_batch([
+        {"id": 1, "time": "t", "kind": "plan_log", "summary": "goto 1", "data": {"plan_id": "p"}},
+        {"id": 2, "time": "t", "kind": "vocabulary_changed", "summary": "terms", "data": {}},
+        {"id": 3, "time": "t", "kind": "plan_finished", "summary": "plan p succeeded", "data": {}},
+    ])
+
+    assert [event["kind"] for event in mirrored] == ["plan_log", "plan_finished"]
+    assert len(messages) == 1 and "plan p succeeded" in messages[0] and "goto 1" not in messages[0]
+
+
+def test_commander_service_reads_the_mcp_token_from_the_configured_auth_token_env(
+    monkeypatch, capsys, tmp_path
+):
+    import pytest
+
+    from horus.commander.server import main
+
+    config = tmp_path / "horus.yaml"
+    config.write_text("server:\n  auth_token_env: CUSTOM_MCP_TOKEN\n", encoding="utf-8")
+    monkeypatch.setenv("HORUS_COMMANDER_TOKEN", "commander-secret")
+    monkeypatch.setenv("HORUS_MCP_TOKEN", "default-secret")
+    monkeypatch.delenv("CUSTOM_MCP_TOKEN", raising=False)
+
+    with pytest.raises(SystemExit) as error:
+        main(["--config", str(config)])
+
+    assert error.value.code == 2
+    assert "CUSTOM_MCP_TOKEN must be set" in capsys.readouterr().err

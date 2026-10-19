@@ -1,34 +1,22 @@
+"""The canonical 150 m urban world (primitive streets, buildings, park and street furniture)."""
+
 from __future__ import annotations
 
 import math
 import random
 from pathlib import Path
 
-from sim.worldgen.dressing import (
-    Dressing, add_clutter, add_fauna, animal_models, dress_person, fauna_areas, person_files, sample_events,
-)
+from sim.worldgen.assembly import assemble_world
+from sim.worldgen.dressing import Dressing
 from sim.worldgen.environment import Environment
-from sim.worldgen.layout import UrbanLayout, VehiclePlacement
-from sim.worldgen.scenario import person_record
+from sim.worldgen.layout import SIDEWALK_OFFSET_M, UrbanLayout, VehiclePlacement
+from sim.worldgen.plan import checked_transit_altitude
+from sim.worldgen.scenario import follow_manifest
 from sim.worldgen.sdf import (
     SURFACE_COLOURS, TREE_BARK, TREE_DECIDUOUS, box_geometry, collision, collision_at,
-    cylinder_geometry, f, home_pad, include, material, pedestrian_include, pose, sphere_geometry,
-    static_model, visual, world_header,
+    cylinder_geometry, f, material, pose, sphere_geometry, static_model, visual,
 )
-from sim.worldgen.vehicles import vehicle_model, vehicle_type
-
-
-def vehicle_record(vehicle: VehiclePlacement) -> dict:
-    """Manifest/scenario record for one circulating vehicle (canonical and procedural)."""
-    kind = vehicle_type(vehicle.type)
-    return {"model": vehicle.model, "kind": "vehicle", "asset": vehicle.type,
-            "position": vehicle.position, "yaw": vehicle.yaw,
-            "behavior": "route", "group": "ambient",
-            "waypoints": vehicle.waypoints, "speed": vehicle.speed,
-            "accel": vehicle.accel, "mode": vehicle.mode,
-            "start_offset_s": vehicle.start_offset_s or None,
-            "footprint": kind.footprint(), "decel": kind.decel_m_s2,
-            "turn_radius": kind.turn_radius_m, "variant": vehicle.variant}
+from sim.worldgen.vehicles import vehicle_model
 
 
 def _legacy_paint(vehicle: VehiclePlacement) -> tuple[float, float, float] | None:
@@ -43,16 +31,31 @@ def _legacy_paint(vehicle: VehiclePlacement) -> tuple[float, float, float] | Non
 
 
 def urban_static_models(layout: UrbanLayout, rng: random.Random, env: Environment) -> list[str]:
-    def surface(name: str, x: float, y: float, z: float, yaw: float, geometry: str, kind: str) -> str:
-        tint = "ground" if kind == "urban_ground" else "surface"
-        return visual(name, x, y, z, yaw, geometry, env.tint(SURFACE_COLOURS[kind], tint), cast_shadows=False)
-
+    """The primitive city models: ground, streets, buildings, park, furniture, parked cars."""
+    surface = _tinted_painter(env)
     ground = (
         '<collision name="terrain_collision"><pose>0 0 -0.5 0 0 0</pose><geometry><box><size>150 150 1</size></box></geometry></collision>'
         + surface("ground", 0, 0, 0, 0, '<plane><normal>0 0 1</normal><size>150 150</size></plane>', "urban_ground")
     )
-    models = [static_model("urban_ground", ground)]
+    return [static_model("urban_ground", ground),
+            static_model("urban_streets", _streets(layout, surface)),
+            *_buildings(layout, rng),
+            static_model("urban_park", _park(layout, env, surface)),
+            static_model("urban_street_furniture",
+                         "".join([*_street_furniture(layout), *_jogger_shelter(layout)])),
+            *_parked_cars(layout)]
 
+
+def _tinted_painter(env: Environment):
+    """A shadowless visual tinted like the environment's ground or paved surfaces."""
+    def surface(name: str, x: float, y: float, z: float, yaw: float, geometry: str, kind: str) -> str:
+        tint = "ground" if kind == "urban_ground" else "surface"
+        return visual(name, x, y, z, yaw, geometry, env.tint(SURFACE_COLOURS[kind], tint), cast_shadows=False)
+
+    return surface
+
+
+def _streets(layout: UrbanLayout, surface) -> str:
     roads: list[str] = []
     curb = (0.68, 0.66, 0.60)
     for index in range(max(len(layout.roads_x), len(layout.roads_y))):
@@ -64,9 +67,9 @@ def urban_static_models(layout: UrbanLayout, rng: random.Random, env: Environmen
             roads.append(surface(f"road_horizontal_{index}", 0, horizontal, 0.038, 0, box_geometry(150, 9.5, 0.074), "asphalt"))
         for side in (-1, 1):
             if vertical is not None:
-                roads.append(surface(f"vertical_sidewalk_{index}_{side}", vertical + side * 5.65, 0, 0.01, 0, box_geometry(1.8, 150, 0.02), "sidewalk"))
+                roads.append(surface(f"vertical_sidewalk_{index}_{side}", vertical + side * SIDEWALK_OFFSET_M, 0, 0.01, 0, box_geometry(1.8, 150, 0.02), "sidewalk"))
             if horizontal is not None:
-                roads.append(surface(f"horizontal_sidewalk_{index}_{side}", 0, horizontal + side * 5.65, 0.01, 0, box_geometry(150, 1.8, 0.02), "sidewalk"))
+                roads.append(surface(f"horizontal_sidewalk_{index}_{side}", 0, horizontal + side * SIDEWALK_OFFSET_M, 0.01, 0, box_geometry(150, 1.8, 0.02), "sidewalk"))
             if vertical is not None:
                 roads.append(visual(f"vertical_curb_{index}_{side}", vertical + side * 4.68, 0, 0.08, 0, box_geometry(0.18, 150, 0.16), curb))
             if horizontal is not None:
@@ -99,8 +102,10 @@ def urban_static_models(layout: UrbanLayout, rng: random.Random, env: Environmen
             roads.append(visual(f"plaza_joint_{axis}_{step}", step * 2.5 if axis == -1 else 0,
                                 0 if axis == -1 else step * 2.5, 0.096, 0,
                                 box_geometry(0.035, layout.plaza_half_size * 2, 0.01) if axis == -1 else box_geometry(layout.plaza_half_size * 2, 0.035, 0.01), (0.39, 0.4, 0.38)))
-    models.append(static_model("urban_streets", "".join(roads)))
+    return "".join(roads)
 
+
+def _buildings(layout: UrbanLayout, rng: random.Random) -> list[str]:
     buildings = []
     for index, building in enumerate(layout.buildings):
         x, y, sx, sy, h, colour = (building.x, building.y, building.sx,
@@ -146,8 +151,10 @@ def urban_static_models(layout: UrbanLayout, rng: random.Random, env: Environmen
             details.append(collision(f"roof_hvac_collision_{hvac}", -sx * 0.22 + hvac * 2.0, 0,
                                      base + h + 0.7, 0, box_geometry(1.3, 1.1, 0.9)))
         buildings.append(f'<model name="urban_building_{index + 1:02d}"><static>true</static><pose>{pose(x, y, 0)}</pose><link name="building">{"".join(details)}</link></model>')
-    models.extend(buildings)
+    return buildings
 
+
+def _park(layout: UrbanLayout, env: Environment, surface) -> str:
     park: list[str] = []
     pcx, pcy = layout.park_center
     park_size = layout.park_half_size * 2
@@ -173,8 +180,11 @@ def urban_static_models(layout: UrbanLayout, rng: random.Random, env: Environmen
                            box_geometry(1.8, 0.10, 0.65), (0.35, 0.22, 0.13)))
         park.append(collision(f"park_bench_back_collision_{index}", x, y - 0.19, 0.92, yaw,
                               box_geometry(1.8, 0.10, 0.65)))
-    models.append(static_model("urban_park", "".join(park)))
+    return "".join(park)
 
+
+def _street_furniture(layout: UrbanLayout) -> list[str]:
+    """Lamps, utility poles and wires, trash bins and the bus shelter."""
     street_furniture: list[str] = []
     lamp_height = layout.lamp_height_m
     lamp_base_z = lamp_height / 2
@@ -230,6 +240,12 @@ def urban_static_models(layout: UrbanLayout, rng: random.Random, env: Environmen
         visual("bus_shelter_bench", bus_x, bus_y - 0.3, 0.56, 0, box_geometry(3.2, 0.45, 0.13), (0.24, 0.20, 0.16)),
         visual("bus_stop_sign", bus_x + 2.3, bus_y + 0.1, 2.3, 0, box_geometry(0.36, 0.12, 0.7), (0.05, 0.28, 0.62)),
     ))
+    return street_furniture
+
+
+def _jogger_shelter(layout: UrbanLayout) -> list[str]:
+    """The follow jogger's shelter: roof (the occluder), back wall, bench and posts."""
+    street_furniture: list[str] = []
     shelter_x, shelter_y = layout.jogger_shelter_center
     shelter_w, shelter_l = layout.jogger_shelter_size
     shelter_yaw = layout.follow_occluder_yaw
@@ -251,8 +267,7 @@ def urban_static_models(layout: UrbanLayout, rng: random.Random, env: Environmen
     street_furniture.append(visual("jogger_shelter_back",
                                    back_x, back_y, 1.65, shelter_yaw, back, (0.35, 0.52, 0.57), 0.45))
     bench = box_geometry(0.42, min(4.8, shelter_l * 0.75), 0.13)
-    # Procedural benches sit against the back wall, clear of the sidewalk walking lanes.
-    bench_x, bench_y = shelter_point(1.0 if layout.canonical else 1.3, 0.0)
+    bench_x, bench_y = shelter_point(1.0, 0.0)
     street_furniture.append(collision("jogger_shelter_bench_collision",
                                       bench_x, bench_y, 0.56, shelter_yaw, bench))
     street_furniture.append(visual("jogger_shelter_bench",
@@ -267,47 +282,47 @@ def urban_static_models(layout: UrbanLayout, rng: random.Random, env: Environmen
             f"jogger_shelter_post_collision_{index}", post_x, post_y, 1.8, shelter_yaw, post))
         street_furniture.append(visual(
             f"jogger_shelter_post_{index}", post_x, post_y, 1.8, shelter_yaw, post, (0.18, 0.20, 0.21)))
-    models.append(static_model("urban_street_furniture", "".join(street_furniture)))
+    return street_furniture
 
-    for index, car in enumerate(layout.parked_cars):
-        name = f"veh_car_{index + 10:02d}" if layout.canonical else f"veh_parked_{index + 1:02d}"
-        models.append(vehicle_model(name, car.type, car.x, car.y, 0.0, car.yaw, static=True,
-                                    variant=car.variant, paint=car.colour if car.type == "car" else None))
-    return models
+
+def _parked_cars(layout: UrbanLayout) -> list[str]:
+    return [vehicle_model(f"veh_car_{index + 10:02d}", car.type, car.x, car.y, 0.0, car.yaw, static=True,
+                          variant=car.variant, paint=car.colour if car.type == "car" else None)
+            for index, car in enumerate(layout.parked_cars)]
 
 
 def build_urban(layout: UrbanLayout, world_dir: Path, *, textures: bool = True, dressing: Dressing
                 ) -> tuple[str, list[dict], dict[str, bytes | str]]:
-    if not layout.canonical:
-        # The 1.2 km procedural city emits instanced scenery and per-tile trimesh collisions;
-        # the canonical 150 m world below keeps its primitive models byte-for-byte.
-        from sim.worldgen.urban_procedural import build_urban_procedural
-
-        return build_urban_procedural(layout, world_dir, textures=textures, dressing=dressing)
-    env = dressing.environment
-    models = urban_static_models(layout, random.Random(layout.seed), env)
-    height = lambda x, y: 0.0  # noqa: E731
-    agents = []
-    for person in layout.people:
-        record = dress_person(dressing, person_record(person))
-        models.append(pedestrian_include(record))
-        agents.append(record)
-    files = person_files(dressing, agents, textures=textures)
-    for vehicle in layout.vehicles:
-        record = vehicle_record(vehicle)
-        models.append(vehicle_model(vehicle.model, vehicle.type, vehicle.position[0], vehicle.position[1], 0.0,
-                                    vehicle.yaw, static=False, variant=vehicle.variant,
-                                    paint=_legacy_paint(vehicle)))
-        agents.append(record)
-    animals = add_fauna(dressing, "urban", layout, agents, fauna_areas("urban", layout), height)
-    models.extend(animal_models(animals, height))
-    agents.extend(animals)
-    models.extend(add_clutter(dressing, "urban", layout, agents, height))
-    sample_events(dressing, agents, layout.seed)
-    pad = home_pad(world_dir)
-    drone = include("horus_iris_outdoor", "horus_iris", 0, 0, 0.195, math.pi / 2)
-    world_name = "horus_urban" if layout.canonical else f"horus_urban_p{layout.seed}"
-    world = (world_header(world_name, env) + "\n".join(models) + "\n" + pad + "\n" + drone + "\n  </world></sdf>\n")
-    return world, agents, files
+    return assemble_world(
+        "urban", layout, dressing, world_dir, world_name="horus_urban",
+        static_models=urban_static_models(layout, random.Random(layout.seed), dressing.environment),
+        textures=textures, paint=_legacy_paint)
 
 
+def transit_altitude(layout: UrbanLayout) -> float:
+    """Canonical rule: clear the tallest roof equipment and park crown by 6 m."""
+    building_tops = [b.height + (1.23 if b.height > 18 else 0.58) for b in layout.buildings]
+    park_tops = [tree.height * 1.08 for tree in layout.park_trees]
+    return checked_transit_altitude(max([9.6, *building_tops, *park_tops]) + 6.0, 45.0,
+                                    procedural=False)
+
+
+def urban_areas(layout: UrbanLayout) -> dict:
+    return {
+        "roads": {"x": list(layout.roads_x), "y": list(layout.roads_y)},
+        "sidewalk_offset_m": SIDEWALK_OFFSET_M,
+        "plaza": {"center": [0, 0], "half_size": layout.plaza_half_size},
+        "bus_stop": list(layout.bus_shelter_center),
+        "park": {"center": list(layout.park_center), "half_size": layout.park_half_size},
+        "crosswalk_centres": [list(p) for p in layout.crosswalk_centres],
+    }
+
+
+def manifest_extras(layout: UrbanLayout, people: dict[str, dict]) -> tuple[dict, dict, dict]:
+    """The canonical city's ``(follow, areas, extra manifest fields)``."""
+    follow = follow_manifest(layout, layout.follow_jogger, people, {
+        "occluder_models_or_collisions": ["jogger_shelter_roof_collision"],
+        "occluder_type": layout.follow_occluder_kind,
+        "occluder_xy": [layout.jogger_shelter_center[0], layout.jogger_shelter_center[1]],
+    }, stage_xy=[17.32, -40.5])
+    return follow, urban_areas(layout), {}

@@ -45,7 +45,7 @@
                     </cylinder>
                 </geometry>
             </collision>
-            <!-- Own DAE copy so the mesh loads this model's blue tshirt02_texture.png. -->
+            <!-- Own DAE copy: its shirt material loads this model's materials/textures/tshirt_blue.png. -->
             <visual name="visual">
                 <pose>0 0 0.02 0.04 0 0</pose>
                 <geometry>

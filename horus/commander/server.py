@@ -14,11 +14,13 @@ from urllib.parse import parse_qs
 from uuid import uuid4
 
 from horus.commander.agent import HorusCommander
+from horus.commander.backends import redact_secret
+from horus.commander.intents import emergency_action, is_reset_command
 from horus.config import load_config
-from horus.mcp_server.event_log import _safe_value
+from horus.event_log import _safe_value
+from horus.mcp_client import DEFAULT_MCP_URL
 
 
-DEFAULT_MCP_URL = "http://127.0.0.1:8000/mcp"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 _DEFAULT_HISTORY_SIZE = 512
@@ -39,7 +41,7 @@ class _EventHub:
         safe_event = _safe_value(dict(event))
         if not isinstance(safe_event, dict):
             safe_event = {"kind": "commander_event"}
-        safe_event = _replace_secret(safe_event, self._secret)
+        safe_event = redact_secret(safe_event, self._secret)
         self._next_id += 1
         safe_event["id"] = self._next_id
         self._history.append(safe_event)
@@ -59,16 +61,6 @@ class _EventHub:
         self._subscribers.discard(signal)
 
 
-def _replace_secret(value: Any, secret: str) -> Any:
-    if isinstance(value, str):
-        return value.replace(secret, "[REDACTED]") if secret else value
-    if isinstance(value, dict):
-        return {key: _replace_secret(item, secret) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_replace_secret(item, secret) for item in value]
-    return value
-
-
 class CommanderASGI:
     """Small ASGI application implementing authenticated task submission and SSE."""
 
@@ -76,20 +68,22 @@ class CommanderASGI:
         self.commander = commander
         self._expected_authorization = f"Bearer {token}".encode("utf-8")
         self.event_hub = _EventHub(history_size, token)
-        self._workers: set[asyncio.Task[None]] = set()
+        self._workers: set[asyncio.Task[Any]] = set()
+        self._routes = {
+            "/task": ("POST", self._submit_task),
+            "/emergency": ("POST", self._submit_emergency),
+            "/reset": ("POST", self._reset_mission),
+            "/events": ("GET", self._stream_events),
+        }
 
-        previous_callback = getattr(commander, "event_callback", None)
+        previous_callback = commander.event_callback
 
         def publish_commander_event(event: Mapping[str, Any]) -> None:
             self.event_hub.publish(event)
-            if callable(previous_callback):
+            if previous_callback is not None:
                 previous_callback(event)
 
-        try:
-            commander.event_callback = publish_commander_event
-        except (AttributeError, TypeError):
-            # Injected test doubles may not expose the optional commander hook.
-            pass
+        commander.event_callback = publish_commander_event
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] == "lifespan":
@@ -109,39 +103,19 @@ class CommanderASGI:
             )
             return
 
-        method = scope.get("method", "GET").upper()
-        path = scope.get("path", "/")
-        if path == "/task":
-            if method != "POST":
-                await _send_json(send, 405, {"error": "method not allowed"}, [(b"allow", b"POST")])
-                return
-            await self._submit_task(receive, send)
+        route = self._routes.get(scope.get("path", "/"))
+        if route is None:
+            await _send_json(send, 404, {"error": "not found"})
             return
-        if path == "/emergency":
-            if method != "POST":
-                await _send_json(send, 405, {"error": "method not allowed"}, [(b"allow", b"POST")])
-                return
-            await self._submit_emergency(receive, send)
+        allowed, handler = route
+        if scope.get("method", "GET").upper() != allowed:
+            await _send_json(
+                send, 405, {"error": "method not allowed"}, [(b"allow", allowed.encode("ascii"))]
+            )
             return
-        if path == "/reset":
-            if method != "POST":
-                await _send_json(send, 405, {"error": "method not allowed"}, [(b"allow", b"POST")])
-                return
-            await self._reset_mission(send)
-            return
-        if path == "/events":
-            if method != "GET":
-                await _send_json(send, 405, {"error": "method not allowed"}, [(b"allow", b"GET")])
-                return
-            cursor = _event_cursor(scope, headers)
-            if cursor is None:
-                await _send_json(send, 400, {"error": "invalid event cursor"})
-                return
-            await self._stream_events(cursor, receive, send)
-            return
-        await _send_json(send, 404, {"error": "not found"})
+        await handler(scope, receive, send)
 
-    async def _submit_task(self, receive: Any, send: Any) -> None:
+    async def _submit_task(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
         try:
             body = await _read_body(receive)
             payload = json.loads(body)
@@ -162,21 +136,13 @@ class CommanderASGI:
         self.event_hub.publish({"kind": "task_accepted", "task_id": task_id, "text": text})
         action = emergency_action(text)
         if action is not None:
-            self.event_hub.publish({
-                "kind": "emergency",
-                "action": action,
-                "source": "operator",
-                "status": "requested",
-            })
-            worker = asyncio.create_task(self._process_emergency(task_id, action))
-        elif _is_reset_command(text):
-            worker = asyncio.create_task(self._process_reset(task_id))
+            self._start_emergency(task_id, action)
         else:
-            worker = asyncio.create_task(self._process_task(task_id, text))
-        self._track_worker(worker)
+            worker = self._reset(task_id) if is_reset_command(text) else self._process_task(task_id, text)
+            self._track_worker(asyncio.create_task(worker))
         await _send_json(send, 202, {"status": "accepted", "task_id": task_id})
 
-    async def _submit_emergency(self, receive: Any, send: Any) -> None:
+    async def _submit_emergency(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
         try:
             payload = json.loads(await _read_body(receive))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -189,28 +155,38 @@ class CommanderASGI:
             await _send_json(send, 400, {"error": "action must be hold, land, or rth"})
             return
         task_id = uuid4().hex
+        self._start_emergency(task_id, action)
+        await _send_json(send, 202, {"status": "accepted", "task_id": task_id, "action": action})
+
+    def _start_emergency(self, task_id: str, action: str) -> None:
         self.event_hub.publish({
             "kind": "emergency",
             "action": action,
             "source": "operator",
             "status": "requested",
         })
-        worker = asyncio.create_task(self._process_emergency(task_id, action))
-        self._track_worker(worker)
-        await _send_json(send, 202, {"status": "accepted", "task_id": task_id, "action": action})
+        self._track_worker(asyncio.create_task(self._process_emergency(task_id, action)))
 
-    async def _reset_mission(self, send: Any) -> None:
-        self.event_hub.publish({"kind": "session_reset_requested"})
+    async def _reset_mission(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        error = await self._reset()
+        if error is not None:
+            await _send_json(send, 503, {"error": error})
+            return
+        await _send_json(send, 200, {"status": "reset"})
+
+    async def _reset(self, task_id: str | None = None) -> str | None:
+        """Reset the mission with one event sequence for both paths; return the error on failure."""
+        ids = {} if task_id is None else {"task_id": task_id}
+        self.event_hub.publish({"kind": "session_reset_requested", **ids})
         try:
             await self.commander.reset()
         except Exception as exc:
-            self.event_hub.publish({"kind": "session_reset_error", "error": str(exc)})
-            await _send_json(send, 503, {"error": str(exc)})
-            return
-        self.event_hub.publish({"kind": "session_reset"})
-        await _send_json(send, 200, {"status": "reset"})
+            self.event_hub.publish({"kind": "session_reset_error", **ids, "error": str(exc)})
+            return str(exc)
+        self.event_hub.publish({"kind": "session_reset", **ids})
+        return None
 
-    def _track_worker(self, worker: asyncio.Task[None]) -> None:
+    def _track_worker(self, worker: asyncio.Task[Any]) -> None:
         self._workers.add(worker)
         worker.add_done_callback(self._workers.discard)
 
@@ -238,14 +214,6 @@ class CommanderASGI:
                 "result": result,
             })
 
-    async def _process_reset(self, task_id: str) -> None:
-        try:
-            await self.commander.reset()
-        except Exception as exc:
-            self.event_hub.publish({"kind": "session_reset_error", "task_id": task_id, "error": str(exc)})
-        else:
-            self.event_hub.publish({"kind": "session_reset", "task_id": task_id})
-
     async def _process_task(self, task_id: str, text: str) -> None:
         try:
             result = await self.commander.submit_task(text)
@@ -260,7 +228,11 @@ class CommanderASGI:
                 {"kind": "task_completed", "task_id": task_id, "result": result}
             )
 
-    async def _stream_events(self, cursor: int, receive: Any, send: Any) -> None:
+    async def _stream_events(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        cursor = _event_cursor(scope, _headers(scope))
+        if cursor is None:
+            await _send_json(send, 400, {"error": "invalid event cursor"})
+            return
         signal = self.event_hub.subscribe()
         disconnect = asyncio.create_task(_wait_for_disconnect(receive))
         try:
@@ -323,29 +295,6 @@ class CommanderASGI:
             elif message["type"] == "lifespan.shutdown":
                 await send({"type": "lifespan.shutdown.complete"})
                 return
-
-
-def emergency_action(text: str) -> str | None:
-    """Recognize only short imperative emergency commands; longer requests stay with the model."""
-    command = " ".join(text.lower().split()).rstrip(".,!?;:")
-    words = command.split()
-    if words and words[-1] in {"now", "immediately"}:
-        words.pop()
-        command = " ".join(words)
-    return {
-        "stop": "hold",
-        "halt": "hold",
-        "abort": "hold",
-        "hold": "hold",
-        "freeze": "hold",
-        "land": "land",
-        "rth": "rth",
-        "return home": "rth",
-    }.get(command)
-
-
-def _is_reset_command(text: str) -> bool:
-    return text.strip().lower().rstrip(".!?") in {"new mission", "reset"}
 
 
 def create_app(
@@ -453,11 +402,11 @@ def main(argv: list[str] | None = None) -> None:
     command_token = os.environ.get("HORUS_COMMANDER_TOKEN")
     if not command_token or not command_token.strip():
         parser.error("HORUS_COMMANDER_TOKEN must be set to a non-empty bearer token")
-    mcp_token = os.environ.get("HORUS_MCP_TOKEN")
-    if not mcp_token or not mcp_token.strip():
-        parser.error("HORUS_MCP_TOKEN must be set to the HORUS MCP bearer token")
-
     config = load_config(args.config)
+    token_env = config.server.auth_token_env
+    mcp_token = os.environ.get(token_env)
+    if not mcp_token or not mcp_token.strip():
+        parser.error(f"{token_env} must be set to the HORUS MCP bearer token")
     server_url = os.environ.get("HORUS_MCP_URL") or DEFAULT_MCP_URL
     commander = HorusCommander(server_url, mcp_token, config.commander)
     app = create_app(commander, command_token)

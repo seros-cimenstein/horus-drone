@@ -4,6 +4,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 source "${SCRIPT_DIR}/gui_follow.sh"
+source "${SCRIPT_DIR}/procedural_world.sh"
 
 if [[ "${HORUS_SIM_CONTAINER:-0}" != 1 ]]; then
   exec "${PROJECT_DIR}/sim/run.sh" start "$@"
@@ -60,20 +61,21 @@ case "${world_stem}" in
     payload_layout=seven
     ;;
 esac
-# The executor/SITL profile follows the world: generated worlds (horus_<kind>_p<seed>) get the
-# procedural fence/speed parameters, canonical horus_forest/horus_urban worlds the outdoor ones.
-# An explicit HORUS_SITL_PARAM_FILE always wins.
-param_file="${HORUS_SITL_PARAM_FILE:-}"
-if [[ -z "${param_file}" ]]; then
-  case "${world_stem}" in
-    horus_forest_p*|horus_urban_p*) param_file=/horus/config/ardupilot/horus_sitl_procedural.parm ;;
-    horus_forest*|horus_urban*) param_file=/horus/config/ardupilot/horus_sitl_outdoor.parm ;;
-  esac
+# The SITL parameter fragments follow the world (sim/scripts/world_profiles.py: indoor
+# proximity avoidance, canonical outdoor, or generated-world fence/speed). An explicit
+# HORUS_SITL_PARAM_FILE (one file or a colon-separated list) always wins.
+param_files="${HORUS_SITL_PARAM_FILE:-}"
+if [[ -z "${param_files}" ]]; then
+  world_profile="$(horus_world_profile "${world_stem}")"
+  read -r _ param_files <<< "${world_profile}"
 fi
-if [[ -n "${param_file}" && ! -r "${param_file}" ]]; then
-  printf 'SITL parameter file is not readable: %s\n' "${param_file}" >&2
-  exit 1
-fi
+IFS=: read -r -a param_file_list <<< "${param_files}"
+for param_file in "${param_file_list[@]}"; do
+  if [[ ! -r "${param_file}" ]]; then
+    printf 'SITL parameter file is not readable: %s\n' "${param_file}" >&2
+    exit 1
+  fi
+done
 
 run_id="${HORUS_SIM_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 if [[ ! "${run_id}" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]]; then
@@ -93,10 +95,10 @@ mkdir -p "${log_dir}" "${run_dir}/terrain" "${run_dir}/.gz" \
   "${run_dir}/.cache/ogre2" "${run_dir}/.config" "${run_dir}/.local/share"
 : > "${run_dir}/eeprom.bin"
 printf 'LOG_DISARMED 0\n' > "${run_dir}/sitl-overrides.parm"
-if [[ -n "${param_file}" ]]; then
+for param_file in "${param_file_list[@]}"; do
   printf '\n# Loaded from %s\n' "${param_file}" >> "${run_dir}/sitl-overrides.parm"
   cat -- "${param_file}" >> "${run_dir}/sitl-overrides.parm"
-fi
+done
 printf '%s\n' "${run_id}" > "${run_root}/.active"
 
 # Gazebo maps its GZ home to HOME; XDG_CACHE_HOME also keeps the Ogre2 cache run-local.
@@ -365,7 +367,7 @@ if [[ "${gui_enabled}" == 1 ]]; then
   gz sim -g --gui-config "${gui_config}" > "${log_dir}/gui.log" 2>&1 &
   gui_pid=$!
   printf '%s\n' "${gui_pid}" > "${log_dir}/gui.pid"
-  # Procedural stems (horus_forest_p*, horus_urban_p*) use the same horus_iris airframe and
+  # Generated stems (horus_<kind>_p<seed>) use the same horus_iris airframe and
   # camera topics as the canonical worlds, so they need the same camera-follow check.
   if [[ "${world_stem}" == horus_indoor || "${world_stem}" == horus_forest* || "${world_stem}" == horus_urban* ]] \
     && ! wait_for_gui_follow "${gui_pid}" "${log_dir}" horus_iris; then

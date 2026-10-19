@@ -11,14 +11,12 @@ from horus.config import PerceptionSettings
 from horus.flight import MavlinkFlightLink
 from .camera import CameraConfig, OpenCVCameraReader
 from .detector import DetectorConfig, YOLODetector
-from .grounding import FrameBuffer, GrounderConfig
+from .embedders import ColorHistogramEmbedder, ONNXReIDEmbedder
+from .frame_buffer import FrameBuffer
+from .grounding import GrounderConfig
 from .pipeline import PerceptionSystem
-from .tracker import (
-    ColorHistogramEmbedder,
-    ONNXReIDEmbedder,
-    PersistentTracker,
-    TrackerConfig,
-)
+from .tracker import PersistentTracker
+from .tracks import TrackerConfig
 
 
 # Lost tracks keep their ID this long, independent of how long frames stay buffered for point().
@@ -29,18 +27,14 @@ def create_perception_system(
     settings: PerceptionSettings,
     flight: MavlinkFlightLink,
     *,
+    camera_horizontal_fov_deg: float | None = None,
     event_bus: Any = None,
 ) -> PerceptionSystem:
-    """Build the camera, detector, tracker, latency buffer, and external grounder client."""
-    if not math.isfinite(settings.max_fps) or settings.max_fps <= 0:
-        raise ValueError("perception.max_fps must be a finite positive number")
-    if not math.isfinite(settings.open_vocab_hz) or settings.open_vocab_hz <= 0:
-        raise ValueError("perception.open_vocab_hz must be a finite positive number")
-    if not math.isfinite(settings.ring_buffer_s) or settings.ring_buffer_s <= 0:
-        raise ValueError("perception.ring_buffer_s must be a finite positive number")
-    if settings.render_width_px < 1 or settings.render_width_px > 640:
-        raise ValueError("perception.render_width_px must be between 1 and 640")
+    """Build the camera, detector, tracker, latency buffer, and external grounder client.
 
+    ``camera_horizontal_fov_deg`` (the executor's camera model) lets the tracker cancel camera
+    yaw between frames before associating detections.
+    """
     def current_pose(_: float) -> Any:
         return camera_pose_from_telemetry(flight.telemetry())
 
@@ -71,6 +65,7 @@ def create_perception_system(
             reacquisition_confirm_s=float(settings.reacquisition_confirm_s),
             shirt_colour_window=int(settings.shirt_colour_window),
             shirt_colour_min_votes=int(settings.shirt_colour_min_votes),
+            camera_horizontal_fov_deg=camera_horizontal_fov_deg,
         ),
         embedder=embedder,
     )
@@ -124,8 +119,9 @@ def camera_pose_from_telemetry(telemetry: Any, now: float | None = None) -> dict
     """Frame pose at capture: position, heading, vehicle roll/pitch and gimbal attitude with ages.
 
     Every group carries the age of its own latest MAVLink sample (LOCAL_POSITION_NED/GPS,
-    heading, ATTITUDE, MOUNT_STATUS) so scene monitoring rejects stale camera state instead of
-    assuming it held still. Groups never received are omitted, i.e. reported unmeasured.
+    heading, ATTITUDE, MOUNT_STATUS or GIMBAL_DEVICE_ATTITUDE_STATUS) so scene monitoring rejects
+    stale camera state instead of assuming it held still. Groups never received are omitted, i.e.
+    reported unmeasured.
     """
     monotonic = time.monotonic() if now is None else now
 

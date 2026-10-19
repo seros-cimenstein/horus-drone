@@ -1,3 +1,4 @@
-from horus.executor.core import ExecutorState, HorusExecutor, flight_envelope
+from horus.executor.core import ExecutorState, HorusExecutor
+from horus.executor.geofence import Envelope
 
-__all__ = ["ExecutorState", "HorusExecutor", "flight_envelope"]
+__all__ = ["Envelope", "ExecutorState", "HorusExecutor"]

@@ -1,10 +1,20 @@
-"""AprilTag-guided precision landing primitives for nadir-facing cameras."""
+"""AprilTag-guided precision landing for nadir-facing cameras: detection, setpoint math and the
+executor-driven descent over the home pad."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import math
-from typing import Any
+import time
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from horus.executor.core import HorusExecutor
+    from horus.flight import Pose, Telemetry
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,3 +207,327 @@ def centering_velocity_ned(
         north *= scale
         east *= scale
     return north + 0.0, east + 0.0, down
+
+
+class PrecisionLanding:
+    """Tag-guided GUIDED descent over the home pad while an RTH/LAND emergency is in progress.
+
+    Runs inside the executor's controller tick. Every autopilot command goes through the
+    executor's epoch-checked ``_command``, and state an emergency also writes changes only under
+    the executor lock after ``_require_current_tick``.
+    """
+
+    HOME_RADIUS_M = 3.0
+    # Below this altitude the tag overflows the camera view; hand the centred vehicle to vertical LAND.
+    HANDOFF_ALTITUDE_M = 0.6
+    FRAME_MAX_AGE_S = 1.0
+    GIMBAL_SETTLE_S = 0.5
+
+    def __init__(self, executor: HorusExecutor) -> None:
+        self._executor = executor
+        self.controller = AprilTagPrecisionLandingController()
+        # Autopilot mode (RTL/LAND) of the emergency in progress; None when no landing is pending.
+        self.fallback_mode: str | None = None
+        self.active = False
+        # When the camera was turned nadir; it must be restored before any later skill.
+        self.gimbal_requested_at: float | None = None
+        self.unavailable = False
+        self._stall_started_monotonic: float | None = None
+        self._stall_start_altitude_m: float | None = None
+        self._stall_start_sim_s: float | None = None
+        self._target_monotonic: float | None = None
+        self._target_velocity: tuple[float, float, float] | None = None
+        self._last_log_monotonic = 0.0
+        self.stats: dict[str, Any] = {
+            "tag_detections": 0, "acquisitions": 0, "completed_landings": 0, "last_fallback": None,
+        }
+
+    def reset(self, unavailable: bool, *, release_gimbal: bool = True) -> bool:
+        """End precision control; call with the executor lock held.
+
+        Returns whether the camera was turned nadir. ``release_gimbal=False`` keeps that record so
+        the next skill still restores the default pitch.
+        """
+        camera_down = self.gimbal_requested_at is not None
+        self.fallback_mode = None
+        self.active = False
+        if release_gimbal:
+            self.gimbal_requested_at = None
+        self.unavailable = unavailable
+        self._reset_watch()
+        return camera_down
+
+    def _reset_watch(self) -> None:
+        """Forget the in-progress descent window and tag setpoint."""
+        self._stall_started_monotonic = None
+        self._stall_start_altitude_m = None
+        self._stall_start_sim_s = None
+        self._target_monotonic = None
+        self._target_velocity = None
+
+    def step(self, mode: str) -> None:
+        """One controller tick; ``mode`` is the autopilot mode the emergency commanded."""
+        try:
+            self._step(mode)
+        except Exception as exc:
+            logger.warning("precision landing error: %s", exc, exc_info=True)
+            self.stats["last_fallback"] = f"error: {exc}"
+            if self.active:
+                self._controller_failed()
+            else:
+                # A detector or gimbal failure leaves the existing RTL/LAND mode in control.
+                executor = self._executor
+                with executor._lock:
+                    executor._require_current_tick()
+                    self.unavailable = True
+
+    def fall_back_to_land(self, summary: str, *, record: bool = False, **event: Any) -> None:
+        """Stop the descent and hand the vehicle to autopilot LAND, which owns its own failsafes.
+
+        ``record`` stores ``summary`` as ``stats["last_fallback"]`` once the hand-off is committed.
+        """
+        executor = self._executor
+        executor._command_zero_velocity()
+        executor._command_mode("LAND")
+        with executor._lock:
+            executor._require_current_tick()
+            if record:
+                self.stats["last_fallback"] = summary
+            self.reset(unavailable=True)
+            executor._enter_idle_locked()
+        executor._publish_event("precision_landing_stalled", summary, **event)
+
+    def _step(self, mode: str) -> None:
+        executor = self._executor
+        telemetry = executor._telemetry()
+        current = telemetry.pose
+        if current is None or not all(
+            math.isfinite(value) for value in (current.north_m, current.east_m, current.up_m)
+        ):
+            return
+        if telemetry.pose_updated_monotonic is None:
+            return
+        if not executor._fresh(telemetry.pose_updated_monotonic):
+            if self.active:
+                self._controller_failed()
+            return
+        if not telemetry.armed:
+            self._complete()
+            return
+        self._descent_watch(current, telemetry)
+        if self.active and current.up_m <= self.HANDOFF_ALTITUDE_M:
+            self.stats["completed_landings"] += 1
+            logger.info("precision landing reached hand-off altitude; handing touchdown to LAND")
+            executor._command_zero_velocity()
+            executor._command_mode("LAND")
+            self._complete()
+            return
+        home_distance = math.hypot(current.north_m, current.east_m)
+        if home_distance > self.HOME_RADIUS_M:
+            if self.active:
+                executor._command_mode(mode)
+                self.active = False
+                self._reset_watch()
+            return
+        if self.unavailable:
+            return
+
+        frame = self._frame()
+        if frame is None:
+            self._hold_or_coast("no fresh frame")
+            return
+        if self.gimbal_requested_at is None:
+            executor._command(executor.flight.set_gimbal_pitch_yaw, -90.0, 0.0)
+            with executor._lock:
+                executor._require_current_tick()
+                self.gimbal_requested_at = time.monotonic()
+            return
+        if frame.timestamp < self.gimbal_requested_at + self.GIMBAL_SETTLE_S:
+            if self.active:
+                executor._command_zero_velocity()
+            return
+        heading = telemetry.heading_deg
+        if (
+            heading is None
+            or not math.isfinite(heading)
+            or not executor._fresh(telemetry.heading_updated_monotonic)
+        ):
+            # The tag offset is rotated into NED by the heading; never steer on a stale one.
+            if self.active:
+                executor._command_zero_velocity()
+            return
+        detection, velocity = self.controller.observe(frame.image, float(heading))
+        if detection is None:
+            self._hold_or_coast("tag not detected in the current frame")
+            return
+        self.stats["tag_detections"] += 1
+        if not self.active:
+            executor._command_mode("GUIDED")
+            with executor._lock:
+                executor._require_current_tick()
+                self.active = True
+                self._reset_watch()
+            self.stats["acquisitions"] += 1
+            logger.info("precision landing acquired AprilTag at %.2f m from home, %.2f m up",
+                        home_distance, current.up_m)
+        self._target_monotonic = time.monotonic()
+        self._target_velocity = (float(velocity[0]), float(velocity[1]), float(velocity[2]))
+        executor._command(executor.flight.set_velocity_ned, *self._target_velocity)
+        self._log_control(telemetry, current, detection, self._target_velocity)
+
+    def _frame(self) -> Any | None:
+        perception = self._executor.perception
+        if perception is None:
+            return None
+        frame = perception.get_frame()
+        if frame is None or getattr(frame, "image", None) is None:
+            return None
+        try:
+            timestamp = float(getattr(frame, "timestamp"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        age = time.monotonic() - timestamp
+        if not math.isfinite(timestamp) or age < -0.25 or age > self.FRAME_MAX_AGE_S:
+            return None
+        return frame
+
+    def _descent_watch(self, current: Pose, telemetry: Telemetry) -> None:
+        """Hand back to autopilot LAND when precision control stops making descent progress.
+
+        No autopilot failsafe runs in GUIDED, so a descent that ignores the setpoints would hover
+        armed indefinitely. The window is wall time; the required progress is scaled by the
+        autopilot clock when it is fresh, because the commanded descent rate is in autopilot time.
+        """
+        if not self.active:
+            return
+        now = time.monotonic()
+        if self._stall_started_monotonic is None:
+            self._stall_started_monotonic = now
+            self._stall_start_altitude_m = current.up_m
+            self._stall_start_sim_s = self._fresh_sim_time_s(telemetry)
+            return
+        elapsed = now - self._stall_started_monotonic
+        settings = self._executor.settings
+        if elapsed < settings.precision_landing_stall_s:
+            return
+        descended_m = self._stall_start_altitude_m - current.up_m
+        now_sim = self._fresh_sim_time_s(telemetry)
+        if (
+            now_sim is not None
+            and self._stall_start_sim_s is not None
+            and now_sim > self._stall_start_sim_s
+        ):
+            progress_basis_s = now_sim - self._stall_start_sim_s
+            progress_basis = "autopilot_time_boot"
+        else:
+            progress_basis_s = elapsed
+            progress_basis = "wall"
+        required_m = settings.precision_landing_min_descent_m_s * progress_basis_s
+        if descended_m >= required_m:
+            # Meaningful progress: start a new window from the current altitude.
+            self._stall_started_monotonic = now
+            self._stall_start_altitude_m = current.up_m
+            self._stall_start_sim_s = now_sim
+            return
+        descent_m_s = descended_m / progress_basis_s
+        summary = (
+            f"precision landing made no descent progress for {elapsed:.1f}s wall "
+            f"({descended_m:.2f} m over {progress_basis_s:.1f}s of {progress_basis}); "
+            "falling back to LAND"
+        )
+        logger.warning(
+            "precision landing stalled at %.2f m: %.2f m of descent in %.1fs of %s "
+            "(%.3f m/s < %.2f m/s); falling back to LAND",
+            current.up_m, descended_m, progress_basis_s, progress_basis, descent_m_s,
+            settings.precision_landing_min_descent_m_s,
+        )
+        self.fall_back_to_land(
+            summary,
+            record=True,
+            altitude_m=current.up_m,
+            elapsed_s=elapsed,
+            descent_m=descended_m,
+            descent_rate_m_s=descent_m_s,
+            progress_basis=progress_basis,
+        )
+
+    def _fresh_sim_time_s(self, telemetry: Telemetry) -> float | None:
+        """Autopilot time in seconds, or ``None`` when the SYSTEM_TIME sample is stale/absent."""
+        if not self._executor._fresh(telemetry.time_boot_updated_monotonic):
+            return None
+        return self._executor._sim_time_s(telemetry)
+
+    def _log_control(
+        self,
+        telemetry: Telemetry,
+        current: Pose,
+        detection: AprilTagDetection,
+        velocity: tuple[float, float, float],
+    ) -> None:
+        """Log tag pixel error, gimbal pitch and commanded velocity, at most once a second."""
+        now = time.monotonic()
+        if now - self._last_log_monotonic < 1.0:
+            return
+        self._last_log_monotonic = now
+        mount = telemetry.mount_status
+        logger.info(
+            "precision landing: tag_px=(%.1f,%.1f) error_px=(%.1f,%.1f) gimbal_pitch_deg=%s "
+            "commanded_ned=(%.2f,%.2f,%.2f) altitude_m=%.2f",
+            detection.center_x,
+            detection.center_y,
+            detection.center_x - detection.image_width * 0.5,
+            detection.center_y - detection.image_height * 0.5,
+            None if mount is None else mount.pitch_deg,
+            velocity[0],
+            velocity[1],
+            velocity[2],
+            current.up_m,
+        )
+
+    def _hold_or_coast(self, reason: str) -> None:
+        """Keep the last tag setpoint for ``precision_landing_target_grace_s``, then hold.
+
+        Detections arrive on only a fraction of ticks at range, and commanding zero on every miss
+        pulses the descent into a near-hover; the stall watchdog remains the last-resort hand-off.
+        """
+        if not self.active:
+            return
+        executor = self._executor
+        now = time.monotonic()
+        last = self._target_monotonic
+        velocity = self._target_velocity
+        if (
+            last is not None
+            and velocity is not None
+            and now - last <= executor.settings.precision_landing_target_grace_s
+        ):
+            logger.debug(
+                "precision landing: %s; coasting the last tag setpoint (age %.2fs)",
+                reason, now - last,
+            )
+            executor._command(executor.flight.set_velocity_ned, *velocity)
+            return
+        executor._command_zero_velocity()
+        if last is not None:
+            logger.debug(
+                "precision landing: %s; tag setpoint expired after %.2fs, holding",
+                reason, now - last,
+            )
+
+    def _complete(self) -> None:
+        executor = self._executor
+        if self.gimbal_requested_at is not None:
+            executor._command(executor._set_default_gimbal_pitch)
+        with executor._lock:
+            executor._require_current_tick()
+            self.reset(unavailable=False)
+            executor._enter_idle_locked()
+
+    def _controller_failed(self) -> None:
+        """Hand a failed descent (stale pose or error) to LAND rather than hover armed in GUIDED."""
+        logger.warning("precision landing lost control; falling back to LAND")
+        if self.stats["last_fallback"] is None:
+            self.stats["last_fallback"] = "controller failed (stale pose or error)"
+        self.fall_back_to_land(
+            "precision landing lost control (stale pose or error); falling back to LAND"
+        )

@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-import random
-from typing import Sequence, TypeAlias
+from typing import Any, Sequence, TypeAlias
 
 from sim.worldgen.surface import CANONICAL_MAP, MapSpec, TriangulatedGrid, quantize_rows
 
@@ -33,13 +32,22 @@ DRIVE_LANE_OFFSET_M = 1.9
 PARKING_LANE_OFFSET_M = 3.75
 SIDEWALK_OFFSET_M = 5.65
 LAMP_OFFSET_M = 6.85
-# Procedural city cross-section (shared by ``urban_procedural`` and the urban dressing):
+# Procedural city cross-section (shared by the ``urban_*`` generators and the urban dressing):
 # standard vs arterial carriageway half widths and the sidewalk width outside the kerb.
 URBAN_STREET_HALF_WIDTH_M = 4.75
 URBAN_ARTERIAL_HALF_WIDTH_M = 7.0
 URBAN_SIDEWALK_WIDTH_M = 1.8
 # Every recruited actor route and wander area stays inside this half-extent.
 GEOFENCE_INSET_M = 60.0
+
+
+def is_arterial(coordinate: float, arterials: Sequence[float]) -> bool:
+    return any(abs(coordinate - value) < 1e-6 for value in arterials)
+
+
+def road_half_width(coordinate: float, arterials: Sequence[float]) -> float:
+    """Procedural carriageway half width of the road at ``coordinate``."""
+    return URBAN_ARTERIAL_HALF_WIDTH_M if is_arterial(coordinate, arterials) else URBAN_STREET_HALF_WIDTH_M
 
 
 @dataclass(frozen=True)
@@ -115,7 +123,6 @@ class ForestLayout:
     family_positions: tuple[PersonPlacement, ...]
     follow_hiker: PersonPlacement
     follow_occluder_xy: Point
-    follow_occluder_name: str
     follow_speed: float
     follower_altitude_m: float
     follower_horizontal_m: float
@@ -129,7 +136,6 @@ class ForestLayout:
     terrain_frequencies: tuple[float, float, float, float, float]
     attempts: int = 1
     follow_occluder_radius_m: float = 1.8
-    follow_occluder_height_m: float = 2.3
     # A prone casualty in the open: the approach test targets a lying person, and a person under
     # a canopy (the missing hiker) is not observable from the transit-altitude vantages.
     casualty: PersonPlacement | None = None
@@ -200,7 +206,7 @@ class ParkedCar:
 
 
 # ---------------------------------------------------------------------------------------------
-# Procedural 1.2 km city data (see ``urban_procedural``). The canonical 150 m world leaves
+# Procedural 1.2 km city data (see ``urban_sampler``). The canonical 150 m world leaves
 # ``UrbanLayout.city`` as ``None`` and keeps using the flat fields above byte-for-byte.
 @dataclass(frozen=True)
 class PlazaSpec:
@@ -246,8 +252,6 @@ class BusStopSpec:
 class CitySpec:
     """Everything the procedural city carries beyond the shared ``UrbanLayout`` fields."""
 
-    actor_inset_m: float
-    max_top_m: float
     arterial_roads_x: tuple[float, ...]
     arterial_roads_y: tuple[float, ...]
     plazas: tuple[PlazaSpec, ...]
@@ -299,7 +303,7 @@ class UrbanLayout:
     map: MapSpec = CANONICAL_MAP
     # Procedural 1.2 km cities: actor geofence half-extent (inside the profile polygon) and the
     # tallest static scenery top (buildings incl. rooftop equipment, tree tops). Canonical
-    # worlds keep the 60 m actor inset and never read ``max_top_m``.
+    # worlds keep the 60 m actor inset and never read ``scenery_max_top_m``.
     actor_inset_m: float = GEOFENCE_INSET_M
     scenery_max_top_m: float = 0.0
     city: CitySpec | None = None
@@ -330,60 +334,59 @@ _FOREST_CREEK = (
 )
 
 
-def _person(model: str, role: str, asset: str, xy: Point, yaw: float = 0.0,
-            behavior: str = "idle", group: str = "ambient",
-            route: tuple[Waypoint, ...] = (), speed: float = 1.25,
-            mode: str = "loop", hold: float | None = None,
-            offset: float | None = None) -> PersonPlacement:
-    return PersonPlacement(model, role, asset, xy, yaw, behavior, group, route,
+def person_placement(model: str, role: str, asset: str, xy: Point, yaw: float = 0.0,
+                     behavior: str = "idle", group: str = "ambient",
+                     route: Sequence[Waypoint] = (), speed: float = 1.25,
+                     mode: str = "loop", hold: float | None = None,
+                     offset: float | None = None) -> PersonPlacement:
+    return PersonPlacement(model, role, asset, xy, yaw, behavior, group, tuple(route),
                            speed, mode, None, hold, offset)
 
 
 def canonical_forest_layout(seed: int = 2027) -> ForestLayout:
     hiker_routes = (
-        _person("civ_hiker_01", "hiker", "person_orange", (-58, -47), 0.6,
+        person_placement("civ_hiker_01", "hiker", "person_orange", (-58, -47), 0.6,
                 "route", route=((-58, -47), (-42, -35), (-25, -23), (-10, -7),
                                 (11, 13), (31, 25), (48, 48)), speed=1.25, mode="pingpong"),
-        _person("civ_hiker_02", "hiker", "person_blue_kinematic", (-25, -23), 0.7,
+        person_placement("civ_hiker_02", "hiker", "person_blue_kinematic", (-25, -23), 0.7,
                 "route", route=((-25, -23), (-10, -7), (11, 13), (31, 25), (48, 48)),
                 speed=1.0, mode="pingpong"),
-        _person("civ_hiker_03", "hiker", "person_green_kinematic", (11, 13), 0.5,
+        person_placement("civ_hiker_03", "hiker", "person_green_kinematic", (11, 13), 0.5,
                 "route", route=((11, 13), (22, 19), (31, 25), (39, 35), (48, 48)),
                 speed=1.15, mode="pingpong"),
     )
-    ranger = (_person("civ_ranger_01", "ranger", "person_hivis", (-10, -7), 0.7,
+    ranger = (person_placement("civ_ranger_01", "ranger", "person_hivis", (-10, -7), 0.7,
                       "route", route=((-10, -7), (-25, -23), (-37, -32), (-48, -39),
                                       (-58, -47)), speed=1.0, mode="pingpong"),)
     family = (
-        _person("civ_family_01", "family", "person_red_kinematic", (25.2, 35.4), 0.1,
+        person_placement("civ_family_01", "family", "person_red_kinematic", (25.2, 35.4), 0.1,
                 hold=0.0),
-        _person("civ_family_02", "family", "person_blue_kinematic", (26.4, 37.2), -0.5),
-        _person("civ_family_03", "family", "person_green_kinematic", (31.4, 36.2), 2.7),
-        _person("civ_family_04", "family", "person_dark", (32.2, 33.6), 2.9),
+        person_placement("civ_family_02", "family", "person_blue_kinematic", (26.4, 37.2), -0.5),
+        person_placement("civ_family_03", "family", "person_green_kinematic", (31.4, 36.2), 2.7),
+        person_placement("civ_family_04", "family", "person_dark", (32.2, 33.6), 2.9),
     )
     follow_route = tuple(_FOREST_TRAIL[5:10])
     return ForestLayout(
         seed=seed, canonical=True, trail=_FOREST_TRAIL, creek=_FOREST_CREEK,
         clearing=(-7.0, 31.0), clearing_radius=17.0, camp=(29.0, 35.0),
-        missing_hiker=_person("civ_missing_hiker_01", "missing_hiker",
+        missing_hiker=person_placement("civ_missing_hiker_01", "missing_hiker",
                               "person_laying_kinematic", (-42.0, 20.0), 0.4),
         missing_canopy_tree=(-45.2, 20.5),
         # The injured hiker rests in the open clearing: the campaign's scan test measures
         # detection coverage over the clearing scan rectangle, and an empty meadow can never
-        # score. (13, -43) sat under tree_conifer_canopy_collision_163 with no clear descent.
-        injured_person=_person("civ_injured_01", "injured", "person_sitting",
+        # score. The canopy-covered spot (13, -43) offered no clear descent column.
+        injured_person=person_placement("civ_injured_01", "injured", "person_sitting",
                                (-6.0, 30.0), 1.2),
-        casualty=_person("civ_casualty_01", "casualty", "person_laying_kinematic",
+        casualty=person_placement("civ_casualty_01", "casualty", "person_laying_kinematic",
                          (-9.5, 33.5), 2.4),
         hiker_routes=hiker_routes, ranger_routes=ranger, family_positions=family,
-        follow_hiker=_person("civ_hiker_04", "hiker", "person_green_kinematic",
+        follow_hiker=person_placement("civ_hiker_04", "hiker", "person_green_kinematic",
                              follow_route[0], 0.5, "route", "follow_hiker",
                              follow_route, 1.25, "once"),
-        follow_occluder_xy=(-13.42, -16.164),
-        follow_occluder_name="follow_occlusion_bush", follow_speed=1.25,
-        # The old 6.8 m / 1.66 m geometry looked 77 deg down, outside the 84 deg / -45 deg
-        # camera's frame, and could not be occluded without putting the bush in the follower
-        # lane; 8 m / 3 m frames the target and lets the enlarged bush occlude the pursuit.
+        follow_occluder_xy=(-13.42, -16.164), follow_speed=1.25,
+        # 8 m / 3 m frames the target inside the 84 deg / -45 deg camera and lets the enlarged
+        # bush occlude the pursuit; a steeper, closer follower (6.8 m / 1.66 m looks 77 deg down)
+        # leaves the target out of frame unless the bush sits in the follower lane.
         follower_altitude_m=8.0, follower_horizontal_m=3.0,
         expected_occlusion_s=2.2, tree_count=280, tree_height_range=(10.0, 20.0),
         fallen_logs=((-43, 4, 5.4, 0.7), (4, -34, 4.6, -0.2),
@@ -399,7 +402,8 @@ def _distance(a: Point, b: Point) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
-def _distance_segment(p: Point, a: Point, b: Point) -> float:
+def point_segment_distance(p: Sequence[float], a: Sequence[float], b: Sequence[float]) -> float:
+    """2-D distance from point ``p`` to segment ``ab`` (a point when ``a == b``)."""
     dx, dy = b[0] - a[0], b[1] - a[1]
     denom = dx * dx + dy * dy
     t = 0.0 if denom == 0 else max(0.0, min(1.0,
@@ -408,7 +412,7 @@ def _distance_segment(p: Point, a: Point, b: Point) -> float:
 
 
 def distance_to_path(p: Point, path: tuple[Point, ...] | list[Point]) -> float:
-    return min(_distance_segment(p, a, b) for a, b in zip(path, path[1:]))
+    return min(point_segment_distance(p, a, b) for a, b in zip(path, path[1:]))
 
 
 def distance_to_paths(p: Point, paths: Sequence[Sequence[Point]]) -> float:
@@ -587,37 +591,37 @@ def canonical_urban_layout(seed: int = 2028) -> UrbanLayout:
     benches = (Bench(28, -1, 0), Bench(34, 1.5, math.pi / 2), Bench(29, 4, 0))
     crosswalks = ((-16.0, 16.0), (16.0, -16.0), (48.0, 16.0), (-48.0, -16.0))
     commuters = (
-        _person("civ_commuter_01", "commuter", "person_blue_kinematic", (-42, -9), 1.57, "route", route=((-42, -9), (-42, 7), (-42, 24), (-42, 40)), mode="pingpong"),
-        _person("civ_commuter_02", "commuter", "person_green_kinematic", (-42, 8), -1.57, "route", route=((-42, 8), (-42, -5), (-42, -27)), mode="pingpong"),
-        _person("civ_commuter_03", "commuter", "person_dark", (-8, 43), 0.0, "route", route=((-8, 43), (8, 43), (27, 43), (40, 43)), mode="pingpong"),
-        _person("civ_commuter_04", "commuter", "person_orange", (40, 43), 3.14, "route", route=((40, 43), (23, 43), (6, 43), (-8, 43)), mode="pingpong"),
-        _person("civ_commuter_05", "commuter", "person_dark", (-42, -40), 1.57, "route", route=((-42, -40), (-42, -20), (-42, -5)), mode="pingpong"),
-        _person("civ_commuter_06", "commuter", "person_blue_kinematic", (-42, 38), -1.57, "route", route=((-42, 38), (-42, 25), (-42, 12)), mode="pingpong"),
-        _person("civ_commuter_07", "commuter", "person_green_kinematic", (6, -42), 3.14, "route", route=((6, -42), (-11, -42), (-29, -42), (-41, -42)), mode="pingpong"),
-        _person("civ_commuter_08", "commuter", "person_dark", (40, -42), 0.0, "route", route=((40, -42), (25, -42), (7, -42), (-7, -42)), mode="pingpong"),
-        _person("civ_commuter_09", "commuter", "person_blue_kinematic", (12, 8), 1.57, "route", route=((12, 8), (12, 24), (12, 40)), mode="pingpong"),
-        _person("civ_commuter_10", "commuter", "person_green_kinematic", (-8, -8), 0.0, "route", route=((-8, -8), (8, -8), (18, -8)), mode="pingpong"),
+        person_placement("civ_commuter_01", "commuter", "person_blue_kinematic", (-42, -9), 1.57, "route", route=((-42, -9), (-42, 7), (-42, 24), (-42, 40)), mode="pingpong"),
+        person_placement("civ_commuter_02", "commuter", "person_green_kinematic", (-42, 8), -1.57, "route", route=((-42, 8), (-42, -5), (-42, -27)), mode="pingpong"),
+        person_placement("civ_commuter_03", "commuter", "person_dark", (-8, 43), 0.0, "route", route=((-8, 43), (8, 43), (27, 43), (40, 43)), mode="pingpong"),
+        person_placement("civ_commuter_04", "commuter", "person_orange", (40, 43), 3.14, "route", route=((40, 43), (23, 43), (6, 43), (-8, 43)), mode="pingpong"),
+        person_placement("civ_commuter_05", "commuter", "person_dark", (-42, -40), 1.57, "route", route=((-42, -40), (-42, -20), (-42, -5)), mode="pingpong"),
+        person_placement("civ_commuter_06", "commuter", "person_blue_kinematic", (-42, 38), -1.57, "route", route=((-42, 38), (-42, 25), (-42, 12)), mode="pingpong"),
+        person_placement("civ_commuter_07", "commuter", "person_green_kinematic", (6, -42), 3.14, "route", route=((6, -42), (-11, -42), (-29, -42), (-41, -42)), mode="pingpong"),
+        person_placement("civ_commuter_08", "commuter", "person_dark", (40, -42), 0.0, "route", route=((40, -42), (25, -42), (7, -42), (-7, -42)), mode="pingpong"),
+        person_placement("civ_commuter_09", "commuter", "person_blue_kinematic", (12, 8), 1.57, "route", route=((12, 8), (12, 24), (12, 40)), mode="pingpong"),
+        person_placement("civ_commuter_10", "commuter", "person_green_kinematic", (-8, -8), 0.0, "route", route=((-8, -8), (8, -8), (18, -8)), mode="pingpong"),
     )
     crossings = (
-        _person("civ_crossing_01", "crossing", "person_orange", (-21.65, 16), 0, "route", route=((-21.65, 16, 10), (-10.35, 16, 12)), speed=1.0, mode="pingpong", offset=0.0),
-        _person("civ_crossing_02", "crossing", "person_blue_kinematic", (-10.35, 18), math.pi, "route", route=((-10.35, 18, 8), (-21.65, 18, 14)), speed=1.0, mode="pingpong", offset=20),
-        _person("civ_crossing_03", "crossing", "person_green_kinematic", (9, -16), 0, "route", route=((9, -16, 7), (23, -16, 15)), speed=1.0, mode="pingpong", offset=0.0),
-        _person("civ_crossing_04", "crossing", "person_blue_kinematic", (23, -14), math.pi, "route", route=((23, -14, 9), (9, -14, 13)), speed=1.0, mode="pingpong", offset=20),
+        person_placement("civ_crossing_01", "crossing", "person_orange", (-21.65, 16), 0, "route", route=((-21.65, 16, 10), (-10.35, 16, 12)), speed=1.0, mode="pingpong", offset=0.0),
+        person_placement("civ_crossing_02", "crossing", "person_blue_kinematic", (-10.35, 18), math.pi, "route", route=((-10.35, 18, 8), (-21.65, 18, 14)), speed=1.0, mode="pingpong", offset=20),
+        person_placement("civ_crossing_03", "crossing", "person_green_kinematic", (9, -16), 0, "route", route=((9, -16, 7), (23, -16, 15)), speed=1.0, mode="pingpong", offset=0.0),
+        person_placement("civ_crossing_04", "crossing", "person_blue_kinematic", (23, -14), math.pi, "route", route=((23, -14, 9), (9, -14, 13)), speed=1.0, mode="pingpong", offset=20),
     )
-    bus_waiting = tuple(_person(f"civ_bus_waiting_{i:02d}", "bus_waiting", asset, (x, y), yaw)
+    bus_waiting = tuple(person_placement(f"civ_bus_waiting_{i:02d}", "bus_waiting", asset, (x, y), yaw)
                         for i, (asset, x, y, yaw) in enumerate((
                             ("person_blue_kinematic", 7.4, -9.0, 1.57), ("person_green_kinematic", 8.2, -8.1, 2.5),
                             ("person_dark", 9.1, -9.2, 1.2), ("person_orange", 7.7, -10.1, -0.2)), 1))
-    joggers = tuple(_person(f"civ_jogger_{i:02d}", "jogger", asset, (x, y), 1.57, "route",
+    joggers = tuple(person_placement(f"civ_jogger_{i:02d}", "jogger", asset, (x, y), 1.57, "route",
                             route=((x, y), (x, y + 17), (x, y + 30), (x, y + 17)), speed=2.5, mode="pingpong")
                     for i, (asset, x, y) in enumerate((("person_orange", -42, -31), ("person_blue_kinematic", 43, 27)), 1))
     follow_route = ((21.65, -43), (21.65, -21.65), (18, -21.65), (18, -10.35), (21.65, -10.35), (21.65, 10))
-    follow = _person("civ_jogger_03", "jogger", "person_red_kinematic", follow_route[0], math.pi / 2,
+    follow = person_placement("civ_jogger_03", "jogger", "person_red_kinematic", follow_route[0], math.pi / 2,
                      "route", "follow_jogger", follow_route, 2.5, "once")
-    park_sitting = tuple(_person(f"civ_park_sitting_{i:02d}", "park_sitting", "person_sitting", (x, y), yaw)
+    park_sitting = tuple(person_placement(f"civ_park_sitting_{i:02d}", "park_sitting", "person_sitting", (x, y), yaw)
                          for i, (x, y, yaw) in enumerate(((28, -1, 0), (34, 1.5, math.pi / 2),
                                                          (29, 4, 0), (35, 4, math.pi)), 1))
-    plaza_crowd = tuple(_person(f"civ_plaza_crowd_{i:02d}", "plaza_crowd", asset, (x, y), yaw)
+    plaza_crowd = tuple(person_placement(f"civ_plaza_crowd_{i:02d}", "plaza_crowd", asset, (x, y), yaw)
                         for i, (asset, x, y, yaw) in enumerate((
                             ("person_dark", -5.5, 3.3, 0.4), ("person_blue_kinematic", -3.5, 2.7, -0.5),
                             ("person_green_kinematic", -1.4, 4.2, 2.0), ("person_dark", 1.2, 3.6, -2.4),
@@ -625,8 +629,8 @@ def canonical_urban_layout(seed: int = 2028) -> UrbanLayout:
                             ("person_green_kinematic", 4.2, -1.6, -0.6), ("person_dark", 2, -3.7, 0.5),
                             ("person_blue_kinematic", -0.5, -4.2, 1.8), ("person_orange", -3, -3.6, -2.1),
                             ("person_green_kinematic", -5.3, -1.8, 2.8), ("person_dark", -3.7, 0.3, -1.5)), 1))
-    red = _person("civ_red_shirt_01", "red_shirt", "person_red_kinematic", (0.2, 5.6), -0.8)
-    collapsed = _person("civ_collapsed_01", "collapsed", "person_collapsed_kinematic", (-8, 22), 0.2)
+    red = person_placement("civ_red_shirt_01", "red_shirt", "person_red_kinematic", (0.2, 5.6), -0.8)
+    collapsed = person_placement("civ_collapsed_01", "collapsed", "person_collapsed_kinematic", (-8, 22), 0.2)
     # Right-hand traffic: vehicles circulate around blocks (clockwise loops use the inner lanes,
     # anticlockwise loops the outer lanes) instead of reversing in place at a route end.
     vehicles = (
@@ -651,8 +655,8 @@ def canonical_urban_layout(seed: int = 2028) -> UrbanLayout:
         crosswalk_centres=crosswalks, buildings=buildings, plaza_half_size=9.0,
         park_center=(32, 0), park_half_size=9.0, park_trees=park_trees,
         benches=benches,
-        # These lamps formerly stood on the road centre lines; they now stand behind the
-        # sidewalk on the outer side of the same road.
+        # Each lamp stands behind the sidewalk on the outer side of its road (listed by its
+        # road-centre-line point).
         lamp_positions=tuple((x + math.copysign(LAMP_OFFSET_M, x), y) for x, y in (
             (-48, -45), (-48, 0), (-48, 45), (-16, -45), (-16, 43),
             (16, -45), (16, 45), (48, -45), (48, 0), (48, 45))),

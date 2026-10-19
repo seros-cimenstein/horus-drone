@@ -9,14 +9,17 @@ loop, wanderers their whole area.
 
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 import math
 import random
 import tempfile
 from pathlib import Path
-from collections.abc import Mapping
-from typing import Any
+from typing import Any, TypeVar
 
 from sim.worldgen.geometry import CollisionWorld, load_collisions, parse_scenery_sidecar
+from sim.worldgen.layout import FOREST_VANTAGE_ROLES, forest_surface, point_segment_distance
 from sim.worldgen.paths import FilletedPath
 from sim.worldgen.plan import (
     CANONICAL_MAX_LEG_M, CANONICAL_VANTAGE_BOUNDS_M, Camera, Ground, column_clearance,
@@ -30,8 +33,38 @@ STANDING_CLEARANCE_M = 0.1
 VEHICLE_CLEARANCE_M = 0.3
 ANIMAL_CLEARANCE_M = 0.05
 SAMPLE_STEP_M = 0.25
-# Diagnostics for sampler error messages: the failures of the most recent validation.
-LAST_FAILURES: list[str] = []
+
+Layout = TypeVar("Layout")
+
+
+class SampleRejected(Exception):
+    """A sampled attempt that cannot be validated; the reason is counted and retried."""
+
+
+def retry_sample(attempt_fn: Callable[[int], Layout],
+                 validate: Callable[[Layout], tuple[float, list[str]]], *,
+                 attempts: int, kind: str, seed: int) -> Layout:
+    """Sample attempts ``1..attempts`` until one passes ``validate``.
+
+    ``attempt_fn(attempt)`` returns a candidate or raises :class:`SampleRejected`;
+    ``validate(candidate)`` returns ``(occlusion_s, failures)``. The first candidate without
+    failures is returned with its measured follow occlusion.
+    """
+    rejections: Counter[str] = Counter()
+    for attempt in range(1, attempts + 1):
+        try:
+            layout = attempt_fn(attempt)
+        except SampleRejected as exc:
+            rejections[str(exc)] += 1
+            continue
+        occlusion, failures = validate(layout)
+        if not failures:
+            return replace(layout, expected_occlusion_s=occlusion)
+        rejections["validation"] += 1
+        rejections[f"validation: {failures[0][:90]}"] += 1
+    top = ", ".join(f"{reason} x{count}" for reason, count in rejections.most_common(4))
+    raise RuntimeError(f"could not sample valid {kind} layout for seed {seed} after "
+                       f"{sum(rejections.values())} attempts; top rejections: {top or 'pre-checks'}")
 
 
 def in_memory_models(files: dict[str, bytes | str]) -> dict[str, str]:
@@ -46,8 +79,6 @@ def in_memory_models(files: dict[str, bytes | str]) -> dict[str, str]:
 
 def _ground(kind: str, layout: Any) -> Ground:
     if kind == "forest":
-        from sim.worldgen.layout import forest_surface
-
         return Ground.from_surface(forest_surface(layout))
     return Ground({})
 
@@ -90,13 +121,6 @@ def _rect(cx: float, cy: float, yaw: float, hx: float, hy: float) -> list[tuple[
     return [(cx + px * c - py * s, cy + px * s + py * c) for px, py in ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy))]
 
 
-def _segment_distance(p, a, b) -> float:
-    dx, dy = b[0] - a[0], b[1] - a[1]
-    denom = dx * dx + dy * dy
-    t = 0.0 if denom == 0.0 else max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / denom))
-    return math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy)
-
-
 def _segment_segment_distance(a, b, c, d) -> float:
     """2-D distance between segments ab and cd (0 when they intersect or overlap)."""
 
@@ -108,8 +132,8 @@ def _segment_segment_distance(a, b, c, d) -> float:
             and all(value != 0.0 for value in (d1, d2, d3, d4))):
         return 0.0
     return min(
-        _segment_distance(a, c, d), _segment_distance(b, c, d),
-        _segment_distance(c, a, b), _segment_distance(d, a, b),
+        point_segment_distance(a, c, d), point_segment_distance(b, c, d),
+        point_segment_distance(c, a, b), point_segment_distance(d, a, b),
     )
 
 
@@ -135,7 +159,7 @@ def _inside(polygon, point) -> bool:
 def _point_polygon_distance(point, polygon) -> float:
     if _inside(polygon, point):
         return 0.0
-    return min(_segment_distance(point, a, b) for a, b in zip(polygon, polygon[1:] + polygon[:1]))
+    return min(point_segment_distance(point, a, b) for a, b in zip(polygon, polygon[1:] + polygon[:1]))
 
 
 def _polygons_distance(first, second) -> float:
@@ -243,7 +267,7 @@ def agent_path_points(agent: dict, agents_by_model: dict[str, dict]) -> list[tup
     if agent.get("behavior") == "wander":
         polygon = [tuple(p) for p in agent["area"]]
         xs, ys = [p[0] for p in polygon], [p[1] for p in polygon]
-        from sim.scripts.civilian_life import point_in_polygon
+        from sim.campaign.civilian_spec import point_in_polygon
 
         samples = [(x, y, None) for x, y in _densify(polygon + [polygon[0]])]
         steps = 8
@@ -312,15 +336,13 @@ def measure_follow(kind: str, layout: Any, sdf: str, manifest: dict[str, Any],
 
 def validate_world(kind: str, layout: Any, sdf: str, manifest: dict[str, Any], *,
                    agents: list[dict], files: dict[str, bytes | str],
-                   model_dir: Path, world_dir: Path) -> float | None:
-    """Return measured pursuit occlusion when a procedural scene is flight-safe and every
-    actor's footprint stays clear of static geometry over its whole executed path."""
+                   model_dir: Path, world_dir: Path) -> tuple[float, list[str]]:
+    """``(occlusion_s, failures)`` for a procedural scene: the measured pursuit occlusion and
+    every reason it is not flight-safe or an actor's footprint does not stay clear of static
+    geometry over its whole executed path (accepted when ``failures`` is empty)."""
     world, ground = _load_world(kind, layout, sdf, model_dir=model_dir, world_dir=world_dir, files=files)
     report = world_report(world, ground, manifest, agents)
-    LAST_FAILURES[:] = report["failures"]
-    if report["failures"]:
-        return None
-    return report["occlusion_s"]
+    return report["occlusion_s"], report["failures"]
 
 
 def clearing_scan_rectangle(areas: dict[str, Any]) -> tuple[float, float, float, float] | None:
@@ -374,28 +396,31 @@ def clearing_scan_clearance(world: CollisionWorld, areas: dict[str, Any], *,
     return minimum
 
 
-def world_report(world: CollisionWorld, ground: Ground, manifest: dict[str, Any],
-                 agents: list[dict]) -> dict[str, Any]:
-    failures: list[str] = []
-    transit = float(manifest["transit_altitude_m"])
-    home, _ = world.segment_clearance((0.0, 0.0, 3.5), (0.0, 0.0, transit), radius=0.6)
-    if home < 2.0:
-        failures.append(f"home column clearance {home:.2f} m")
-    if manifest.get("areas", {}).get("clearing"):
-        scan = clearing_scan_clearance(world, manifest["areas"])
-        if scan < 2.0:
-            failures.append(f"clearing scan clearance {scan:.2f} m < 2.00 m")
-        # A scan over an empty meadow cannot score detection coverage: every forest clearing
-        # must hold a person of interest (the campaign skips otherwise, and skips are not passes).
-        rect = clearing_scan_rectangle(manifest["areas"])
-        if rect is not None:
-            x0, x1, y0, y1 = rect
-            inside = [person for person in manifest.get("people", [])
-                      if x0 <= person["position"][0] <= x1 and y0 <= person["position"][1] <= y1]
-            if not any(person.get("role") in ("missing_hiker", "injured") for person in inside):
-                failures.append("no person of interest inside the clearing scan rectangle")
+def _clearing_failures(world: CollisionWorld, manifest: dict[str, Any]) -> list[str]:
+    if not manifest.get("areas", {}).get("clearing"):
+        return []
+    failures = []
+    scan = clearing_scan_clearance(world, manifest["areas"])
+    if scan < 2.0:
+        failures.append(f"clearing scan clearance {scan:.2f} m < 2.00 m")
+    # A scan over an empty meadow cannot score detection coverage: every forest clearing
+    # must hold a person of interest (the campaign skips otherwise, and skips are not passes).
+    rect = clearing_scan_rectangle(manifest["areas"])
+    if rect is not None:
+        x0, x1, y0, y1 = rect
+        inside = [person for person in manifest.get("people", [])
+                  if x0 <= person["position"][0] <= x1 and y0 <= person["position"][1] <= y1]
+        if not any(person.get("role") in ("missing_hiker", "injured") for person in inside):
+            failures.append("no person of interest inside the clearing scan rectangle")
+    return failures
+
+
+def _route_clearances(world: CollisionWorld, ground: Ground,
+                      agents: list[dict]) -> tuple[dict[str, float], list[str]]:
+    """Each checked agent's worst footprint clearance, and the agents that violate it."""
     by_model = {agent["model"]: agent for agent in agents}
-    clearances = {}
+    clearances: dict[str, float] = {}
+    failures: list[str] = []
     for agent in agents:
         required = _required(agent)
         if required is None:
@@ -410,48 +435,50 @@ def world_report(world: CollisionWorld, ground: Ground, manifest: dict[str, Any]
         limit = required if required > 0 else -0.02
         if clearance < limit:
             failures.append(f"{agent['model']} footprint clearance {clearance:.2f} m < {limit:.2f} m ({blocker})")
+    return clearances, failures
 
-    plan = plan_follow(world, ground, manifest)
+
+def _follow_failures(world: CollisionWorld, ground: Ground, manifest: dict[str, Any],
+                     plan, camera: Camera) -> list[str]:
+    failures = []
     if not (2.5 <= plan.occluded_s <= 4.0 and plan.lane_clearance_m >= 2.0 and plan.column_clearance_m >= 1.5):
         failures.append(f"follow plan occlusion {plan.occluded_s} lane {plan.lane_clearance_m:.2f} "
                         f"column {plan.column_clearance_m:.2f}")
-    camera = Camera()
     follow = manifest["follow"]
     people = {person["model"]: person for person in manifest["people"]}
     target = people.get(follow["model"])
     if target is None:
         failures.append("follow target missing")
-    else:
-        target_point = person_point(target, ground, target["posture"])
-        if (math.dist(plan.stage, target_point) > 12.0
-                or not camera.in_frame(plan.stage, plan.yaw_rad, target_point, margin_px=20.0)):
-            failures.append("follow target not framed from the stage")
-        colour = target["shirt_colour_attribute"]
-        if colour is None:
-            failures.append("follow target has no observable shirt colour")
-        # Uniqueness is about what the detector reports, so compare every colour each person's
-        # clothing could be classified as (orange reads as red, hi-vis lime as green, ...).
-        target_reads = set(target.get("possible_shirt_colours") or ([colour] if colour else []))
-        for other in people.values():
-            if other["model"] == target["model"]:
-                continue
-            other_reads = set(other.get("possible_shirt_colours")
-                              or ([other["shirt_colour_attribute"]] if other["shirt_colour_attribute"] else []))
-            point = person_point(other, ground, other["posture"])
-            if (target_reads & other_reads
-                    and camera.in_frame(plan.stage, plan.yaw_rad, point)
-                    and world.blocking(plan.stage, point) is None):
-                failures.append(f"{other['model']} may also read {sorted(target_reads)} at the follow stage")
+        return failures
+    target_point = person_point(target, ground, target["posture"])
+    if (math.dist(plan.stage, target_point) > 12.0
+            or not camera.in_frame(plan.stage, plan.yaw_rad, target_point, margin_px=20.0)):
+        failures.append("follow target not framed from the stage")
+    colour = target["shirt_colour_attribute"]
+    if colour is None:
+        failures.append("follow target has no observable shirt colour")
+    # Uniqueness is about what the detector reports, so compare every colour each person's
+    # clothing could be classified as (orange reads as red, hi-vis lime as green, ...).
+    target_reads = set(target.get("possible_shirt_colours") or ([colour] if colour else []))
+    for other in people.values():
+        if other["model"] == target["model"]:
+            continue
+        other_reads = set(other.get("possible_shirt_colours")
+                          or ([other["shirt_colour_attribute"]] if other["shirt_colour_attribute"] else []))
+        point = person_point(other, ground, other["posture"])
+        if (target_reads & other_reads
+                and camera.in_frame(plan.stage, plan.yaw_rad, point)
+                and world.blocking(plan.stage, point) is None):
+            failures.append(f"{other['model']} may also read {sorted(target_reads)} at the follow stage")
+    return failures
 
-    kind = manifest["kind"]
-    from sim.worldgen.layout import FOREST_VANTAGE_ROLES
 
-    # Procedural worlds plan over the whole map with their flight profile's limits; canonical
-    # worlds keep the 60 m actor inset and 60 m cruise legs they shipped with.
-    flight = manifest.get("flight") or {}
-    vantage_bounds = float(flight.get("vantage_bounds_m", CANONICAL_VANTAGE_BOUNDS_M))
-    max_leg = float(flight.get("max_leg_m", CANONICAL_MAX_LEG_M))
-    roles = FOREST_VANTAGE_ROLES if kind == "forest" else ("red_shirt", "collapsed")
+def _vantage_failures(world: CollisionWorld, ground: Ground, manifest: dict[str, Any],
+                      camera: Camera, transit: float, vantage_bounds: float,
+                      max_leg: float) -> list[str]:
+    """Every mission role needs a safe line-of-sight vantage and a safe transit to it."""
+    failures = []
+    roles = FOREST_VANTAGE_ROLES if manifest["kind"] == "forest" else ("red_shirt", "collapsed")
     for index, role in enumerate(roles):
         person = next((p for p in manifest["people"] if p["role"] == role), None)
         if person is None:
@@ -468,12 +495,18 @@ def world_report(world: CollisionWorld, ground: Ground, manifest: dict[str, Any]
                            max_leg_m=max_leg)
         if legs_clearance(world, (0.0, 0.0, 3.5), legs) < 1.5:
             failures.append(f"transit to {person['model']} vantage is unsafe")
+    return failures
 
-    # The posture-targeted tests (approach, orbit) need a prone target they can see: they take
-    # the first available posture (lying, then sitting), so that posture must have at least one
-    # person with open sky above them and a planned vantage inside the good-slant band. The
-    # canopy-hidden missing hiker stays in the world for the search mission but cannot be the
-    # only lying person.
+
+def _posture_failures(world: CollisionWorld, ground: Ground, manifest: dict[str, Any],
+                      camera: Camera, transit: float, vantage_bounds: float) -> list[str]:
+    """The posture-targeted tests (approach, orbit) need a prone target they can see.
+
+    They take the first available posture (lying, then sitting), so that posture must have at
+    least one person with open sky above them and a planned vantage inside the good-slant
+    band. The canopy-hidden missing hiker stays in the world for the search mission but cannot
+    be the only lying person.
+    """
     for posture in ("lying", "sitting"):
         candidates = [person for person in manifest.get("people", [])
                       if person.get("posture") == posture]
@@ -492,7 +525,30 @@ def world_report(world: CollisionWorld, ground: Ground, manifest: dict[str, Any]
                 continue
             observable.append(person["model"])
         if not observable:
-            failures.append(f"no observable {posture} person (clear sky and a vantage within "
-                            f"{OBSERVABLE_SLANT_MAX_M:g} m slant)")
-        break  # only the first available posture is what the posture-targeted tests pick
+            return [f"no observable {posture} person (clear sky and a vantage within "
+                    f"{OBSERVABLE_SLANT_MAX_M:g} m slant)"]
+        return []  # only the first available posture is what the posture-targeted tests pick
+    return []
+
+
+def world_report(world: CollisionWorld, ground: Ground, manifest: dict[str, Any],
+                 agents: list[dict]) -> dict[str, Any]:
+    failures: list[str] = []
+    transit = float(manifest["transit_altitude_m"])
+    home, _ = world.segment_clearance((0.0, 0.0, 3.5), (0.0, 0.0, transit), radius=0.6)
+    if home < 2.0:
+        failures.append(f"home column clearance {home:.2f} m")
+    failures += _clearing_failures(world, manifest)
+    clearances, route_failures = _route_clearances(world, ground, agents)
+    failures += route_failures
+    plan = plan_follow(world, ground, manifest)
+    camera = Camera()
+    failures += _follow_failures(world, ground, manifest, plan, camera)
+    # Procedural worlds plan over the whole map with their flight profile's limits; canonical
+    # worlds keep the 60 m actor inset and 60 m cruise legs they shipped with.
+    flight = manifest.get("flight") or {}
+    vantage_bounds = float(flight.get("vantage_bounds_m", CANONICAL_VANTAGE_BOUNDS_M))
+    max_leg = float(flight.get("max_leg_m", CANONICAL_MAX_LEG_M))
+    failures += _vantage_failures(world, ground, manifest, camera, transit, vantage_bounds, max_leg)
+    failures += _posture_failures(world, ground, manifest, camera, transit, vantage_bounds)
     return {"failures": failures, "occlusion_s": plan.occluded_s, "clearances": clearances}

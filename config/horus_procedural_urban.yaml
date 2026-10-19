@@ -1,23 +1,8 @@
+# Procedurally generated 1.2 km city worlds; as config/horus_procedural_forest.yaml except the
+# cruise gate and altitude ceiling.
 flight:
-  connection: tcp:127.0.0.1:5760
-  baud: 115200
-  # Startup connect only: SITL's first heartbeat on a 1.2 km world waits for Gazebo to load and
-  # render its first sensor frames, which takes well over 30 s at Koko's real-time factor.
   heartbeat_timeout_s: 180.0
-  source_system: 255
-  source_component: 190
-  gps_free_mode: false
-  global_origin_latitude_deg: -35.363262
-  global_origin_longitude_deg: 149.165237
-  global_origin_altitude_m: 584.0
 executor:
-  control_hz: 15.0
-  # A single goto is clamped to max_distance_m = 850 m; at the 8 m/s cruise that is
-  # 850 / 8 = 106 s of flight. Command TTLs are wall-clock and Koko sustains RTF ~0.35-0.45
-  # on the 1.2 km worlds, so the flight alone can cost 106 / 0.35 ~= 304 s of wall time;
-  # 360 s covers that plus ~3 s of acceleration at ArduPilot's default WP_ACC (2.5 m/s^2),
-  # yaw alignment and the arrival slowdown. Slower hosts scale further with the campaign's
-  # --ttl-scale.
   command_ttl_s: 360.0
   max_speed_m_s: 3.0
   # Above the 34 m building/roof-equipment cap + 4 m margin the horizontal limit rises to
@@ -26,65 +11,26 @@ executor:
   cruise_speed_m_s: 8.0
   cruise_min_altitude_m: 38.0
   max_vertical_speed_m_s: 1.5
-  # Scan areas and gotos may lie anywhere in the 1.2 km map (the executor clamps each
-  # single goto to this distance from the vehicle).
   max_distance_m: 850.0
   min_altitude_m: 1.0
   max_altitude_m: 48.0
-  # Covers the +-585 m polygon corners (585 * sqrt(2) = 827.3 m) and matches the SITL
-  # FENCE_RADIUS backstop; the polygon below is the enforced target boundary.
-  geofence_radius_m: 870.0
-  # NED north/east = Gazebo y/x; the boundary keeps the drone inside the generated map
-  # (map half extent 600 m minus a 15 m edge margin), so mission targets may be placed
-  # anywhere on the map, not only near home.
   geofence_polygon_ned:
     - [-585.0, -585.0]
     - [-585.0, 585.0]
     - [585.0, 585.0]
     - [585.0, -585.0]
-  geofence_margin_m: 0.0
   arrival_tolerance_m: 0.4
   follow_distance_m: 3.0
-  target_width_m: null
   target_height_m: 1.9
-  target_match_threshold: 0.72
   camera_horizontal_fov_deg: 84.0
   default_gimbal_pitch_deg: -45.0
-  link_loss_rth_delay_s: 30.0
 perception:
-  enabled: true
-  point_compensation_enabled: true
-  source: udp://0.0.0.0:5600
-  detector_model: models/yolov8n.onnx
-  embedding_model: models/osnet_x0_25_msmt17.onnx
-  grounder_url: http://127.0.0.1:8100
-  max_fps: 5.0
-  # Low-rate person pass over the grounder: the prone phrases are what recover lying/sitting
-  # people that yolov8n does not propose at all (see README, outdoor profiles). A seed is named
-  # after the matched vocabulary term and carries no detector person evidence, so a grounder-only
-  # target still needs target_size_m for a range; the pass degrades to detector-only when the
-  # grounder is absent.
-  open_vocab_hz: 0.5
   vocabulary:
     - person
     - person lying on the ground
     - person sitting on the ground
-  onnx_intra_op_num_threads: 2
-  onnx_inter_op_num_threads: 1
   ring_buffer_s: 30.0
-  render_width_px: 640
-server:
-  host: 127.0.0.1
-  port: 8000
-  auth_token_env: HORUS_MCP_TOKEN
 commander:
-  provider: claude-code
-  model: claude-3-5-sonnet-latest
-  base_url: null
-  api_key_env: ANTHROPIC_API_KEY
-  max_tokens: 800
   timeout_s: 900.0
-  max_turns: 40
-  claude_command: claude
   claude_model: opus
   claude_effort: high

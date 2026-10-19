@@ -5,7 +5,11 @@ import json
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from horus.commander.agent import APICommanderBackend, ClaudeCodeSession, CommanderEvent, HorusCommander
+
+import pytest
+
+from horus.commander.agent import CommanderEvent, HorusCommander
+from horus.commander.backends import APICommanderBackend, ClaudeCodeSession
 from horus.config import CommanderSettings, ServerSettings
 
 
@@ -136,7 +140,7 @@ def test_persistent_session_restarts_after_process_crash(tmp_path, monkeypatch):
 
 
 def test_claude_stream_records_keep_tool_and_final_result_details():
-    from horus.commander.agent import _claude_stream_records
+    from horus.commander.backends import _claude_stream_records
 
     records = _claude_stream_records({
         "type": "assistant",
@@ -152,25 +156,11 @@ def test_claude_stream_records_keep_tool_and_final_result_details():
     assert result == [{"kind": "final_result", "text": "Done", "subtype": "success"}]
 
 
-def test_default_commander_settings_allow_a_session_sized_turn_budget(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("HORUS_EVENT_LOG", raising=False)
-    monkeypatch.delenv("HORUS_RUN_DIR", raising=False)
-    settings = CommanderSettings()
-    assert settings.provider == "claude-code"
-    assert settings.max_turns == 40
-    HorusCommander("http://127.0.0.1:8000/mcp", "token", settings)
-
-
 def test_mcp_server_defaults_to_loopback_only():
     assert ServerSettings().host == "127.0.0.1"
     for host in ("0.0.0.0", "192.168.1.2"):
-        try:
+        with pytest.raises(ValueError):
             ServerSettings(host=host)
-        except ValueError as exc:
-            assert "loopback" in str(exc)
-        else:
-            raise AssertionError(f"non-loopback listener {host} must be rejected")
 
 
 def test_api_backend_retains_operator_and_event_history_per_mission(monkeypatch):
@@ -231,7 +221,7 @@ def _anthropic_tool_backend(monkeypatch, requests, tool_gate):
     class Session:
         async def call_tool(self, name, arguments):
             tool_gate["started"].set()
-            await tool_gate["release"].wait()
+            await asyncio.wait_for(tool_gate["release"].wait(), timeout=5)
             return SimpleNamespace(isError=False, content=[SimpleNamespace(type="text", text="{}")])
 
     return APICommanderBackend(

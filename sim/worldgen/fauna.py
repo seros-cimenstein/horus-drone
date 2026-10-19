@@ -21,7 +21,7 @@ from pathlib import Path
 
 from sim.worldgen.materials import feather_texture, fur_texture
 from sim.worldgen.meshes import LoftMesh
-from sim.worldgen.sdf import ACTOR_COLLIDE_BITMASK, f
+from sim.worldgen.sdf import ACTOR_COLLIDE_BITMASK, collide_surface, f, rgba
 
 # Texture seed offsets so every species' committed texture has a unique file name and content
 # (Ogre2 caches textures by file name).
@@ -322,7 +322,7 @@ def animal_envelope(name: str, scale: float) -> dict[str, float]:
 
 
 def _coat_material(name: str, rgb: tuple[int, int, int]) -> str:
-    colour = " ".join(f"{channel / 255:.3f}" for channel in rgb) + " 1"
+    colour = rgba(rgb)
     return (f"<material><ambient>{colour}</ambient><diffuse>{colour}</diffuse><pbr><metal>"
             f"<albedo_map>{_texture_uri(name)}</albedo_map>"
             f"<metalness>0.0</metalness><roughness>1.0</roughness></metal></pbr></material>")
@@ -340,8 +340,7 @@ def animal_model(model_name: str, name: str, scale: float, coat_index: int, x: f
               (env["top_z_m"] + env["z_min_m"]) / 2)
     collision = (f'<collision name="body_envelope"><pose>{f(centre[0])} {f(centre[1])} {f(centre[2])} 0 0 0</pose>'
                  f"<geometry><box><size>{f(size[0])} {f(size[1])} {f(size[2])}</size></box></geometry>"
-                 f"<surface><contact><collide_bitmask>{ACTOR_COLLIDE_BITMASK:#06x}</collide_bitmask>"
-                 "</contact></surface></collision>")
+                 f"{collide_surface(ACTOR_COLLIDE_BITMASK)}</collision>")
     visual = (f'<visual name="body"><geometry><mesh>'
               f'<uri>model://horus_animal_{name}/meshes/{name}.obj</uri>'
               f'<scale>{f(scale)} {f(scale)} {f(scale)}</scale></mesh></geometry>'

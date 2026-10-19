@@ -15,22 +15,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
-def _field(value: Any, name: str, default: Any = None) -> Any:
-    if isinstance(value, dict):
-        return value.get(name, default)
-    return getattr(value, name, default)
+from horus.config import load_config
+from horus.mcp_client import open_session, raise_for_error
 
 
 def _jpeg_bytes(image_content: Any) -> bytes:
-    encoded = _field(image_content, "data")
+    encoded = getattr(image_content, "data", None)
     if not isinstance(encoded, str):
         raise RuntimeError("MCP ImageContent did not contain base64 image data")
     try:
         raw = base64.b64decode(encoded, validate=True)
     except (ValueError, binascii.Error) as exc:
         raise RuntimeError("MCP ImageContent contained invalid base64 data") from exc
-    mime_type = str(_field(image_content, "mimeType", _field(image_content, "mime_type", "")))
+    mime_type = str(getattr(image_content, "mimeType", "") or "")
     if mime_type.casefold() == "image/jpeg" and raw.startswith(b"\xff\xd8\xff"):
         return raw
     try:
@@ -56,11 +53,11 @@ def _image_path(directory: Path, timestamp: str, tool: str, index: int, count: i
 def _print_content(
     content: list[Any], *, tool: str, image_root: Path, bearer_token: str
 ) -> None:
-    image_blocks = [block for block in content if _field(block, "type") == "image"]
+    image_blocks = [block for block in content if getattr(block, "type", None) == "image"]
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     for block in content:
-        if _field(block, "type") == "text":
-            text = _field(block, "text")
+        if getattr(block, "type", None) == "text":
+            text = getattr(block, "text", None)
             if isinstance(text, str):
                 print(text.replace(bearer_token, "[REDACTED]"))
     if image_blocks:
@@ -78,42 +75,34 @@ async def _request(
     url: str,
     token: str,
 ) -> None:
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    async with open_session(url, token) as session:
+        if command == "list-tools":
+            tools = (await session.list_tools()).tools
+            for tool in tools:
+                description = getattr(tool, "description", "") or ""
+                suffix = f": {description}" if description else ""
+                print(f"{tool.name}{suffix}".replace(token, "[REDACTED]"))
+            return
+        if command == "get-prompt":
+            if not name:
+                raise ValueError("get-prompt requires a prompt name (for example horus_commander)")
+            result = await session.get_prompt(name)
+            for message in result.messages:
+                content = getattr(message, "content", None)
+                if getattr(content, "type", None) == "text":
+                    text = getattr(content, "text", None)
+                    if isinstance(text, str):
+                        print(text.replace(token, "[REDACTED]"))
+            return
 
-    headers = {"Authorization": f"Bearer {token}"}
-    async with streamablehttp_client(url, headers=headers) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            if command == "list-tools":
-                tools = (await session.list_tools()).tools
-                for tool in tools:
-                    description = _field(tool, "description", "") or ""
-                    suffix = f": {description}" if description else ""
-                    print(f"{tool.name}{suffix}".replace(token, "[REDACTED]"))
-                return
-            if command == "get-prompt":
-                if not name:
-                    raise ValueError("get-prompt requires a prompt name (for example horus_commander)")
-                result = await session.get_prompt(name)
-                for message in result.messages:
-                    content = _field(message, "content")
-                    if _field(content, "type") == "text":
-                        text = _field(content, "text")
-                        if isinstance(text, str):
-                            print(text.replace(token, "[REDACTED]"))
-                return
-
-            result = await session.call_tool(command, arguments)
-            content = list(_field(result, "content", []) or [])
-            _print_content(
-                content,
-                tool=command,
-                image_root=Path("runs/manager"),
-                bearer_token=token,
-            )
-            if _field(result, "isError", _field(result, "is_error", False)):
-                raise RuntimeError("MCP tool call failed")
+        result = await session.call_tool(command, arguments)
+        _print_content(
+            list(getattr(result, "content", None) or []),
+            tool=command,
+            image_root=Path("runs/manager"),
+            bearer_token=token,
+        )
+        raise_for_error(result, command)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -124,14 +113,19 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("tool", help="tool name, list-tools, or get-prompt")
     parser.add_argument("name", nargs="?", help="prompt name when using get-prompt")
     parser.add_argument("--args", default="{}", metavar="JSON", help="tool arguments as a JSON object")
+    parser.add_argument("--config", help="HORUS YAML config naming the token variable (server.auth_token_env)")
     parsed = parser.parse_args(argv)
 
     url = os.environ.get("HORUS_MCP_URL")
     if not url:
         parser.error("HORUS_MCP_URL is required; set it to the HORUS MCP streamable HTTP URL")
-    token = os.environ.get("HORUS_MCP_TOKEN")
+    try:
+        token_env = load_config(parsed.config).server.auth_token_env
+    except (OSError, ValueError) as exc:
+        parser.error(f"could not load the HORUS config: {exc}")
+    token = os.environ.get(token_env)
     if not token:
-        parser.error("HORUS_MCP_TOKEN is required; set it to the HORUS MCP bearer token")
+        parser.error(f"{token_env} is required; set it to the HORUS MCP bearer token")
     if parsed.tool == "get-prompt" and not parsed.name:
         parser.error("get-prompt requires a prompt name (for example horus_commander)")
     if parsed.tool != "get-prompt" and parsed.name is not None:

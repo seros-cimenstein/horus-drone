@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
-# Shared procedural-world generation for `sim/run.sh start` and `scripts/demo.sh`.
-# Sourced, not executed: callers get generate_procedural_world().
+# Shared world helpers for `sim/run.sh start`, `scripts/demo.sh`, `sim/scripts/start_sim.sh` and
+# `scripts/koko/remote_up.sh`. Sourced, not executed: callers get horus_world_profile() and
+# generate_procedural_world().
 
 _procedural_sim_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 _procedural_project_dir="$(cd -- "${_procedural_sim_dir}/.." && pwd)"
+
+horus_world_profile() {
+  # Print "CONFIG PARAM_FILES" (container paths; PARAM_FILES is the colon-separated
+  # HORUS_SITL_PARAM_FILE list) for a world stem, file name or SDF path, or nothing when the
+  # world has no profile. The table lives in sim/scripts/world_profiles.py.
+  python3 "${_procedural_sim_dir}/scripts/world_profiles.py" "$1"
+}
 
 procedural_world_stem() {
   printf 'horus_%s_p%s\n' "$1" "$2"
@@ -77,8 +85,9 @@ generate_procedural_world() {
     printf '  Stratum:   %s%s\n' "${cached_stratum}" \
       "$([[ -n "${stratum}" ]] && printf ' (forced)' || printf ' (sampled from seed)')" >&2
   fi
-  printf '  SDF:       /horus/sim/generated/%s/%s.sdf\n' "${stem}" "${stem}" >&2
-  printf '  Config:    config/horus_procedural_%s.yaml (HORUS_CONFIG=/horus/config/horus_procedural_%s.yaml in the container)\n' \
-    "${kind}" "${kind}" >&2
+  local profile_config
+  read -r profile_config _ <<< "$(horus_world_profile "${stem}")"
+  printf '  Config:    %s (HORUS_CONFIG=%s in the container)\n' \
+    "${profile_config#/horus/}" "${profile_config}" >&2
   printf '/horus/sim/generated/%s/%s.sdf\n' "${stem}" "${stem}"
 }

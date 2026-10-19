@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -14,9 +12,10 @@ import pytest
 from horus.config import HorusConfig
 from horus.executor import HorusExecutor
 from horus.flight import Pose
-from horus.flight.link import Telemetry
 from horus.mcp_server.server import create_application, create_mcp
 from horus.repl.app import _interactive_arguments
+
+from tests.fakes import FakeFlight
 
 ROOT = Path(__file__).resolve().parents[1]
 TOKEN = "repl-test-token"
@@ -24,9 +23,12 @@ TOKEN = "repl-test-token"
 
 @pytest.mark.parametrize(
     ("line", "tool"),
-    [("/hold", "hold"), ("/rth", "rth"), ("/LAND", "land"), ("hold", "hold"), ("rth", "rth"), ("land", "land")],
+    [
+        ("/hold", "hold"), ("/rth", "rth"), ("/LAND", "land"), ("hold", "hold"), ("rth", "rth"),
+        ("land", "land"), ("stop now", "hold"), ("STOP!", "hold"), ("Return home", "rth"),
+    ],
 )
-def test_documented_slash_and_bare_emergencies_route_to_emergency_tools(line, tool):
+def test_slash_and_short_imperative_emergencies_route_to_emergency_tools(line, tool):
     assert _interactive_arguments(line) == (tool, {})
 
 
@@ -48,17 +50,35 @@ def _row(candidate_id, label, shirt=None, quoted=True):
     return row
 
 
-def _selection_row(candidate_id, *, box, confidence):
+def _selection_row(candidate_id, *, box, confidence, shirt="red"):
     return {
         "id": candidate_id,
         "bbox": box,
-        "attributes": {"shirt_colour": "red"},
+        "attributes": {"shirt_colour": shirt},
         "confidence": confidence,
     }
 
 
+def test_find_candidate_takes_the_exact_attribute_then_the_largest_box_then_the_lowest_id():
+    from horus.repl.missions import _find_candidate
+
+    rows = [
+        _selection_row(2, box=[0, 0, 20, 20], confidence=0.9),
+        _selection_row(9, box=[0, 0, 30, 30], confidence=0.9),
+        _selection_row(4, box=[0, 0, 30, 30], confidence=0.9),
+        _selection_row(1, box=[0, 0, 90, 90], confidence=0.9, shirt="green"),
+    ]
+    rule = {"attribute": "shirt_colour", "choose": "largest"}
+
+    assert _find_candidate(rows, equals="red", **rule)["id"] == 4
+    assert _find_candidate(rows, equals="blue", **rule) is None
+    # Rows without a confidence value (synthetic/partial tables) are not gated by the floor.
+    unscored = {"id": 5, "attributes": {"shirt_colour": "red"}, "bbox": [0, 0, 10, 10]}
+    assert _find_candidate([unscored], equals="red", **rule)["id"] == 5
+
+
 def test_select_candidate_rejects_a_low_confidence_largest_match():
-    from horus.repl.app import _select_candidate
+    from horus.repl.missions import _select_candidate
 
     rows = [_selection_row(4, box=[0, 0, 90, 90], confidence=0.27)]
 
@@ -67,7 +87,7 @@ def test_select_candidate_rejects_a_low_confidence_largest_match():
 
 
 def test_select_candidate_skips_a_low_confidence_match_for_a_confident_smaller_one():
-    from horus.repl.app import _select_candidate
+    from horus.repl.missions import _select_candidate
 
     rows = [
         _selection_row(4, box=[0, 0, 90, 90], confidence=0.27),
@@ -83,7 +103,7 @@ def test_select_candidate_mission_step_honours_the_confidence_floor(tmp_path):
     from contextlib import redirect_stdout
     from unittest.mock import patch
 
-    from horus.repl.app import run_mission
+    from horus.repl.missions import run_mission
 
     mission = tmp_path / "select-candidate.yaml"
     mission.write_text(
@@ -102,7 +122,7 @@ def test_select_candidate_mission_step_honours_the_confidence_floor(tmp_path):
         assert name == "list_candidates"
         return {"candidate_table": table}
 
-    with patch("horus.repl.app._tool_call", side_effect=tool_call), redirect_stdout(io.StringIO()):
+    with patch("horus.repl.missions.call_json", side_effect=tool_call), redirect_stdout(io.StringIO()):
         with pytest.raises(RuntimeError, match=r"0\.9"):
             asyncio.run(run_mission(session=object(), path=mission))
 
@@ -118,7 +138,7 @@ def _run_resolution_mission(tmp_path, tables, *, extra="", settle_s=1.0, timeout
     from contextlib import redirect_stdout
     from unittest.mock import patch
 
-    from horus.repl.app import run_mission
+    from horus.repl.missions import run_mission
 
     mission = tmp_path / "resolve.yaml"
     mission.write_text(
@@ -152,8 +172,8 @@ def _run_resolution_mission(tmp_path, tables, *, extra="", settle_s=1.0, timeout
         clock[0] += seconds
 
     out = io.StringIO()
-    with patch("horus.repl.app._tool_call", side_effect=tool_call), patch("horus.repl.app.asyncio.sleep", sleep), \
-            patch("horus.repl.app.time.monotonic", lambda: clock[0]), redirect_stdout(out):
+    with patch("horus.repl.missions.call_json", side_effect=tool_call), patch("horus.repl.missions.asyncio.sleep", sleep), \
+            patch("horus.repl.missions.time.monotonic", lambda: clock[0]), redirect_stdout(out):
         asyncio.run(run_mission(session=object(), path=mission))
     line = next(line for line in out.getvalue().splitlines() if "resolve_candidate:" in line)
     return json.loads(line.split("resolve_candidate: ", 1)[1]), calls
@@ -221,14 +241,14 @@ def test_resolve_candidate_bounds_a_hanging_list_candidates_call():
     import asyncio
     from unittest.mock import patch
 
-    from horus.repl.app import _resolution_spec, _resolve_candidate
+    from horus.repl.missions import _resolution_spec, _resolve_candidate
 
     async def hang(*_args, **_kwargs):
         await asyncio.Event().wait()
 
     resolution = _resolution_spec({"class_name": "person", "store_as": "t", "timeout_s": 0.3, "settle_s": 0.2})
     started = time.monotonic()
-    with patch("horus.repl.app._tool_call", side_effect=hang):
+    with patch("horus.repl.missions.call_json", side_effect=hang):
         outcome = asyncio.run(_resolve_candidate(object(), resolution))
     assert outcome["reason"] == "no_fresh_observation"
     assert time.monotonic() - started < 1.0
@@ -241,69 +261,10 @@ def test_resolve_candidate_bounds_a_hanging_list_candidates_call():
      {"class_name": "person", "store_as": "t", "settle_s": 0}],
 )
 def test_resolve_candidate_rejects_malformed_specs(spec):
-    from horus.repl.app import _resolution_spec
+    from horus.repl.missions import _resolution_spec
 
     with pytest.raises(ValueError):
         _resolution_spec(spec)
-
-
-class _InertFlight:
-    """No sockets: fresh GUIDED telemetry, and every command is recorded."""
-
-    def __init__(self):
-        self.commands: list[str] = []
-
-    def telemetry(self):
-        now = time.monotonic()
-        return Telemetry(
-            "2026-09-30T00:00:00+00:00",
-            now,
-            Pose(0.0, 0.0, 2.0),
-            mode="GUIDED",
-            armed=True,
-            heartbeat_monotonic=now,
-            heading_deg=0.0,
-            pose_updated_monotonic=now,
-            heading_updated_monotonic=now,
-        )
-
-    def heartbeat_ok(self, max_age_s: float = 3.0) -> bool:
-        return True
-
-    def __getattr__(self, name):
-        if name.startswith("_"):
-            raise AttributeError(name)
-        return lambda *args, **kwargs: self.commands.append(name)
-
-
-class _RunningServer:
-    def __init__(self, app):
-        import uvicorn
-
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.socket.bind(("127.0.0.1", 0))
-        self.socket.listen(128)
-        self.socket.setblocking(False)
-        self.port = self.socket.getsockname()[1]
-        self.server = uvicorn.Server(
-            uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="critical", access_log=False)
-        )
-        self.thread = threading.Thread(target=self.server.run, kwargs={"sockets": [self.socket]}, daemon=True)
-        self.thread.start()
-        deadline = time.monotonic() + 10.0
-        while not self.server.started and self.thread.is_alive() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert self.server.started, "MCP test server did not start"
-
-    @property
-    def url(self) -> str:
-        return f"http://127.0.0.1:{self.port}/mcp"
-
-    def close(self) -> None:
-        self.server.should_exit = True
-        self.thread.join(timeout=5.0)
-        self.socket.close()
 
 
 # A Claude Code stand-in: operator turns never finish on their own (like a long model turn);
@@ -346,11 +307,11 @@ def _claude_log(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def test_repl_slash_hold_interrupts_a_running_commander_turn_while_input_stays_live(tmp_path):
-    flight = _InertFlight()
+def test_repl_slash_hold_interrupts_a_running_commander_turn_while_input_stays_live(tmp_path, serve):
+    flight = FakeFlight(Pose(0.0, 0.0, 2.0), armed=True, mode="GUIDED")
     executor = HorusExecutor(flight, HorusConfig().executor, autostart=False)
     active = executor.submit_skill("goto", {"pose": {"north_m": 1.0, "east_m": 0.0, "up_m": 2.0}})
-    server = _RunningServer(create_application(create_mcp(HorusConfig(), executor, flight, None), token=TOKEN))
+    server = serve(create_application(create_mcp(HorusConfig(), executor, flight, None), token=TOKEN))
     fake_claude = tmp_path / "fake-claude"
     fake_claude.write_text(f"#!{sys.executable}\n{_SLOW_CLAUDE}", encoding="utf-8")
     fake_claude.chmod(0o755)
@@ -384,14 +345,13 @@ def test_repl_slash_hold_interrupts_a_running_commander_turn_while_input_stays_l
         # then the documented emergency command.
         repl.stdin.write("then follow the person in red\n/hold\n")
         repl.stdin.flush()
-        assert _wait_for(lambda: "hold" in flight.commands)
+        assert _wait_for(lambda: ("hold",) in flight.commands)
         assert _wait_for(lambda: any(e["kind"] == "interrupt" for e in _claude_log(claude_log)))
         stdout, stderr = repl.communicate(timeout=30)  # EOF ends the REPL
     finally:
         if repl.poll() is None:
             repl.kill()
             repl.communicate()
-        server.close()
         executor.close()
 
     assert repl.returncode == 0, stderr

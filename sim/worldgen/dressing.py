@@ -20,9 +20,8 @@ from sim.worldgen.appearance import Appearance, sample_appearance
 from sim.worldgen.environment import CANONICAL_ENVIRONMENT, Environment, sample_environment
 from sim.worldgen.fauna import animal_envelope, animal_model, sample_individual, species
 from sim.worldgen.layout import (
-    GEOFENCE_INSET_M, HOME_PAD_KEEPOUT_M, URBAN_ARTERIAL_HALF_WIDTH_M,
-    URBAN_SIDEWALK_WIDTH_M, URBAN_STREET_HALF_WIDTH_M, ForestLayout, UrbanLayout,
-    distance_to_path, distance_to_paths,
+    GEOFENCE_INSET_M, HOME_PAD_KEEPOUT_M, URBAN_SIDEWALK_WIDTH_M, ForestLayout, UrbanLayout,
+    distance_to_path, distance_to_paths, point_segment_distance, road_half_width,
 )
 from sim.worldgen.people import (
     PERSON_ASSETS, SITTING_CLOTHING, SITTING_POSSIBLE_SHIRT_COLOURS, SITTING_SHIRT_COLOUR,
@@ -130,7 +129,7 @@ def sample_dressing(kind: str, layout: ForestLayout | UrbanLayout, *, stratum: s
     chaotic = chosen == "chaotic"
     dressing = Dressing(chosen, sample_environment(substream(seed, "environment"), chaotic=chaotic),
                         asset_prefix=f"h{kind[0]}{seed}_",
-                        actor_inset_m=float(getattr(layout, "actor_inset_m", GEOFENCE_INSET_M)))
+                        actor_inset_m=float(layout.actor_inset_m))
     constraints, reserved = _person_constraints(kind, layout, substream(seed, "roles"))
     for person in layout.people:
         rules = constraints.get(person.model, {})
@@ -140,10 +139,6 @@ def sample_dressing(kind: str, layout: ForestLayout | UrbanLayout, *, stratum: s
             rng, nominal=nominal, child=rules.get("child", False), outdoor=kind == "forest",
             hivis=rules.get("hivis", False), exclude=frozenset() if nominal else reserved)
     return dressing
-
-
-def person_asset(dressing: Dressing, model: str, legacy_asset: str) -> str:
-    return legacy_asset if dressing.canonical else f"{dressing.asset_prefix}{model}"
 
 
 def dress_person(dressing: Dressing, record: dict) -> dict:
@@ -159,7 +154,7 @@ def dress_person(dressing: Dressing, record: dict) -> dict:
         record["clothing"] = PERSON_ASSETS[legacy]["clothing"]
         return record
     appearance = dressing.appearances[record["model"]]
-    record["asset"] = person_asset(dressing, record["model"], legacy)
+    record["asset"] = f"{dressing.asset_prefix}{record['model']}"
     record["appearance"] = appearance
     record["envelope"] = appearance.envelope(posture)
     if posture == "sitting":
@@ -203,8 +198,6 @@ def dress_person(dressing: Dressing, record: dict) -> dict:
 
 def person_files(dressing: Dressing, records: list[dict], *, textures: bool) -> dict[str, bytes | str]:
     files: dict[str, bytes | str] = {}
-    if dressing.canonical:
-        return files
     for index, record in enumerate(records):
         files.update(actor_model_files(record["asset"], record["appearance"], record["posture"],
                                        textures=textures, seed=index + 1))
@@ -218,8 +211,6 @@ def _loop_length(points) -> float:
 def add_fauna(dressing: Dressing, kind: str, layout: Any, people: list[dict],
               areas: dict[str, list[tuple[float, float]]], height) -> list[dict]:
     """Animal agents: dogs walking with route walkers, and wandering herds/flocks in areas."""
-    if dressing.canonical:
-        return []
     rng = substream(layout.seed, "fauna")
     chaotic = dressing.stratum == "chaotic"
     animals: list[dict] = []
@@ -277,7 +268,7 @@ def _free_spawn(centre: tuple[float, float], polygon: list[tuple[float, float]],
     """
     radius = max(math.hypot(x, y) for x in (envelope["x_min_m"], envelope["x_max_m"])
                  for y in (envelope["y_min_m"], envelope["y_max_m"]))
-    inradius = min(_point_segment(centre, a, b) for a, b in zip(polygon, polygon[1:] + polygon[:1]))
+    inradius = min(point_segment_distance(centre, a, b) for a, b in zip(polygon, polygon[1:] + polygon[:1]))
     step = 2 * radius + 0.4
     candidates = [centre]
     ring = 1
@@ -293,14 +284,6 @@ def _free_spawn(centre: tuple[float, float], polygon: list[tuple[float, float]],
     raise ValueError(f"no non-overlapping spawn point for an animal in area around {centre}")
 
 
-def _point_segment(point: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
-    dx, dy = b[0] - a[0], b[1] - a[1]
-    length2 = dx * dx + dy * dy
-    t = 0.0 if length2 == 0 else max(0.0, min(1.0, ((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / length2))
-    return math.hypot(point[0] - (a[0] + t * dx), point[1] - (a[1] + t * dy))
-    return animals
-
-
 def animal_models(animals: list[dict], height) -> list[str]:
     return [animal_model(a["model"], a["species"], a["scale"], a["coat"], a["position"][0], a["position"][1],
                          height(*a["position"]), a["yaw"]) for a in animals]
@@ -311,10 +294,8 @@ def fauna_areas(kind: str, layout: Any) -> dict[str, list[tuple[float, float]]]:
     if kind == "forest":
         # Generated 1.2 km forests have several clearings; graze the first two (open,
         # tree-free meadow, validated by the sampler's clearing exclusion).
-        clearings = getattr(layout, "clearings", ()) or (
-            (layout.clearing[0], layout.clearing[1], layout.clearing_radius),)
         areas: dict[str, list[tuple[float, float]]] = {}
-        for index, (cx, cy, radius) in enumerate(clearings[:2]):
+        for index, (cx, cy, radius) in enumerate(layout.clearings[:2]):
             r = radius * 0.6
             name = "meadow" if index == 0 else f"meadow_{index + 1}"
             areas[name] = [(cx + r * math.cos(a), cy + r * math.sin(a))
@@ -341,19 +322,14 @@ def fauna_areas(kind: str, layout: Any) -> dict[str, list[tuple[float, float]]]:
 def _forest_clutter_clear(layout: Any, point: tuple[float, float], size: float) -> bool:
     """True when forest clutter at ``point`` clears trails, creeks, clearings, camps and the
     mission people (the missing hiker's canopy and the follow occluder included)."""
-    trails = getattr(layout, "trails", ()) or (layout.trail,)
-    creeks = getattr(layout, "creeks", ()) or (layout.creek,)
-    clearings = getattr(layout, "clearings", ()) or (
-        (layout.clearing[0], layout.clearing[1], layout.clearing_radius),)
-    camps = getattr(layout, "camps", ()) or (layout.camp,)
-    if distance_to_paths(point, trails) < size + 3.5:
+    if distance_to_paths(point, layout.trails) < size + 3.5:
         return False
-    if distance_to_paths(point, creeks) < size + 2.5:
+    if distance_to_paths(point, layout.creeks) < size + 2.5:
         return False
     if any(math.hypot(point[0] - cx, point[1] - cy) < radius + size + 2.0
-           for cx, cy, radius in clearings):
+           for cx, cy, radius in layout.clearings):
         return False
-    if any(math.hypot(point[0] - cx, point[1] - cy) < 15.0 + size for cx, cy in camps):
+    if any(math.hypot(point[0] - cx, point[1] - cy) < 15.0 + size for cx, cy in layout.camps):
         return False
     if math.hypot(point[0] - layout.follow_occluder_xy[0], point[1] - layout.follow_occluder_xy[1]) \
             < size + 4.0:
@@ -364,14 +340,12 @@ def _forest_clutter_clear(layout: Any, point: tuple[float, float], size: float) 
     return True
 
 
-def add_clutter(dressing: Dressing, kind: str, layout: Any, agents: list[dict], height) -> list[str]:
-    """Static clutter kept clear of every actor route, area and the home pad.
+def add_clutter(dressing: Dressing, kind: str, layout: Any, agents: list[dict], height) -> None:
+    """Place static clutter clear of every actor route, area and the home pad.
 
-    Procedural forest clutter becomes scenery (``clutter_scenery`` converts these items into
-    instanced rocks and textured meshes); urban clutter still emits primitive model SDFs.
+    Placement only: the items land in ``dressing.clutter`` and the world builders emit them
+    as scenery pieces (``clutter_scenery``) in their scenery tiles.
     """
-    if dressing.canonical:
-        return []
     rng = substream(layout.seed, "clutter")
     chaotic = dressing.stratum == "chaotic"
     paths: list[tuple[list, float]] = []
@@ -392,9 +366,8 @@ def add_clutter(dressing: Dressing, kind: str, layout: Any, agents: list[dict], 
     count = rng.randint(10, 16) if chaotic else rng.randint(5, 10)
     kinds = (("stump", "boulder", "deadfall", "cairn") if kind == "forest"
              else ("planter", "bollard", "cone", "bike_rack", "crate_stack"))
-    map_half = float(getattr(layout, "map", None).half_m)
-    half = map_half - 45.0
-    city = getattr(layout, "city", None)
+    half = float(layout.map.half_m) - 45.0
+    city = layout.city if kind == "urban" else None
     for _ in range(count * 30):
         if len(placed) >= count:
             break
@@ -409,18 +382,14 @@ def add_clutter(dressing: Dressing, kind: str, layout: Any, agents: list[dict], 
         if kind == "urban" and any(abs(x - b.x) < b.sx / 2 + size + 0.5 and abs(y - b.y) < b.sy / 2 + size + 0.5
                                    for b in layout.buildings):
             continue
-        if kind == "urban" and city is not None:
+        if kind == "urban":
             # Wider arterials need the road's own half width; keep clutter off the pavement
             # and out of every plaza and park (the mission crowds live there).
             clearance = size + 0.6 + URBAN_SIDEWALK_WIDTH_M
-            if any(abs(x - road) < clearance + (URBAN_ARTERIAL_HALF_WIDTH_M
-                                                if road in city.arterial_roads_x
-                                                else URBAN_STREET_HALF_WIDTH_M)
+            if any(abs(x - road) < clearance + road_half_width(road, city.arterial_roads_x)
                    for road in layout.roads_x):
                 continue
-            if any(abs(y - road) < clearance + (URBAN_ARTERIAL_HALF_WIDTH_M
-                                                if road in city.arterial_roads_y
-                                                else URBAN_STREET_HALF_WIDTH_M)
+            if any(abs(y - road) < clearance + road_half_width(road, city.arterial_roads_y)
                    for road in layout.roads_y):
                 continue
             if any(math.hypot(x - plaza.x, y - plaza.y) < plaza.half_size + size + 1.0
@@ -429,9 +398,6 @@ def add_clutter(dressing: Dressing, kind: str, layout: Any, agents: list[dict], 
             if any(math.hypot(x - park.x, y - park.y) < park.half_size + size + 1.0
                    for park in city.parks):
                 continue
-        elif kind == "urban" and (any(abs(x - road) < 4.9 + size for road in layout.roads_x)
-                                  or any(abs(y - road) < 4.9 + size for road in layout.roads_y)):
-            continue
         if any(math.hypot(x - other["x"], y - other["y"]) < size + other["size"] + 0.5 for other in placed):
             continue
         yaw = rng.uniform(-math.pi, math.pi)
@@ -439,8 +405,6 @@ def add_clutter(dressing: Dressing, kind: str, layout: Any, agents: list[dict], 
                        "y": round(y, 3), "z": round(height(x, y), 3), "yaw": round(yaw, 3),
                        "size": round(size, 3)})
     dressing.clutter = placed
-    # Placement only: callers emit the pieces via ``clutter_scenery`` into their scenery tiles.
-    return []
 
 
 def _mesh_piece(name: str, texture: str, mesh: LoftMesh,
@@ -680,8 +644,6 @@ def camp_scenery(camp_xy: tuple[float, float], ground_z: float, *,
 # Sim-time disturbance schedule. Every event keeps the agent within its declared speed cap and
 # acceleration limits; the scenario driver applies them at fixed 0.05 s steps.
 def sample_events(dressing: Dressing, agents: list[dict], seed: int, horizon_s: float = 600.0) -> list[dict]:
-    if dressing.canonical:
-        return []
     rng = substream(seed, "events")
     chaotic = dressing.stratum == "chaotic"
     events: list[dict] = []

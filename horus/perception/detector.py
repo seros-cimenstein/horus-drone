@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .geometry import iou
+from .onnx_session import load_onnx_session
 from .types import Detection
 
 
@@ -14,7 +16,6 @@ class DetectorConfig:
     """Configuration for the CPU YOLO ONNX proposal model."""
 
     model_name: str = "models/yolov8n.onnx"
-    model_path: str | None = None
     confidence: float = 0.25
     nms_iou: float = 0.45
     input_size: int = 640
@@ -25,11 +26,6 @@ class DetectorConfig:
     onnx_inter_op_num_threads: int = 1
 
     def __post_init__(self) -> None:
-        for name in ("onnx_intra_op_num_threads", "onnx_inter_op_num_threads"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ValueError(f"{name} must be a positive integer")
-
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError("confidence must be in [0, 1]")
         if not 0.0 <= self.nms_iou <= 1.0:
@@ -49,7 +45,7 @@ class YOLODetector:
     @property
     def model_id(self) -> str:
         """Configured model path, useful for status reporting."""
-        return self.config.model_path or self.config.model_name
+        return self.config.model_name
 
     def _load(self) -> None:
         if self._model is not None:
@@ -59,25 +55,12 @@ class YOLODetector:
             raise ValueError(f"YOLODetector requires an ONNX model file, got {str(model_path)!r}")
         if not model_path.is_file():
             raise FileNotFoundError(f"configured YOLO ONNX model does not exist: {model_path}")
-        try:
-            import onnxruntime
-        except ImportError as exc:
-            raise RuntimeError(
-                "onnxruntime is required for YOLO ONNX inference; install horus-drone[perception]"
-            ) from exc
-        options = onnxruntime.SessionOptions()
-        options.intra_op_num_threads = self.config.onnx_intra_op_num_threads
-        options.inter_op_num_threads = self.config.onnx_inter_op_num_threads
-        self._model = onnxruntime.InferenceSession(
+        self._model, self._input_name = load_onnx_session(
             str(model_path),
-            sess_options=options,
-            providers=["CPUExecutionProvider"],
+            purpose="YOLO",
+            intra_op_num_threads=self.config.onnx_intra_op_num_threads,
+            inter_op_num_threads=self.config.onnx_inter_op_num_threads,
         )
-        inputs = self._model.get_inputs()
-        if not inputs:
-            self._model = None
-            raise RuntimeError(f"YOLO ONNX model has no inputs: {model_path}")
-        self._input_name = inputs[0].name
 
     def detect(self, image: Any) -> list[Detection]:
         """Run inference on one OpenCV BGR image and return source-pixel boxes."""
@@ -120,7 +103,10 @@ class YOLODetector:
             raise ValueError(f"unsupported YOLO ONNX output shape: {np.asarray(outputs[0]).shape}")
 
         class_names = self.config.class_names
-        if class_names is None and Path(self.model_id).stem.lower() == "yolov8n":
+        # Any 80-class YOLO export (v8: 4 box + 80 scores; v5: + objectness) is a COCO model
+        # whatever its file name; a custom 80-class model must set class_names explicitly.
+        coco_widths = (4 + len(_COCO_CLASSES), 5 + len(_COCO_CLASSES))
+        if class_names is None and any(dim in coco_widths for dim in rows.shape):
             class_names = _COCO_CLASSES
         has_objectness = self.config.has_objectness
         if has_objectness is None:
@@ -158,7 +144,7 @@ class YOLODetector:
         for proposal in proposals:
             box, _, class_id = proposal
             if any(
-                class_id == kept_id and _box_iou(box, kept_box) > self.config.nms_iou
+                class_id == kept_id and iou(box, kept_box) > self.config.nms_iou
                 for kept_box, _, kept_id in kept
             ):
                 continue
@@ -194,13 +180,3 @@ _COCO_CLASSES = (
     "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier",
     "toothbrush",
 )
-
-
-def _box_iou(left: tuple[float, float, float, float], right: tuple[float, float, float, float]) -> float:
-    x1, y1 = max(left[0], right[0]), max(left[1], right[1])
-    x2, y2 = min(left[2], right[2]), min(left[3], right[3])
-    intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
-    left_area = max(0.0, left[2] - left[0]) * max(0.0, left[3] - left[1])
-    right_area = max(0.0, right[2] - right[0]) * max(0.0, right[3] - right[1])
-    union = left_area + right_area - intersection
-    return intersection / union if union > 0.0 else 0.0

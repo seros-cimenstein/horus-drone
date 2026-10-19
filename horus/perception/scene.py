@@ -30,23 +30,39 @@ group), ``vehicle_roll_deg``/``vehicle_pitch_deg`` with ``attitude_age_s``, and
 captured. A missing or older-than-``CAMERA_STATE_MAX_AGE_S`` required field (or a reported
 attitude going missing/stale) makes the camera state unavailable; it is never assumed
 stationary. Unreported optional components are listed as unmeasured, never assumed unchanged.
+
+Camera-state parsing, drift and tolerances live in ``camera_state``; the per-track motion
+samples and the motion fit in ``scene_motion``. This module keeps the monitor and region watches.
 """
 
 from __future__ import annotations
 
-from collections import OrderedDict, deque
-from collections.abc import Callable, Mapping, Sequence
+from collections import OrderedDict
+from collections.abc import Callable, Sequence
 import json
 import math
 import threading
 import time
-from typing import Any, NamedTuple
+from typing import Any
 
-# Motion history: samples inside this window (ending at a track's newest sample) are kept.
-MOTION_WINDOW_S = 2.0
-MAX_SAMPLES_PER_TRACK = 32
-MIN_MOTION_SAMPLES = 3
-MIN_MOTION_SPAN_S = 0.25
+from .camera_state import (
+    CAMERA_HFOV_TOLERANCE_DEG,
+    CameraState,
+    camera_deviation,
+    camera_state_from_pose,
+    camera_tolerances,
+    unmeasured_camera_components,
+)
+from .scene_motion import (
+    MIN_MOTION_SAMPLES,
+    MIN_MOTION_SPAN_S,
+    MOTION_WINDOW_S,
+    MotionSample,
+    TrackHistory,
+    camera_motion,
+    fit_motion,
+)
+
 # Tracks unseen this long (frame time) are forgotten; at most MAX_TRACKS histories are kept.
 TRACK_RETENTION_S = 10.0
 MAX_TRACKS = 256
@@ -54,19 +70,7 @@ MAX_TRACKS = 256
 STALE_AFTER_S = 1.0
 # Inter-frame intervals longer than this are stream discontinuities: no timer crosses them.
 STREAM_GAP_S = 1.0
-# Motion fit confidence halves when the centre fit residual reaches this fraction of the frame.
-RESIDUAL_HALF_CONFIDENCE = 0.02
 
-# Camera-state freshness and the drift tolerated before a fixed-camera watch pauses.
-CAMERA_STATE_MAX_AGE_S = 1.5
-CAMERA_HORIZONTAL_TOLERANCE_M = 0.5
-CAMERA_VERTICAL_TOLERANCE_M = 0.3
-CAMERA_HEADING_TOLERANCE_DEG = 3.0
-CAMERA_GIMBAL_TOLERANCE_DEG = 2.0
-CAMERA_HFOV_TOLERANCE_DEG = 0.5
-# Vehicle attitude drifts are small in a steady hover; braking or gusts exceed this. A stabilized
-# gimbal may cancel them, so pausing on them is conservative (never an invented transition).
-CAMERA_ATTITUDE_TOLERANCE_DEG = 3.0
 # A paused watch resumes only after the camera matched its reference this long.
 WATCH_RESUME_STABLE_S = 1.0
 # Frame timestamps are floats; thresholds tolerate accumulated rounding of this size.
@@ -82,15 +86,6 @@ MAX_DWELL_S = 3600.0
 MAX_TTL_S = 86400.0
 MAX_TEXT_LENGTH = 64
 
-REGION_EVENT_KINDS = (
-    "region_enter",
-    "region_exit",
-    "region_dwell",
-    "region_watch_paused",
-    "region_watch_resumed",
-    "region_watch_expired",
-)
-
 EventSink = Callable[..., Any]
 _Entry = tuple[int, str, str, float, float]
 
@@ -98,152 +93,6 @@ _Entry = tuple[int, str, str, float, float]
 def quote_label(label: Any) -> str:
     """JSON-quote a detector/grounder label (bounded) so it is always data, never instruction."""
     return json.dumps(str(label)[:MAX_TEXT_LENGTH], ensure_ascii=False)
-
-
-class CameraState(NamedTuple):
-    """Camera position (local metres), heading and gimbal attitude (degrees) at frame capture.
-
-    Vehicle roll/pitch, gimbal roll and field of view are optional: ``None`` means not measured,
-    never level or unchanged.
-    """
-
-    north_m: float
-    east_m: float
-    up_m: float
-    heading_deg: float
-    gimbal_pitch_deg: float
-    gimbal_yaw_deg: float
-    hfov_deg: float | None = None
-    vehicle_roll_deg: float | None = None
-    vehicle_pitch_deg: float | None = None
-    gimbal_roll_deg: float | None = None
-
-
-def camera_state_from_pose(pose: Any) -> tuple[CameraState | None, str | None]:
-    """Parse the frame-pose contract; return ``(state, None)`` or ``(None, reason)``."""
-    if not isinstance(pose, Mapping):
-        return None, "camera_pose_unavailable"
-    groups = (
-        ("position", ("north_m", "east_m", "up_m"), "pose_age_s"),
-        ("heading", ("heading_deg",), "heading_age_s"),
-        ("gimbal", ("gimbal_pitch_deg", "gimbal_yaw_deg"), "gimbal_age_s"),
-    )
-    values: list[float] = []
-    for group, keys, age_key in groups:
-        numbers = [_finite(pose.get(key)) for key in keys]
-        if any(number is None for number in numbers):
-            return None, f"{group}_unavailable"
-        age = _finite(pose.get(age_key))
-        if age is None:
-            return None, f"{group}_age_unknown"
-        if age > CAMERA_STATE_MAX_AGE_S:
-            return None, f"{group}_stale"
-        values.extend(numbers)  # type: ignore[arg-type]
-    roll = pitch = None
-    if "vehicle_roll_deg" in pose or "vehicle_pitch_deg" in pose:
-        # Once a provider reports attitude it must stay fresh; stale attitude is not "level".
-        roll, pitch = _finite(pose.get("vehicle_roll_deg")), _finite(pose.get("vehicle_pitch_deg"))
-        age = _finite(pose.get("attitude_age_s"))
-        if roll is None or pitch is None:
-            return None, "attitude_unavailable"
-        if age is None:
-            return None, "attitude_age_unknown"
-        if age > CAMERA_STATE_MAX_AGE_S:
-            return None, "attitude_stale"
-    gimbal_roll = None
-    if "gimbal_roll_deg" in pose:
-        # Same MOUNT_STATUS sample (and age) as gimbal pitch/yaw.
-        gimbal_roll = _finite(pose.get("gimbal_roll_deg"))
-        if gimbal_roll is None:
-            return None, "gimbal_unavailable"
-    return (
-        CameraState(*values, _finite(pose.get("camera_hfov_deg")), roll, pitch, gimbal_roll),
-        None,
-    )
-
-
-def unmeasured_camera_components(state: CameraState) -> list[str]:
-    """Camera degrees of freedom this state cannot vouch for (they may change undetected)."""
-    missing = []
-    if state.vehicle_roll_deg is None:
-        missing.extend(("vehicle_roll", "vehicle_pitch"))
-    if state.gimbal_roll_deg is None:
-        missing.append("gimbal_roll")
-    if state.hfov_deg is None:
-        missing.append("zoom_field_of_view")
-    return missing
-
-
-def camera_deviation(reference: CameraState, current: CameraState) -> tuple[dict[str, float], list[str]]:
-    """Return absolute drift of measured camera components and the names of exceeded tolerances.
-
-    A component measured in only one of the two states counts as exceeded: it may have changed.
-    """
-    deviation = {
-        "horizontal_m": math.hypot(current.north_m - reference.north_m, current.east_m - reference.east_m),
-        "vertical_m": abs(current.up_m - reference.up_m),
-        "heading_deg": abs(_wrap_degrees(current.heading_deg - reference.heading_deg)),
-        "gimbal_pitch_deg": abs(current.gimbal_pitch_deg - reference.gimbal_pitch_deg),
-        "gimbal_yaw_deg": abs(_wrap_degrees(current.gimbal_yaw_deg - reference.gimbal_yaw_deg)),
-    }
-    exceeded = [name for name, limit in _TOLERANCES.items() if deviation[name] > limit]
-    for name, before, after, limit in (
-        ("hfov_deg", reference.hfov_deg, current.hfov_deg, CAMERA_HFOV_TOLERANCE_DEG),
-        ("vehicle_roll_deg", reference.vehicle_roll_deg, current.vehicle_roll_deg, CAMERA_ATTITUDE_TOLERANCE_DEG),
-        ("vehicle_pitch_deg", reference.vehicle_pitch_deg, current.vehicle_pitch_deg, CAMERA_ATTITUDE_TOLERANCE_DEG),
-        ("gimbal_roll_deg", reference.gimbal_roll_deg, current.gimbal_roll_deg, CAMERA_GIMBAL_TOLERANCE_DEG),
-    ):
-        if before is None and after is None:
-            continue
-        if before is None or after is None:
-            exceeded.append(name)
-            continue
-        deviation[name] = abs(_wrap_degrees(after - before))
-        if deviation[name] > limit:
-            exceeded.append(name)
-    return {name: round(value, 3) for name, value in deviation.items()}, exceeded
-
-
-_TOLERANCES = {
-    "horizontal_m": CAMERA_HORIZONTAL_TOLERANCE_M,
-    "vertical_m": CAMERA_VERTICAL_TOLERANCE_M,
-    "heading_deg": CAMERA_HEADING_TOLERANCE_DEG,
-    "gimbal_pitch_deg": CAMERA_GIMBAL_TOLERANCE_DEG,
-    "gimbal_yaw_deg": CAMERA_GIMBAL_TOLERANCE_DEG,
-}
-
-
-def camera_tolerances() -> dict[str, float]:
-    """Camera drift limits used for watches and motion ``camera_motion`` classification."""
-    return {
-        **_TOLERANCES,
-        "vehicle_roll_deg": CAMERA_ATTITUDE_TOLERANCE_DEG,
-        "vehicle_pitch_deg": CAMERA_ATTITUDE_TOLERANCE_DEG,
-        "gimbal_roll_deg": CAMERA_GIMBAL_TOLERANCE_DEG,
-        "hfov_deg": CAMERA_HFOV_TOLERANCE_DEG,
-        "max_state_age_s": CAMERA_STATE_MAX_AGE_S,
-    }
-
-
-class _Sample(NamedTuple):
-    timestamp: float
-    x: float
-    y: float
-    width: float
-    height: float
-    camera: CameraState | None
-    camera_reason: str | None
-
-
-class _TrackHistory:
-    __slots__ = ("samples", "class_name", "last_frame_id", "last_timestamp", "epoch")
-
-    def __init__(self, epoch: int) -> None:
-        self.samples: deque[_Sample] = deque(maxlen=MAX_SAMPLES_PER_TRACK)
-        self.class_name = ""
-        self.last_frame_id = 0
-        self.last_timestamp = 0.0
-        self.epoch = epoch
 
 
 class _Occupant:
@@ -376,7 +225,7 @@ class SceneMonitor:
         self._sink = event_sink
         self._clock = clock
         self._lock = threading.Lock()
-        self._tracks: OrderedDict[int, _TrackHistory] = OrderedDict()
+        self._tracks: OrderedDict[int, TrackHistory] = OrderedDict()
         self._watches: dict[str, _Watch] = {}
         self._next_watch = 1
         self._frame_id: int | None = None
@@ -456,7 +305,7 @@ class SceneMonitor:
                 entries.append((target_id, class_name, class_name.casefold(), x, y))
                 history = self._tracks.get(target_id)
                 if history is None:
-                    history = self._tracks[target_id] = _TrackHistory(self._epoch)
+                    history = self._tracks[target_id] = TrackHistory(self._epoch)
                     if len(self._tracks) > MAX_TRACKS:
                         self._tracks.popitem(last=False)
                 else:
@@ -465,7 +314,7 @@ class SceneMonitor:
                 if history.epoch != self._epoch:
                     samples.clear()
                     history.epoch = self._epoch
-                sample = _Sample(
+                sample = MotionSample(
                     timestamp,
                     x,
                     y,
@@ -536,8 +385,8 @@ class SceneMonitor:
                 result["reason"] = "insufficient_samples"
                 result["required"] = {"samples": MIN_MOTION_SAMPLES, "span_s": MIN_MOTION_SPAN_S}
                 return result
-            result.update(_fit_motion(samples, span))
-            result["camera_motion"] = _camera_motion(samples)
+            result.update(fit_motion(samples, span))
+            result["camera_motion"] = camera_motion(samples)
             result["available"] = True
             return result
 
@@ -938,94 +787,6 @@ class SceneMonitor:
             suppressed_before=suppressed,
             **extra,
         )
-
-
-def _fit_motion(samples: Sequence[_Sample], span: float) -> dict[str, Any]:
-    """Least-squares rates of centre, size and log-scale over the retained samples."""
-    count = len(samples)
-    t_mean = sum(sample.timestamp for sample in samples) / count
-    variance = sum((sample.timestamp - t_mean) ** 2 for sample in samples)
-
-    def slope(values: Sequence[float]) -> tuple[float, float]:
-        mean = sum(values) / count
-        rate = sum((sample.timestamp - t_mean) * (value - mean) for sample, value in zip(samples, values))
-        return rate / variance, mean
-
-    xs = [sample.x for sample in samples]
-    ys = [sample.y for sample in samples]
-    vx, mean_x = slope(xs)
-    vy, mean_y = slope(ys)
-    vw, _ = slope([sample.width for sample in samples])
-    vh, _ = slope([sample.height for sample in samples])
-    scale_rate, _ = slope(
-        [0.5 * math.log(max(sample.width, 1e-6) * max(sample.height, 1e-6)) for sample in samples]
-    )
-    residual = math.sqrt(
-        sum(
-            (x - (mean_x + vx * (sample.timestamp - t_mean))) ** 2
-            + (y - (mean_y + vy * (sample.timestamp - t_mean))) ** 2
-            for sample, x, y in zip(samples, xs, ys)
-        )
-        / count
-    )
-    confidence = min(1.0, (count - 1) / 5.0) * min(1.0, span) / (1.0 + residual / RESIDUAL_HALF_CONFIDENCE)
-    return {
-        "center_velocity_per_s": [round(vx, 4), round(vy, 4)],
-        "center_speed_per_s": round(math.hypot(vx, vy), 4),
-        "size_velocity_per_s": [round(vw, 4), round(vh, 4)],
-        "scale_rate_per_s": round(scale_rate, 4),
-        "residual_rms": round(residual, 4),
-        "fit_confidence": round(confidence, 3),
-    }
-
-
-def _camera_motion(samples: Sequence[_Sample]) -> dict[str, Any]:
-    """Classify measured camera movement over the motion window; it never proves a still camera."""
-    for sample in samples:
-        if sample.camera is None:
-            return {
-                "status": "unknown",
-                "reason": sample.camera_reason,
-                "interpretation": "camera state unavailable for part of the window: the image motion "
-                "may be partly or entirely camera ego-motion",
-            }
-    reference = samples[0].camera
-    worst: dict[str, float] = {}
-    exceeded: set[str] = set()
-    unmeasured: set[str] = set()
-    for sample in samples:
-        deviation, over = camera_deviation(reference, sample.camera)  # type: ignore[arg-type]
-        exceeded.update(over)
-        unmeasured.update(unmeasured_camera_components(sample.camera))  # type: ignore[arg-type]
-        for name, value in deviation.items():
-            worst[name] = max(worst.get(name, 0.0), value)
-    common = {"max_deviation": worst, "tolerances": camera_tolerances(), "unmeasured": sorted(unmeasured)}
-    if exceeded:
-        return {
-            "status": "moving",
-            "exceeded": sorted(exceeded),
-            **common,
-            "interpretation": "the camera moved during the window: the image-relative rates include "
-            "camera ego-motion and are not the target's own motion",
-        }
-    return {
-        "status": "within_tolerance",
-        **common,
-        "interpretation": "measured camera components stayed within tolerance; sub-tolerance "
-        "ego-motion and any unmeasured components can still move the image, so the rates remain "
-        "image-relative approximations of target motion, never a metric speed",
-    }
-
-
-def _finite(value: Any) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) else None
-
-
-def _wrap_degrees(value: float) -> float:
-    return (value + 180.0) % 360.0 - 180.0
 
 
 def _bounded_text(value: Any, field: str) -> str:

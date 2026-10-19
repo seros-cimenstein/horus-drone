@@ -1,0 +1,38 @@
+# Outdoor GPS flight (canonical horus_forest/horus_urban and generated worlds): loaded after
+# common.parm, followed by canonical_fence.parm or procedural_fence.parm for FENCE_RADIUS.
+# Home-centred circular fence and maximum altitude. The canonical worlds top out at 24.13 m forest
+# canopy and 32.23 m urban rooftop HVAC; generated worlds at 23 m forest canopy and 34 m urban
+# building/roof-equipment height (see config/horus_procedural_*.yaml).
+FENCE_ENABLE 1
+FENCE_TYPE 3
+FENCE_ACTION 1
+FENCE_MARGIN 5
+FENCE_ALT_MAX 55
+
+# Return above the tallest forest canopy and urban rooftop hazards.
+RTL_ALT_M 45
+
+# Moderate wind from the west with variable gust/turbulence strength.
+# Parameter names are from the Copter 4.7.1 SITL model.
+SIM_WIND_DIR 270
+SIM_WIND_SPD 4
+SIM_WIND_TURB 2
+
+# Guided velocity targets are not clipped by the waypoint-speed parameters in Copter 4.7:
+# mode_guided's VelAccel submode feeds the target straight into
+# AC_PosControl::input_vel_accel_NE_m(..., limit_output=false), so WP_SPD caps only
+# position/waypoint targets. The 8 m/s procedural cruise therefore needs no speed parameter: it
+# sits well inside the default ATC_ANGLE_MAX 30 deg (~5.7 m/s^2 of horizontal authority) and the
+# default WP_ACC 2.5 m/s^2 ramp reaches it in ~3.2 s, while the executor still re-sends the
+# velocity at 15 Hz, far inside GUID_TIMEOUT 3 s.
+
+# Keep the ArduCopter SITL GPS model enabled with its default non-glitched settings.
+
+# Outdoor mount starts neutral, pitched 45 degrees below level; missions may aim it over MAVLink.
+MNT1_DEFLT_MODE 1
+MNT1_NEUTRAL_X 0
+MNT1_NEUTRAL_Y -45
+MNT1_NEUTRAL_Z 0
+MNT1_RETRACT_X 0
+MNT1_RETRACT_Y -45
+MNT1_RETRACT_Z 0

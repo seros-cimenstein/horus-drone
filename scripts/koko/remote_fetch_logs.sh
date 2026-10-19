@@ -13,14 +13,8 @@ for required in ssh rsync; do
   fi
 done
 
-ssh -T "${HORUS_REMOTE}" bash -s -- "${HORUS_REMOTE_DIR}" <<'REMOTE_DIRS'
+horus_koko_remote_script <<'REMOTE_DIRS'
 set -Eeuo pipefail
-remote_dir="$1"
-if [[ "${remote_dir}" == /* ]]; then
-  project_dir="${remote_dir}"
-else
-  project_dir="${HOME}/${remote_dir}"
-fi
 mkdir -p -- "${project_dir}/sim/logs" "${project_dir}/runs"
 REMOTE_DIRS
 mkdir -p -- "${PROJECT_DIR}/sim/logs" "${PROJECT_DIR}/runs"

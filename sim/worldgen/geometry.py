@@ -9,6 +9,8 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 from typing import Iterable, Mapping, Sequence
 
+from sim.worldgen.layout import point_segment_distance
+
 
 @dataclass(frozen=True, slots=True)
 class Primitive:
@@ -306,13 +308,6 @@ def _local_point(point: Sequence[float], transform: tuple[float, ...], rotation:
     )
 
 
-def _point_segment_distance(x: float, y: float, ax: float, ay: float, bx: float, by: float) -> float:
-    dx, dy = bx - ax, by - ay
-    denom = dx * dx + dy * dy
-    t = 0.0 if denom == 0.0 else max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / denom))
-    return math.hypot(x - ax - t * dx, y - ay - t * dy)
-
-
 def _distance_local(shape: str, size: tuple[float, ...], point: tuple[float, float, float]) -> float:
     x, y, z = point
     if shape == "sphere":
@@ -330,7 +325,7 @@ def _distance_local(shape: str, size: tuple[float, ...], point: tuple[float, flo
     # and apex (0, +h). Its signed distance reduces exactly to this 2-D profile.
     base_z, apex_z = -half, half
     outside_distance = min(
-        _point_segment_distance(radial, z, radius, base_z, 0.0, apex_z),
+        point_segment_distance((radial, z), (radius, base_z), (0.0, apex_z)),
         math.hypot(max(radial - radius, 0.0), z - base_z),
     )
     inside = base_z <= z <= apex_z and radial <= radius * (apex_z - z) / length

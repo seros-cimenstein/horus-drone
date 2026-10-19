@@ -51,6 +51,7 @@ ROOF_TILE_M = 4.0
 ROAD_TILE_M = 8.0
 CROSSWALK_PITCH_M = 1.2
 PAVER_SLAB_M = 0.6
+PAVER_TILE_M = 2 * PAVER_SLAB_M
 PLAZA_TILE_M = 2.4
 PARK_PATH_WIDTH_M = 2.4
 GROUND_TILE_M = 8.0
@@ -106,7 +107,7 @@ def _render(size: int, pixel: Callable[[float, float], tuple[float, float, float
     return png_rgb(size, size, bytes(out))
 
 
-def _lattice(rng, cells: int) -> list[list[float]]:
+def lattice_grid(rng, cells: int) -> list[list[float]]:
     return [[rng.random() for _ in range(cells)] for _ in range(cells)]
 
 
@@ -114,7 +115,7 @@ def _smoothstep(t: float) -> float:
     return t * t * (3.0 - 2.0 * t)
 
 
-def _sample(grid: list[list[float]], u: float, v: float) -> float:
+def lattice_noise(grid: list[list[float]], u: float, v: float) -> float:
     """Seamless bilinear sample of a tiling ``cells x cells`` lattice (u, v in [0, 1])."""
     cells = len(grid)
     gx, gy = u * cells, v * cells
@@ -130,7 +131,7 @@ def _fbm(grids: Sequence[list[list[float]]], u: float, v: float) -> float:
     """Weighted seamless fractal noise in [0, 1]; weights halve per octave."""
     total, weight, score = 0.0, 1.0, 0.0
     for grid in grids:
-        score += weight * _sample(grid, u, v)
+        score += weight * lattice_noise(grid, u, v)
         total += weight
         weight *= 0.5
     return score / total
@@ -147,9 +148,9 @@ def facade_texture(style: str, seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> 
         raise ValueError(f"unknown facade style {style!r}; expected one of {FACADE_STYLES}")
     _check_size(size)
     rng = substream(seed, "scenery_texture", f"facade_{style}")
-    coarse = _lattice(rng, 8)
-    fine = _lattice(rng, 32)
-    pattern = _lattice(rng, 16)
+    coarse = lattice_grid(rng, 8)
+    fine = lattice_grid(rng, 32)
+    pattern = lattice_grid(rng, 16)
     bricks = [[rng.random() for _ in range(9)] for _ in range(15)]
     win_x0, win_x1, win_y0, win_y1 = _FACADE_WINDOWS[style]
     frame = 0.035
@@ -170,7 +171,7 @@ def facade_texture(style: str, seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> 
             shade = 158 + 34 * noise
             if (v * 6.0) % 1.0 < 0.04:
                 shade -= 16
-            streak = _sample(fine, u * 7.0 % 1.0, v * 0.35 % 1.0)
+            streak = lattice_noise(fine, u * 7.0 % 1.0, v * 0.35 % 1.0)
             shade -= 10 * streak
             return shade, shade + 1.5, shade + 1.5
         if style == "glass":
@@ -182,8 +183,8 @@ def facade_texture(style: str, seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> 
                 glass -= 34
             return glass * 0.72, glass * 0.9, glass
         if style == "stucco":
-            shade = 206 + 24 * noise + 14 * (_sample(fine, u * 5.0 % 1.0, v) - 0.5)
-            if _sample(fine, u, v * 0.5) < 0.06:
+            shade = 206 + 24 * noise + 14 * (lattice_noise(fine, u * 5.0 % 1.0, v) - 0.5)
+            if lattice_noise(fine, u, v * 0.5) < 0.06:
                 shade -= 26
             return shade, shade - 6, shade - 20
         shade = 138 + 18 * noise
@@ -222,14 +223,14 @@ def roof_texture(seed: int, *, variant: str = "gravel", size: int = DEFAULT_TEXT
         raise ValueError(f"unknown roof variant {variant!r}; expected one of {ROOF_VARIANTS}")
     _check_size(size)
     rng = substream(seed, "scenery_texture", f"roof_{variant}")
-    coarse = _lattice(rng, 10)
-    fine = _lattice(rng, 40)
+    coarse = lattice_grid(rng, 10)
+    fine = lattice_grid(rng, 40)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         noise = _fbm((coarse, fine), u, v)
         if variant == "gravel":
             shade = 96 + 76 * noise
-            if _sample(fine, u * 3.0 % 1.0, v * 3.0 % 1.0) > 0.86:
+            if lattice_noise(fine, u * 3.0 % 1.0, v * 3.0 % 1.0) > 0.86:
                 shade += 26
             return shade, shade - 3, shade - 9
         shade = 68 + 16 * noise
@@ -251,9 +252,9 @@ def asphalt_texture(seed: int, *, variant: str = "plain", size: int = DEFAULT_TE
         raise ValueError(f"unknown asphalt variant {variant!r}; expected one of {ASPHALT_VARIANTS}")
     _check_size(size)
     rng = substream(seed, "scenery_texture", f"asphalt_{variant}")
-    coarse = _lattice(rng, 12)
-    fine = _lattice(rng, 48)
-    grit = _lattice(rng, 96)
+    coarse = lattice_grid(rng, 12)
+    fine = lattice_grid(rng, 48)
+    grit = lattice_grid(rng, 96)
 
     def paint(u: float, v: float) -> bool:
         if variant == "center_dashed":
@@ -265,11 +266,11 @@ def asphalt_texture(seed: int, *, variant: str = "plain", size: int = DEFAULT_TE
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         noise = _fbm((coarse, fine), u, v)
         shade = 52 + 26 * noise
-        wheel = _sample(coarse, u * 2.0 % 1.0, v * 0.25 % 1.0)
+        wheel = lattice_noise(coarse, u * 2.0 % 1.0, v * 0.25 % 1.0)
         if abs(u - 0.22) < 0.08 or abs(u - 0.78) < 0.08:  # polished wheel tracks
             shade += 6 * wheel
         if paint(u, v):
-            wear = _sample(grit, u, v)
+            wear = lattice_noise(grit, u, v)
             if wear > 0.12:
                 paint_shade = 196 + 40 * wear
                 return paint_shade, paint_shade - 4, paint_shade - 18
@@ -287,13 +288,13 @@ def crosswalk_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
     """
     _check_size(size)
     rng = substream(seed, "scenery_texture", "crosswalk")
-    fine = _lattice(rng, 40)
-    grit = _lattice(rng, 96)
+    fine = lattice_grid(rng, 40)
+    grit = lattice_grid(rng, 96)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         base = 50 + 22 * _fbm((fine,), u, v)
         if u < 0.5:
-            wear = _sample(grit, u, v)
+            wear = lattice_noise(grit, u, v)
             if wear > 0.1:
                 shade = 190 + 46 * wear
                 if abs(u - 0.5) < 0.03 or u < 0.02:  # worn stripe edges
@@ -309,15 +310,15 @@ def pavers_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
     _check_size(size)
     rng = substream(seed, "scenery_texture", "pavers")
     slabs = [[rng.random() for _ in range(2)] for _ in range(2)]
-    fine = _lattice(rng, 32)
+    fine = lattice_grid(rng, 32)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         joint = (u * 2.0) % 1.0 < 0.025 or (v * 2.0) % 1.0 < 0.025
         if joint:
-            shade = 132 + 14 * _sample(fine, u, v)
+            shade = 132 + 14 * lattice_noise(fine, u, v)
             return shade, shade - 2, shade - 6
         tint = slabs[int(v * 2.0) % 2][int(u * 2.0) % 2]
-        shade = 158 + 26 * tint + 14 * (_sample(fine, u, v) - 0.5)
+        shade = 158 + 26 * tint + 14 * (lattice_noise(fine, u, v) - 0.5)
         return shade, shade - 1, shade - 4
 
     return _render(size, pixel)
@@ -327,26 +328,26 @@ def forest_floor_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
     """Seamless forest floor: grass, leaf litter and soil mixed; ``GROUND_TILE_M`` per repeat."""
     _check_size(size)
     rng = substream(seed, "scenery_texture", "forest_floor")
-    grass = _lattice(rng, 16)
-    litter = _lattice(rng, 24)
-    soil = _lattice(rng, 6)
-    specks = _lattice(rng, 64)
+    grass = lattice_grid(rng, 16)
+    litter = lattice_grid(rng, 24)
+    soil = lattice_grid(rng, 6)
+    specks = lattice_grid(rng, 64)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         grass_noise = _fbm((grass, litter), u, v)
         red, green, blue = 64 + 34 * grass_noise, 84 + 34 * grass_noise, 42 + 22 * grass_noise
-        litter_mix = max(0.0, min(1.0, (_sample(litter, u * 0.7 % 1.0, v * 0.7 % 1.0) - 0.52) * 4.0))
+        litter_mix = max(0.0, min(1.0, (lattice_noise(litter, u * 0.7 % 1.0, v * 0.7 % 1.0) - 0.52) * 4.0))
         if litter_mix:
-            leaf = _sample(specks, u, v)
+            leaf = lattice_noise(specks, u, v)
             red += (78 + 60 * leaf - red / 3.0) * litter_mix * 0.5
             green += (56 + 40 * leaf - green / 3.0) * litter_mix * 0.5
             blue += (28 + 20 * leaf - blue / 3.0) * litter_mix * 0.5
-        soil_mix = max(0.0, min(1.0, (0.34 - _sample(soil, u, v)) * 3.0))
+        soil_mix = max(0.0, min(1.0, (0.34 - lattice_noise(soil, u, v)) * 3.0))
         if soil_mix:
             red += (96 - red / 2.0) * soil_mix * 0.6
             green += (74 - green / 2.0) * soil_mix * 0.6
             blue += (50 - blue / 2.0) * soil_mix * 0.6
-        if _sample(specks, u * 1.3 % 1.0, v * 1.3 % 1.0) > 0.965:  # twigs and stones
+        if lattice_noise(specks, u * 1.3 % 1.0, v * 1.3 % 1.0) > 0.965:  # twigs and stones
             return 128.0, 118.0, 96.0
         return red, green, blue
 
@@ -357,14 +358,14 @@ def dirt_trail_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
     """A worn dirt trail blending into forest floor at both u edges (``TRAIL_WIDTH_M`` wide)."""
     _check_size(size)
     rng = substream(seed, "scenery_texture", "dirt_trail")
-    coarse = _lattice(rng, 10)
-    fine = _lattice(rng, 40)
-    pebbles = _lattice(rng, 80)
+    coarse = lattice_grid(rng, 10)
+    fine = lattice_grid(rng, 40)
+    pebbles = lattice_grid(rng, 80)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         noise = _fbm((coarse, fine), u, v)
         red, green, blue = 104 + 52 * noise, 78 + 40 * noise, 50 + 26 * noise
-        if _sample(pebbles, u, v) > 0.9:
+        if lattice_noise(pebbles, u, v) > 0.9:
             return 128.0, 122.0, 110.0
         if abs(u - 0.28) < 0.09 or abs(u - 0.72) < 0.09:  # wheel ruts
             red -= 10
@@ -372,7 +373,7 @@ def dirt_trail_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
             blue -= 6
         edge = max(0.0, min(1.0, (0.09 - min(u, 1.0 - u)) / 0.09))
         if edge:
-            mix = _sample(coarse, u, v)
+            mix = lattice_noise(coarse, u, v)
             return (red * (1.0 - edge) + (70 + 26 * mix) * edge,
                     green * (1.0 - edge) + (88 + 26 * mix) * edge,
                     blue * (1.0 - edge) + (44 + 18 * mix) * edge)
@@ -385,19 +386,19 @@ def creek_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
     """Water with ripples down the middle and stony banks at the u edges (``CREEK_WIDTH_M``)."""
     _check_size(size)
     rng = substream(seed, "scenery_texture", "creek")
-    stones = _lattice(rng, 24)
-    grit = _lattice(rng, 64)
+    stones = lattice_grid(rng, 24)
+    grit = lattice_grid(rng, 64)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         if 0.16 <= u <= 0.84:
             depth = min(u - 0.16, 0.84 - u) / 0.34
             ripple = 0.5 + 0.5 * math.sin(2.0 * math.pi * (2.5 * u + 2.0 * v))
-            shade = 40 + 34 * depth + 26 * ripple * _sample(grit, u, v)
-            if _sample(stones, u * 1.5 % 1.0, v * 1.5 % 1.0) > 0.94:  # stones breaking surface
+            shade = 40 + 34 * depth + 26 * ripple * lattice_noise(grit, u, v)
+            if lattice_noise(stones, u * 1.5 % 1.0, v * 1.5 % 1.0) > 0.94:  # stones breaking surface
                 return 132.0, 128.0, 118.0
             return shade * 0.7, shade + 26, shade + 30
-        bank = 116 + 40 * _sample(stones, u, v) + 16 * (_sample(grit, u, v) - 0.5)
-        if _sample(grit, u * 2.0 % 1.0, v * 2.0 % 1.0) > 0.9:
+        bank = 116 + 40 * lattice_noise(stones, u, v) + 16 * (lattice_noise(grit, u, v) - 0.5)
+        if lattice_noise(grit, u * 2.0 % 1.0, v * 2.0 % 1.0) > 0.9:
             bank += 30
         return bank, bank - 4, bank - 14
 
@@ -408,18 +409,18 @@ def bark_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
     """Rough brown bark: vertical ridges and cracks that tile around a trunk (u wraps)."""
     _check_size(size)
     rng = substream(seed, "scenery_texture", "bark")
-    coarse = _lattice(rng, 10)
-    ridges = _lattice(rng, 24)
-    cracks = _lattice(rng, 48)
+    coarse = lattice_grid(rng, 10)
+    ridges = lattice_grid(rng, 24)
+    cracks = lattice_grid(rng, 48)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
-        wiggle = 0.16 * (_sample(coarse, u, v * 0.25 % 1.0) - 0.5)
+        wiggle = 0.16 * (lattice_noise(coarse, u, v * 0.25 % 1.0) - 0.5)
         ridge = math.sin(2.0 * math.pi * ((u * 7.0 + wiggle) % 1.0))
         shade = 82 + 30 * _fbm((coarse, ridges), u, v) + 14 * ridge
-        crack = _sample(cracks, u * 2.0 % 1.0, v * 0.5 % 1.0)
+        crack = lattice_noise(cracks, u * 2.0 % 1.0, v * 0.5 % 1.0)
         if abs(((u * 9.0 + wiggle * 2.0) % 1.0) - 0.5) < 0.035 and crack > 0.25:
             shade -= 46  # deep fissure
-        if _sample(ridges, u, v * 3.0 % 1.0) > 0.93 and v > 2.0 / 3.0:  # moss flecks
+        if lattice_noise(ridges, u, v * 3.0 % 1.0) > 0.93 and v > 2.0 / 3.0:  # moss flecks
             return shade * 0.72, shade * 0.86, shade * 0.55
         return shade, shade * 0.68, shade * 0.46
 
@@ -430,19 +431,19 @@ def wood_planks_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
     """Planed wood planks with grain along u; four planks per repeat (v)."""
     _check_size(size)
     rng = substream(seed, "scenery_texture", "wood_planks")
-    grain = _lattice(rng, 32)
-    knots = _lattice(rng, 12)
-    tint = _lattice(rng, 4)
+    grain = lattice_grid(rng, 32)
+    knots = lattice_grid(rng, 12)
+    tint = lattice_grid(rng, 4)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         plank = int(v * 4.0) % 4
         if (v * 4.0) % 1.0 < 0.045:  # gap between planks
-            shade = 58 + 20 * _sample(grain, u, v)
+            shade = 58 + 20 * lattice_noise(grain, u, v)
             return shade, shade * 0.72, shade * 0.5
         base = 148 + 26 * tint[plank][int(u * 4.0) % 4]
-        streak = _sample(grain, u * 0.35 % 1.0, (v * 4.0 % 1.0) * 0.6 % 1.0)
+        streak = lattice_noise(grain, u * 0.35 % 1.0, (v * 4.0 % 1.0) * 0.6 % 1.0)
         shade = base + 26 * (streak - 0.5) + 10 * (_fbm((grain, knots), u, v) - 0.5)
-        if _sample(knots, u, v * 2.0 % 1.0) > 0.965:  # knot
+        if lattice_noise(knots, u, v * 2.0 % 1.0) > 0.965:  # knot
             shade -= 52
         return shade, shade * 0.76, shade * 0.5
 
@@ -453,12 +454,12 @@ def tent_fabric_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
     """Woven tent canvas (olive) with a light seam grid; one repeat is about 1 m."""
     _check_size(size)
     rng = substream(seed, "scenery_texture", "tent_fabric")
-    weave = _lattice(rng, 64)
-    coarse = _lattice(rng, 8)
+    weave = lattice_grid(rng, 64)
+    coarse = lattice_grid(rng, 8)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         warp = 1.0 if (int(u * 48.0) + int(v * 48.0)) % 2 == 0 else 0.0
-        shade = 118 + 16 * warp + 14 * (_fbm((coarse,), u, v) - 0.5) + 8 * (_sample(weave, u, v) - 0.5)
+        shade = 118 + 16 * warp + 14 * (_fbm((coarse,), u, v) - 0.5) + 8 * (lattice_noise(weave, u, v) - 0.5)
         seam = (u * 2.0) % 1.0 < 0.02 or (v * 2.0) % 1.0 < 0.02
         if seam:
             shade -= 18
@@ -471,15 +472,15 @@ def metal_paint_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
     """Painted metal with fine scratches and grime; tiles per metre."""
     _check_size(size)
     rng = substream(seed, "scenery_texture", "metal_paint")
-    coarse = _lattice(rng, 8)
-    fine = _lattice(rng, 48)
-    scratch = _lattice(rng, 96)
+    coarse = lattice_grid(rng, 8)
+    fine = lattice_grid(rng, 48)
+    scratch = lattice_grid(rng, 96)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         shade = 104 + 22 * _fbm((coarse, fine), u, v)
-        if _sample(scratch, (u + v * 0.3) % 1.0, v * 6.0 % 1.0) > 0.965:
+        if lattice_noise(scratch, (u + v * 0.3) % 1.0, v * 6.0 % 1.0) > 0.965:
             shade += 42  # bright scratch
-        if _sample(fine, u * 3.0 % 1.0, v * 3.0 % 1.0) < 0.06:
+        if lattice_noise(fine, u * 3.0 % 1.0, v * 3.0 % 1.0) < 0.06:
             shade -= 18  # grime patch
         return shade * 0.92, shade * 0.96, shade
 
@@ -490,12 +491,12 @@ def traffic_cone_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
     """Orange cone plastic with a white reflective band across the middle (v)."""
     _check_size(size)
     rng = substream(seed, "scenery_texture", "traffic_cone")
-    grit = _lattice(rng, 48)
+    grit = lattice_grid(rng, 48)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         noise = 10 * (_fbm((grit,), u, v) - 0.5)
         if 0.44 <= v <= 0.62:
-            speck = _sample(grit, u, v)
+            speck = lattice_noise(grit, u, v)
             shade = 208 + 30 * speck + noise
             return shade, shade, shade - 10
         shade = 226 + noise
@@ -508,9 +509,9 @@ def foliage_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
     """Dense leaf clumps in mixed greens; one repeat is about 1.5 m of foliage."""
     _check_size(size)
     rng = substream(seed, "scenery_texture", "foliage")
-    clumps = _lattice(rng, 12)
-    leaves = _lattice(rng, 32)
-    specks = _lattice(rng, 64)
+    clumps = lattice_grid(rng, 12)
+    leaves = lattice_grid(rng, 32)
+    specks = lattice_grid(rng, 64)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         cover = _fbm((clumps, leaves), u, v)
@@ -520,9 +521,9 @@ def foliage_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
             base = (38 + 26 * cover, 74 + 34 * cover, 32 + 16 * cover)
         else:
             base = (28 + 18 * cover, 52 + 24 * cover, 26 + 12 * cover)
-        if _sample(specks, u, v) > 0.93:
+        if lattice_noise(specks, u, v) > 0.93:
             return base[0] * 1.5, base[1] * 1.45, base[2] * 1.3
-        if _sample(specks, u * 0.7 % 1.0, v * 0.7 % 1.0) < 0.05:
+        if lattice_noise(specks, u * 0.7 % 1.0, v * 0.7 % 1.0) < 0.05:
             return base[0] * 0.6, base[1] * 0.65, base[2] * 0.6
         return base
 
@@ -533,19 +534,19 @@ def rock_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
     """Grey weathered stone with speckles and hairline cracks; tiles per metre."""
     _check_size(size)
     rng = substream(seed, "scenery_texture", "rock")
-    coarse = _lattice(rng, 8)
-    fine = _lattice(rng, 40)
-    specks = _lattice(rng, 96)
+    coarse = lattice_grid(rng, 8)
+    fine = lattice_grid(rng, 40)
+    specks = lattice_grid(rng, 96)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         shade = 128 + 34 * _fbm((coarse, fine), u, v)
-        speck = _sample(specks, u, v)
+        speck = lattice_noise(specks, u, v)
         if speck > 0.96:
             shade += 34
         elif speck < 0.05:
             shade -= 30
-        crack = _sample(fine, (u * 3.0 + v) % 1.0, v * 0.5 % 1.0)
-        if abs(((u * 5.0 + 0.2 * _sample(coarse, u, v)) % 1.0) - 0.5) < 0.012 and crack > 0.35:
+        crack = lattice_noise(fine, (u * 3.0 + v) % 1.0, v * 0.5 % 1.0)
+        if abs(((u * 5.0 + 0.2 * lattice_noise(coarse, u, v)) % 1.0) - 0.5) < 0.012 and crack > 0.35:
             shade -= 44
         return shade, shade * 0.99, shade * 0.95
 
@@ -559,11 +560,11 @@ def fur_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
     """
     _check_size(size)
     rng = substream(seed, "scenery_texture", "fur")
-    strands = _lattice(rng, 64)
-    coarse = _lattice(rng, 10)
+    strands = lattice_grid(rng, 64)
+    coarse = lattice_grid(rng, 10)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
-        strand = _sample(strands, (u * 6.0 + v * 1.5) % 1.0, v * 3.0 % 1.0)
+        strand = lattice_noise(strands, (u * 6.0 + v * 1.5) % 1.0, v * 3.0 % 1.0)
         clump = _fbm((coarse, strands), u, v)
         shade = 168 + 62 * (strand - 0.5) + 52 * (clump - 0.5)
         if clump < 0.30:
@@ -579,7 +580,7 @@ def feather_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
     """Neutral grey feather scales (overlapping barb rows); tint per bird species."""
     _check_size(size)
     rng = substream(seed, "scenery_texture", "feather")
-    noise = _lattice(rng, 32)
+    noise = lattice_grid(rng, 32)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         rows = 9
@@ -588,7 +589,7 @@ def feather_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
         cu = ((u * 7.0 + offset) % 1.0) - 0.5
         cv = ((v * rows) % 1.0) - 0.5
         edge = math.hypot(cu, cv * 0.65)
-        shade = 164 + 46 * (_sample(noise, u, v) - 0.5)
+        shade = 164 + 46 * (lattice_noise(noise, u, v) - 0.5)
         if edge > 0.36:
             shade -= 48  # dark feather edge
         elif edge < 0.12:
@@ -603,21 +604,21 @@ def plaza_stone_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
     _check_size(size)
     rng = substream(seed, "scenery_texture", "plaza_stone")
     slabs = [[rng.random() for _ in range(2)] for _ in range(2)]
-    fine = _lattice(rng, 48)
-    mottle = _lattice(rng, 12)
+    fine = lattice_grid(rng, 48)
+    mottle = lattice_grid(rng, 12)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         joint = (u * 2.0) % 1.0 < 0.02 or (v * 2.0) % 1.0 < 0.02
         flank = (u * 2.0) % 1.0 < 0.045 or (v * 2.0) % 1.0 < 0.045
         if joint:
-            shade = 118 + 12 * _sample(fine, u, v)
+            shade = 118 + 12 * lattice_noise(fine, u, v)
             return shade, shade - 1, shade - 5
         if flank:
-            shade = 176 + 12 * _sample(fine, u, v)
+            shade = 176 + 12 * lattice_noise(fine, u, v)
             return shade, shade - 2, shade - 8
         tint = slabs[int(v * 2.0) % 2][int(u * 2.0) % 2]
-        speck = _sample(mottle, u * 1.7 % 1.0, v * 1.7 % 1.0)
-        shade = 150 + 26 * tint + 16 * (_sample(fine, u, v) - 0.5) - 10 * speck
+        speck = lattice_noise(mottle, u * 1.7 % 1.0, v * 1.7 % 1.0)
+        shade = 150 + 26 * tint + 16 * (lattice_noise(fine, u, v) - 0.5) - 10 * speck
         return shade + 4, shade + 1, shade - 8
 
     return _render(size, pixel)
@@ -630,14 +631,14 @@ def park_path_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
     """
     _check_size(size)
     rng = substream(seed, "scenery_texture", "park_path")
-    coarse = _lattice(rng, 10)
-    fine = _lattice(rng, 40)
-    grit = _lattice(rng, 80)
+    coarse = lattice_grid(rng, 10)
+    fine = lattice_grid(rng, 40)
+    grit = lattice_grid(rng, 80)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         noise = _fbm((coarse, fine), u, v)
         red, green, blue = 152 + 40 * noise, 136 + 34 * noise, 112 + 26 * noise
-        if _sample(grit, u, v) > 0.9:
+        if lattice_noise(grit, u, v) > 0.9:
             return 168.0, 158.0, 138.0
         if abs(u - 0.3) < 0.1 or abs(u - 0.7) < 0.1:  # worn wheel/foot lines
             red -= 12
@@ -645,7 +646,7 @@ def park_path_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
             blue -= 8
         edge = max(0.0, min(1.0, (0.1 - min(u, 1.0 - u)) / 0.1))
         if edge:
-            mix = _sample(coarse, u, v)
+            mix = lattice_noise(coarse, u, v)
             return (red * (1.0 - edge) + (74 + 24 * mix) * edge,
                     green * (1.0 - edge) + (104 + 30 * mix) * edge,
                     blue * (1.0 - edge) + (52 + 18 * mix) * edge)
@@ -658,16 +659,16 @@ def park_lawn_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> bytes:
     """Mown park lawn: seamless ``GROUND_TILE_M`` (8 m) repeat, brighter than the forest floor."""
     _check_size(size)
     rng = substream(seed, "scenery_texture", "park_lawn")
-    blades = _lattice(rng, 24)
-    patches = _lattice(rng, 8)
-    specks = _lattice(rng, 64)
+    blades = lattice_grid(rng, 24)
+    patches = lattice_grid(rng, 8)
+    specks = lattice_grid(rng, 64)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         lawn = _fbm((blades, patches), u, v)
         stripes = 0.5 + 0.5 * math.sin(2.0 * math.pi * (v * 4.0 + 0.5 * math.sin(2.0 * math.pi * u)))
         shade = 88 + 46 * lawn + 10 * (stripes - 0.5)
-        if _sample(specks, u * 1.4 % 1.0, v * 1.4 % 1.0) > 0.94:  # daisies and dry grass
-            fleck = _sample(specks, u, v)
+        if lattice_noise(specks, u * 1.4 % 1.0, v * 1.4 % 1.0) > 0.94:  # daisies and dry grass
+            fleck = lattice_noise(specks, u, v)
             return shade + 40 * fleck, shade + 52 * fleck, shade * 0.7
         return shade * 0.78, shade + 26, shade * 0.5
 
@@ -678,13 +679,13 @@ def bus_shelter_glass_texture(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> b
     """Shelter glass: a pale bluish pane with a dark frame and a diagonal sheen; 1.2 m panel."""
     _check_size(size)
     rng = substream(seed, "scenery_texture", "bus_shelter_glass")
-    streaks = _lattice(rng, 16)
-    grit = _lattice(rng, 48)
+    streaks = lattice_grid(rng, 16)
+    grit = lattice_grid(rng, 48)
 
     def pixel(u: float, v: float) -> tuple[float, float, float]:
         frame = min(u, 1.0 - u, v, 1.0 - v) < 0.06
         if frame:
-            shade = 62 + 14 * _sample(grit, u, v)
+            shade = 62 + 14 * lattice_noise(grit, u, v)
             return shade, shade + 3, shade + 7
         pane = 138 + 26 * _fbm((streaks, grit), u, v)
         sheen = (u * 0.8 + v * 1.6) % 1.0
@@ -732,12 +733,12 @@ def scene_textures(seed: int, *, size: int = DEFAULT_TEXTURE_PX) -> dict[str, by
 __all__ = [
     "ASPHALT_VARIANTS", "CREEK_WIDTH_M", "CROSSWALK_PITCH_M", "DEFAULT_TEXTURE_PX",
     "FACADE_BAY_M", "FACADE_STYLES", "FLOOR_HEIGHT_M", "GROUND_TILE_M", "MAX_TEXTURE_PX",
-    "PAVER_SLAB_M", "PLAZA_TILE_M", "PARK_PATH_WIDTH_M", "ROAD_TILE_M", "ROOF_TILE_M",
-    "ROOF_VARIANTS", "TRAIL_WIDTH_M",
+    "PAVER_SLAB_M", "PAVER_TILE_M", "PLAZA_TILE_M", "PARK_PATH_WIDTH_M", "ROAD_TILE_M",
+    "ROOF_TILE_M", "ROOF_VARIANTS", "TRAIL_WIDTH_M",
     "asphalt_texture", "bark_texture", "bus_shelter_glass_texture", "creek_texture",
     "crosswalk_texture", "dirt_trail_texture", "facade_texture", "facade_uv", "feather_texture",
     "foliage_texture", "forest_floor_texture", "fur_texture", "metal_paint_texture",
     "park_lawn_texture", "park_path_texture", "pavers_texture", "plaza_stone_texture",
     "rock_texture", "roof_texture", "scene_textures", "tent_fabric_texture",
-    "traffic_cone_texture", "wood_planks_texture",
+    "traffic_cone_texture", "wood_planks_texture", "lattice_grid", "lattice_noise",
 ]

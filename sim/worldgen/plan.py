@@ -23,10 +23,27 @@ _Point = tuple[float, float, float]
 # profile (see sim/scripts/campaign_episode.py). Both are explicit parameters below.
 CANONICAL_MAX_LEG_M = 60.0
 CANONICAL_VANTAGE_BOUNDS_M = 60.0
+# The generated 1.2 km worlds' planner limits (config/horus_procedural_<kind>.yaml: vantage
+# polygon half extent and max goto leg), written into each generated manifest.
+PROCEDURAL_VANTAGE_BOUNDS_M = 585.0
+PROCEDURAL_MAX_LEG_M = 850.0
 
 # Torso point heights above ground by posture; the detector box centre sits near these.
 POSTURE_TORSO_M = {"standing": 1.1, "sitting": 0.7, "lying": 0.25}
 POSTURE_TOP_M = {"standing": 1.9, "sitting": 1.2, "lying": 0.45}
+
+
+def checked_transit_altitude(required: float, limit: float, *, procedural: bool) -> float:
+    """The manifest transit altitude for a ``required`` minimum, refused above ``limit``.
+
+    Generated worlds round up so the invariant transit >= tallest top + 5.9 m stays exact
+    (``round`` could fall up to 5 mm short of it); canonical worlds keep ``round``.
+    """
+    if required > limit:
+        raise ValueError(f"layout needs {required:.2f} m transit altitude, above {limit:.0f} m limit")
+    if procedural:
+        return math.ceil(required * 100.0) / 100.0
+    return round(required, 2)
 
 
 @dataclass(frozen=True, slots=True)

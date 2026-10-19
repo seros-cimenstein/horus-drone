@@ -4,9 +4,9 @@ Archive SHA-256: 39027081c04751263076816193a48bad2927e061bfe6219bcca8f17289c4f1a
 Author (model.config): Nate Koenig
 Licence: Creative Commons Zero v1.0 Universal (CC0 1.0) (Fuel model-level publisher metadata at import time; the archive itself embeds no licence text)
 Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used.
-Notes: The upstream model.sdf scales the mesh by 0.01 (12.49 m long); the HORUS registry applies the same canonical scale. The bus material library names the SUV's wheel texture, so it is copied from sim/models/horus_vehicle_suv (same author and licence).
+Notes: The upstream model.sdf scales the mesh by 0.01 (12.49 m long); the HORUS registry applies the same canonical scale. The bus material library names the SUV's wheel texture, so it references the copy in sim/models/horus_vehicle_suv (same author and licence).
 Files: materials/textures/bus.png, meshes/bus.mtl, meshes/bus.obj
-Copied: materials/textures/wheels_01.png from sim/models/horus_vehicle_suv/materials/textures/wheels_01.png (OpenRobotics/SUV v4 archive, CC0 1.0 (the Bus model depends on the SUV's wheel texture))
+Shared: texture wheels_01.png references sim/models/horus_vehicle_suv/materials/textures/wheels_01.png (OpenRobotics/SUV v4 archive, CC0 1.0 (the Bus model depends on the SUV's wheel texture)); not copied
 
 Upstream model.config (verbatim):
 <?xml version="1.0"?>

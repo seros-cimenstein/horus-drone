@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -19,25 +18,6 @@ class Frame:
     image: Any
     pose: Any = None
     candidates: tuple["Candidate", ...] = ()
-
-    def to_dict(self, *, max_dimension: int = 640, jpeg_quality: int = 82) -> dict[str, Any]:
-        """Serialize metadata/candidates with a base64 set-of-mark JPEG for API transport."""
-        from .render import render_set_of_marks
-
-        payload = render_set_of_marks(
-            self, max_dimension=max_dimension, jpeg_quality=jpeg_quality
-        )
-        return {
-            "frame_id": self.frame_id,
-            "timestamp": self.timestamp,
-            "pose": self.pose,
-            "image_base64": base64.b64encode(payload.image_jpeg).decode("ascii"),
-            "image_mime_type": "image/jpeg",
-            "width": payload.width,
-            "height": payload.height,
-            "candidates": [candidate.to_dict() for candidate in self.candidates],
-            "candidate_table": [dict(row) for row in payload.candidates],
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,15 +61,13 @@ class Candidate:
     frame_width: int | None = None
     frame_height: int | None = None
 
-    def to_dict(self, *, include_embedding: bool = False) -> dict[str, Any]:
-        """Return a JSON-friendly candidate record, omitting private ReID data by default."""
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly candidate record; the ReID embedding stays private."""
         result: dict[str, Any] = {
             "source": self.source,
             "id": self.id,
             "bbox": list(self.bbox),
-            "box": list(self.bbox),
             "class_name": self.class_name,
-            "class": self.class_name,
             "confidence": self.confidence,
             "frame_id": self.frame_id,
             "timestamp": self.timestamp,
@@ -105,8 +83,6 @@ class Candidate:
         for optional in ("distance_m", "bearing"):
             if optional in self.attributes:
                 result[optional] = self.attributes[optional]
-        if include_embedding:
-            result["embedding"] = list(self.embedding) if self.embedding is not None else None
         return result
 
 
@@ -119,17 +95,6 @@ class FrameObservation:
     pose: Any
     candidates: tuple[Candidate, ...]
     frame: Frame | None = field(default=None, repr=False, compare=False)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize the observation, including a set-of-mark JPEG when its frame is attached."""
-        if self.frame is not None:
-            return self.frame.to_dict()
-        return {
-            "frame_id": self.frame_id,
-            "timestamp": self.timestamp,
-            "pose": self.pose,
-            "candidates": [candidate.to_dict() for candidate in self.candidates],
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,18 +117,6 @@ class SetOfMarkPayload:
     candidates: tuple[Mapping[str, Any], ...]
     width: int
     height: int
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return the wire-friendly payload; JPEG bytes remain binary for transport."""
-        return {
-            "frame_id": self.frame_id,
-            "timestamp": self.timestamp,
-            "pose": self.pose,
-            "image_jpeg": self.image_jpeg,
-            "width": self.width,
-            "height": self.height,
-            "candidates": [dict(row) for row in self.candidates],
-        }
 
 
 @dataclass(frozen=True, slots=True)

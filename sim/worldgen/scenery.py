@@ -35,7 +35,7 @@ from typing import Mapping, Sequence
 
 from sim.worldgen.geometry import Primitive, scenery_sidecar_text
 from sim.worldgen.proxy import ProxyShape
-from sim.worldgen.sdf import SCENERY_COLLIDE_BITMASK, f
+from sim.worldgen.sdf import SCENERY_COLLIDE_BITMASK, collide_surface, f
 
 SCENERY_COLLISION_MODEL = "scenery_collision"
 
@@ -303,7 +303,7 @@ def _instance_visuals(instance: SceneryInstance, asset, index: int, ox: float,
         if visual.submesh:
             geometry += f"<submesh><name>{visual.submesh}</name></submesh>"
         geometry += "</mesh>"
-        shadows = "" if getattr(visual, "cast_shadows", True) else "<cast_shadows>false</cast_shadows>"
+        shadows = "" if visual.cast_shadows else "<cast_shadows>false</cast_shadows>"
         parts.append(f'<visual name="{name}"><pose>{_coord(wx - ox)} {_coord(wy - oy)} {_coord(wz)} '
                      f'{_coord(float(visual.pose[3]))} {_coord(float(visual.pose[4]))} {_coord(yaw)}</pose>'
                      f"<geometry>{geometry}</geometry>{_visual_material(visual)}{shadows}</visual>")
@@ -396,8 +396,7 @@ def emit_scenery(world_name: str, instances: Sequence[SceneryInstance],
         uri = f"model://{world_name}_scenery/meshes/{collision_model}.obj"
         models.append(f'<model name="{collision_model}"><static>true</static>'
                       '<link name="scenery"><collision name="scenery_collision"><geometry><mesh>'
-                      f"<uri>{uri}</uri></mesh></geometry><surface><contact><collide_bitmask>"
-                      f"{SCENERY_COLLIDE_BITMASK:#06x}</collide_bitmask></contact></surface>"
+                      f"<uri>{uri}</uri></mesh></geometry>{collide_surface(SCENERY_COLLIDE_BITMASK)}"
                       "</collision></link></model>")
 
     files[f"{stem}.scenery.json"] = scenery_sidecar_text(proxies)

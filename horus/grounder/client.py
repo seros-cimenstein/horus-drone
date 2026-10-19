@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 import cv2
 import numpy as np
 
+from horus.perception.grounding import DEFAULT_BOX_THRESHOLD, DEFAULT_TEXT_THRESHOLD
 from horus.perception.types import GroundingBox
 
 
@@ -31,8 +32,8 @@ class GrounderClient:
         image_bgr: np.ndarray,
         prompts: Sequence[str],
         *,
-        box_threshold: float = 0.30,
-        text_threshold: float = 0.25,
+        box_threshold: float = DEFAULT_BOX_THRESHOLD,
+        text_threshold: float = DEFAULT_TEXT_THRESHOLD,
     ) -> list[GroundingBox]:
         try:
             ok, encoded = cv2.imencode(".jpg", image_bgr)

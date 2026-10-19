@@ -25,8 +25,8 @@ newmtl Wheels3
 	Kd 0.5882 0.5882 0.5882
 	Ks 0.0000 0.0000 0.0000
 	Ke 0.0000 0.0000 0.0000
-	map_Ka ../materials/textures/Wheels3.png
-	map_Kd ../materials/textures/Wheels3.png
+	map_Ka ../../horus_vehicle_hatchback/materials/textures/wheels3.png
+	map_Kd ../../horus_vehicle_hatchback/materials/textures/wheels3.png
 newmtl Hybrid_Interior
 	Ns 10.0000
 	Ni 1.5000

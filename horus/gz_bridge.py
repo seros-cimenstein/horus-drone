@@ -8,51 +8,65 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import json
 import logging
 import os
 import time
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass, fields
 from typing import Any
+
+from horus.config import ServerSettings, load_config
+from horus.events import EVENT_KINDS
+from horus.mcp_client import DEFAULT_MCP_URL, call_json, open_session
 
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_COMMANDER_URL = "http://127.0.0.1:8765"
-DEFAULT_MCP_URL = "http://127.0.0.1:8000/mcp"
-DEFAULT_TASK_TOPIC = "/horus/task"
-DEFAULT_EMERGENCY_TOPIC = "/horus/emergency"
-DEFAULT_RESET_TOPIC = "/horus/reset"
-DEFAULT_EVENTS_TOPIC = "/horus/events"
-DEFAULT_STATE_TOPIC = "/horus/state"
 STATE_POLL_INTERVAL = 0.5
 RECONNECT_INTERVAL = 1.0
 
 
 @dataclass(frozen=True, slots=True)
 class BridgeConfig:
+    """Bridge settings; ``from_env`` reads each field from ``HORUS_<FIELD>``.
+
+    - ``HORUS_COMMANDER_URL`` / ``HORUS_COMMANDER_TOKEN``: commander base URL and bearer token.
+    - ``HORUS_MCP_URL``: MCP streamable-HTTP endpoint; its bearer token is read from the
+      variable named by the HORUS config's ``server.auth_token_env`` (``mcp_token_env``).
+    - ``HORUS_TASK_TOPIC``: Gazebo topic forwarded to commander ``POST /task``.
+    - ``HORUS_EMERGENCY_TOPIC``: Gazebo topic forwarded to commander ``POST /emergency``.
+    - ``HORUS_RESET_TOPIC``: Gazebo topic forwarded to commander ``POST /reset``.
+    - ``HORUS_EVENTS_TOPIC``: Gazebo topic publishing readable commander events.
+    - ``HORUS_STATE_TOPIC``: Gazebo topic publishing compact MCP ``get_state`` JSON.
+    """
+
     commander_url: str = DEFAULT_COMMANDER_URL
     commander_token: str = ""
     mcp_url: str = DEFAULT_MCP_URL
     mcp_token: str = ""
-    task_topic: str = DEFAULT_TASK_TOPIC
-    emergency_topic: str = DEFAULT_EMERGENCY_TOPIC
-    reset_topic: str = DEFAULT_RESET_TOPIC
-    events_topic: str = DEFAULT_EVENTS_TOPIC
-    state_topic: str = DEFAULT_STATE_TOPIC
+    mcp_token_env: str = ServerSettings().auth_token_env
+    task_topic: str = "/horus/task"
+    emergency_topic: str = "/horus/emergency"
+    reset_topic: str = "/horus/reset"
+    events_topic: str = "/horus/events"
+    state_topic: str = "/horus/state"
 
     @classmethod
-    def from_env(cls, environ: Mapping[str, str] | None = None) -> BridgeConfig:
-        """Build settings from the documented environment variables."""
+    def from_env(
+        cls, environ: Mapping[str, str] | None = None, *, server: ServerSettings | None = None
+    ) -> BridgeConfig:
+        """Build settings from the variables documented on the class."""
         values = os.environ if environ is None else environ
-        return cls(
-            commander_url=values.get("HORUS_COMMANDER_URL", DEFAULT_COMMANDER_URL),
-            commander_token=values.get("HORUS_COMMANDER_TOKEN", ""),
-            mcp_url=values.get("HORUS_MCP_URL", DEFAULT_MCP_URL),
-            mcp_token=values.get("HORUS_MCP_TOKEN", ""),
-            emergency_topic=values.get("HORUS_EMERGENCY_TOPIC", DEFAULT_EMERGENCY_TOPIC),
-            reset_topic=values.get("HORUS_RESET_TOPIC", DEFAULT_RESET_TOPIC),
-        )
+        token_env = (server or ServerSettings()).auth_token_env
+        settings = {
+            f.name: values.get(f"HORUS_{f.name.upper()}", f.default)
+            for f in fields(cls)
+            if f.name not in {"mcp_token", "mcp_token_env"}
+        }
+        return cls(**settings, mcp_token=values.get(token_env, ""), mcp_token_env=token_env)
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +152,9 @@ def format_commander_event(event: SSEEvent) -> str | None:
         return "Claude Code started"
     if kind == "session_restarted":
         return "↻ Claude session restarted"
-    if kind in {"session_reset", "session_reset_requested"}:
+    if kind == "session_reset_requested":
+        return None  # the outcome (session_reset / session_reset_error) gets the panel line
+    if kind == "session_reset":
         return "↻ New mission session"
     if kind == "session_reset_error":
         return f"✗ Could not reset mission: {_clip(value.get('error', ''))}"
@@ -150,17 +166,7 @@ def format_commander_event(event: SSEEvent) -> str | None:
         detail = value.get("error") or value.get("result") or value.get("summary") or ""
         suffix = f": {_clip(detail, 240)}" if detail else ""
         return f"!! Emergency {action} {status}{suffix}".strip()
-    if kind in {
-        "task_finished",
-        "target_lost",
-        "target_reacquired",
-        "link_lost",
-        "link_restored",
-        "auto_rth",
-        "landed",
-        "object_detected",
-        "precision_landing_stalled",
-    }:
+    if kind in EVENT_KINDS:
         return f"• {_clip(kind.replace('_', ' '))}: {_clip(value.get('summary', ''))}"
     if kind == "assistant_text":
         return f"Claude: {_clip(value.get('text', ''))}"
@@ -183,36 +189,6 @@ def format_commander_event(event: SSEEvent) -> str | None:
     return _clip(compact_json(value))
 
 
-def _field(value: Any, name: str, default: Any = None) -> Any:
-    if isinstance(value, Mapping):
-        return value.get(name, default)
-    return getattr(value, name, default)
-
-
-def state_from_tool_result(result: Any) -> Any:
-    """Decode the JSON result returned by MCP's ``get_state`` tool.
-
-    FastMCP wraps a ``str`` tool return as ``{"result": "<json>"}`` structured content, so
-    the JSON text block is preferred and a wrapped string is decoded.
-    """
-    if _field(result, "isError", False):
-        raise RuntimeError("MCP get_state returned an error")
-
-    for block in _field(result, "content", ()) or ():
-        if _field(block, "type") != "text":
-            continue
-        text = _field(block, "text")
-        if isinstance(text, str):
-            return json.loads(text)
-    structured = _field(result, "structuredContent")
-    if isinstance(structured, Mapping) and set(structured) == {"result"}:
-        wrapped = structured["result"]
-        return json.loads(wrapped) if isinstance(wrapped, str) else wrapped
-    if structured is not None:
-        return structured
-    raise ValueError("MCP get_state result contained no JSON text")
-
-
 def publish_string(publisher: Any, message_type: Any, text: str) -> None:
     """Publish a string payload using a Gazebo StringMsg-compatible type."""
     message = message_type()
@@ -221,38 +197,12 @@ def publish_string(publisher: Any, message_type: Any, text: str) -> None:
         raise RuntimeError("Gazebo Transport rejected a StringMsg publication")
 
 
-async def submit_task(client: Any, config: BridgeConfig, text: str) -> None:
-    """Forward a Gazebo task message to the authenticated host endpoint."""
-    response = await client.post(
-        f"{config.commander_url.rstrip('/')}/task",
-        headers={"Authorization": f"Bearer {config.commander_token}"},
-        json={"text": text},
-    )
-    response.raise_for_status()
-
-async def submit_emergency(client: Any, config: BridgeConfig, action: str) -> None:
-    """Forward an emergency action to the authenticated host endpoint."""
-    response = await client.post(
-        f"{config.commander_url.rstrip('/')}/emergency",
-        headers={"Authorization": f"Bearer {config.commander_token}"},
-        json={"action": action},
-    )
-    response.raise_for_status()
-
-
-async def reset_mission(client: Any, config: BridgeConfig) -> None:
-    """Reset the current commander mission through its authenticated endpoint."""
-    response = await client.post(
-        f"{config.commander_url.rstrip('/')}/reset",
-        headers={"Authorization": f"Bearer {config.commander_token}"},
-    )
-    response.raise_for_status()
-
-
 async def publish_state_once(session: Any, publisher: Any, message_type: Any) -> Any:
-    """Fetch and publish one decoded MCP state result."""
-    result = await session.call_tool("get_state", {})
-    state = state_from_tool_result(result)
+    """Fetch and publish one decoded MCP state result.
+
+    The poll is passive: GUI telemetry must not count as supervisory-link contact.
+    """
+    state = await call_json(session, "get_state", {"passive": True})
     publish_string(publisher, message_type, compact_json(state))
     return state
 
@@ -286,7 +236,6 @@ async def stream_commander_events(
                         if panel_line is not None:
                             publish_string(publisher, message_type, panel_line)
                     last_event_id = decoder.last_event_id
-                last_event_id = decoder.last_event_id
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -299,34 +248,19 @@ async def poll_mcp_state(
     publisher: Any,
     message_type: Any,
     *,
-    session_factory: Callable[..., Any] | None = None,
-    streamable_http_factory: Callable[..., Any] | None = None,
+    open_mcp: Callable[[str, str], AbstractAsyncContextManager[Any]] = open_session,
     poll_interval: float = STATE_POLL_INTERVAL,
     reconnect_delay: float = RECONNECT_INTERVAL,
     sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
 ) -> None:
     """Independently reconnect to MCP and publish ``get_state`` at 2 Hz."""
-    if session_factory is None or streamable_http_factory is None:
-        from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
-
-        session_factory = session_factory or ClientSession
-        streamable_http_factory = streamable_http_factory or streamablehttp_client
-
-    request_headers = {"Authorization": f"Bearer {config.mcp_token}"}
     while True:
         try:
-            async with streamable_http_factory(config.mcp_url, headers=request_headers) as (
-                read_stream,
-                write_stream,
-                _,
-            ):
-                async with session_factory(read_stream, write_stream) as session:
-                    await session.initialize()
-                    while True:
-                        started = time.monotonic()
-                        await publish_state_once(session, publisher, message_type)
-                        await sleep(max(0.0, poll_interval - (time.monotonic() - started)))
+            async with open_mcp(config.mcp_url, config.mcp_token) as session:
+                while True:
+                    started = time.monotonic()
+                    await publish_state_once(session, publisher, message_type)
+                    await sleep(max(0.0, poll_interval - (time.monotonic() - started)))
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -335,7 +269,7 @@ async def poll_mcp_state(
 
 
 class GazeboBridge:
-    """Own task subscription and event/state StringMsg publishers."""
+    """Own the commander topic subscriptions and event/state StringMsg publishers."""
 
     def __init__(
         self,
@@ -346,68 +280,46 @@ class GazeboBridge:
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         self.config = config
-        self.node = node
-        self.message_type = message_type
+        self.node = node  # Gazebo subscriptions live only as long as their node.
         self.http_client = http_client
         self.loop = loop
         self.events_publisher = node.advertise(config.events_topic, message_type)
         self.state_publisher = node.advertise(config.state_topic, message_type)
         if self.events_publisher is None or self.state_publisher is None:
             raise RuntimeError("Gazebo Transport could not advertise commander bridge topics")
-        subscriptions = (
-            (config.task_topic, self._on_task),
-            (config.emergency_topic, self._on_emergency),
-            (config.reset_topic, self._on_reset),
+        # (Gazebo topic, commander endpoint, JSON field carrying the message text or None).
+        routes = (
+            (config.task_topic, "/task", "text"),
+            (config.emergency_topic, "/emergency", "action"),
+            (config.reset_topic, "/reset", None),
         )
-        for topic, callback in subscriptions:
+        for topic, path, field in routes:
+            callback = functools.partial(self._on_message, path, field)
             if not node.subscribe(message_type, topic, callback):
                 raise RuntimeError(f"Gazebo Transport rejected commander topic {topic!r}")
         self._task_requests: set[asyncio.Task[None]] = set()
 
-    def _on_task(self, message: Any) -> None:
+    def _on_message(self, path: str, field: str | None, message: Any) -> None:
         """Schedule HTTP work safely even if Gazebo invokes us off-loop."""
-        text = message.data
-        self.loop.call_soon_threadsafe(self._schedule_task, text)
+        payload = None if field is None else {field: message.data}
+        self.loop.call_soon_threadsafe(self._schedule, self._post(path, payload))
 
-    def _on_emergency(self, message: Any) -> None:
-        action = message.data
-        self.loop.call_soon_threadsafe(self._schedule_emergency, action)
-
-    def _on_reset(self, _message: Any) -> None:
-        self.loop.call_soon_threadsafe(self._schedule_reset)
-
-    def _schedule_emergency(self, action: str) -> None:
-        task = self.loop.create_task(self._submit_emergency(action))
+    def _schedule(self, coro: Coroutine[Any, Any, None]) -> None:
+        task = self.loop.create_task(coro)
         self._task_requests.add(task)
         task.add_done_callback(self._task_requests.discard)
 
-    def _schedule_reset(self) -> None:
-        task = self.loop.create_task(self._reset_mission())
-        self._task_requests.add(task)
-        task.add_done_callback(self._task_requests.discard)
-
-    def _schedule_task(self, text: str) -> None:
-        task = self.loop.create_task(self._submit_task(text))
-        self._task_requests.add(task)
-        task.add_done_callback(self._task_requests.discard)
-
-    async def _submit_task(self, text: str) -> None:
+    async def _post(self, path: str, payload: dict[str, Any] | None) -> None:
+        """POST one forwarded Gazebo message to the authenticated commander endpoint."""
         try:
-            await submit_task(self.http_client, self.config, text)
+            response = await self.http_client.post(
+                f"{self.config.commander_url.rstrip('/')}{path}",
+                headers={"Authorization": f"Bearer {self.config.commander_token}"},
+                json=payload,
+            )
+            response.raise_for_status()
         except Exception:
-            LOGGER.exception("Could not submit task to commander service")
-
-    async def _submit_emergency(self, action: str) -> None:
-        try:
-            await submit_emergency(self.http_client, self.config, action)
-        except Exception:
-            LOGGER.exception("Could not submit emergency action to commander service")
-
-    async def _reset_mission(self) -> None:
-        try:
-            await reset_mission(self.http_client, self.config)
-        except Exception:
-            LOGGER.exception("Could not reset commander mission")
+            LOGGER.exception("Could not forward %s to commander service", path)
 
 
 def _load_gazebo_bindings() -> tuple[Any, Any]:
@@ -423,27 +335,19 @@ def _load_gazebo_bindings() -> tuple[Any, Any]:
     return Node, StringMsg
 
 
-async def run(config: BridgeConfig | None = None) -> None:
+async def run(config: BridgeConfig) -> None:
     """Run the host commander and MCP bridge until cancelled."""
     import httpx
 
-    config = config or BridgeConfig.from_env()
     if not config.commander_token:
         raise RuntimeError("HORUS_COMMANDER_TOKEN must be set before starting the Gazebo bridge")
     if not config.mcp_token:
-        raise RuntimeError("HORUS_MCP_TOKEN must be set before starting the Gazebo bridge")
+        raise RuntimeError(f"{config.mcp_token_env} must be set before starting the Gazebo bridge")
     node_type, message_type = _load_gazebo_bindings()
-    node = node_type()
-    loop = asyncio.get_running_loop()
     async with httpx.AsyncClient() as client:
-        bridge = GazeboBridge(node, message_type, client, config, loop)
+        bridge = GazeboBridge(node_type(), message_type, client, config, asyncio.get_running_loop())
         await asyncio.gather(
-            stream_commander_events(
-                client,
-                bridge.events_publisher,
-                message_type,
-                config,
-            ),
+            stream_commander_events(client, bridge.events_publisher, message_type, config),
             poll_mcp_state(config, bridge.state_publisher, message_type),
         )
 
@@ -451,10 +355,12 @@ async def run(config: BridgeConfig | None = None) -> None:
 def main() -> None:
     """Run the bridge as ``python -m horus.gz_bridge`` or a console script."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.parse_args()
+    parser.add_argument("--config", help="HORUS YAML config naming the MCP token variable")
+    args = parser.parse_args()
     logging.basicConfig(level=os.environ.get("HORUS_LOG_LEVEL", "INFO"))
+    config = BridgeConfig.from_env(server=load_config(args.config).server)
     try:
-        asyncio.run(run())
+        asyncio.run(run(config))
     except KeyboardInterrupt:
         pass
 

@@ -93,11 +93,19 @@ reproducible:
 
 Generation is deterministic per seed and takes about 10-40 s. An existing
 `sim/generated/horus_<kind>_p<seed>/` bundle is reused until a file under
-`sim/worldgen/` changes; delete the bundle to force a rebuild. HORUS connects
-with `config/horus_forest.yaml` or `config/horus_urban.yaml`
-(`HORUS_CONFIG=/horus/config/horus_<kind>.yaml` inside the container), and the
-outdoor SITL parameters are selected automatically. The two-step flow is still
-available:
+`sim/worldgen/` changes; delete the bundle to force a rebuild. Generated worlds
+fly the procedural profile: HORUS connects with
+`config/horus_procedural_forest.yaml` or `config/horus_procedural_urban.yaml`
+(`HORUS_CONFIG=/horus/config/horus_procedural_<kind>.yaml` inside the
+container), and `start_sim.sh` picks
+`config/ardupilot/horus_sitl_procedural.parm` from the
+`horus_<kind>_p<seed>` stem. Canonical `horus_forest.sdf`/`horus_urban.sdf`
+keep `config/horus_{forest,urban}.yaml` and `horus_sitl_outdoor.parm`.
+`run.sh start --procedural` also exports the procedural `HORUS_CONFIG` and
+`HORUS_SITL_PARAM_FILE` (into the container too), so a later
+`docker exec horus-sim /opt/horus-venv/bin/horus-mcp` loads the matching
+profile; an explicit `HORUS_SITL_PARAM_FILE` always wins. The two-step flow is
+still available:
 
 ```bash
 python3 -m sim.worldgen --procedural --seed 17
@@ -119,16 +127,53 @@ together. Canonical scenarios are `sim/scenarios/horus_forest.yaml` and
 clearing, creek, and campsite, while urban routes use sidewalks, marked
 crosswalks, and vehicle lanes.
 
+Generated 1.2 km forests are sampled by `sim/worldgen/forest_procedural.py`:
+a trail network (a main trail within 15 m of home plus one loop per quadrant),
+one or two creeks, 4-8 clearings, 1-3 campsites and up to ~9000 instanced
+`tree_pine`/`tree_oak` assets (saplings included) on gentle terrain, all emitted
+as per-tile scenery with a `<stem>.scenery.json` collision sidecar. Mission
+content is spread across the map (missing hiker off-trail >= 150 m from home
+under its own canopy, injured/casualty in the mission clearing >= 120 m out, a
+follow route starting >= 100 m out occluded by a trailside shrub); the manifest
+carries `sites`, `areas.trails/creeks/clearings/camps`, `actor_geofence_m` and
+the `flight` planner limits the campaign uses.
+
 When a matching scenario and `sim/scripts/civilian_life.py` are present,
 `start_sim.sh` starts its `ambient` group and records pose traces in that run's
 `logs/civilians.jsonl`. Mission groups such as `follow_hiker` and
 `follow_jogger` stay at their scripted start pose until selected with the
 driver's `--group` option. The outdoor worlds keep GPS enabled and do not start
 the indoor serial2 ToF bridge. The launcher loads
-`config/ardupilot/horus_sitl_outdoor.parm` by default; set
-`HORUS_SITL_PARAM_FILE` to override it. Use `config/horus_forest.yaml` or
-`config/horus_urban.yaml` with HORUS for the corresponding altitude, speed,
-geofence, and perception profile.
+`config/ardupilot/horus_sitl_outdoor.parm` for canonical worlds and
+`config/ardupilot/horus_sitl_procedural.parm` for generated ones; set
+`HORUS_SITL_PARAM_FILE` to override it. Use `config/horus_forest.yaml` /
+`config/horus_urban.yaml` with HORUS for the canonical worlds, and
+`config/horus_procedural_forest.yaml` / `config/horus_procedural_urban.yaml`
+for generated ones; each profile carries its own altitude, speed, geofence, and
+perception settings.
+
+### Procedural flight profile
+
+The procedural profiles describe a 1.2 km map: the executor geofence polygon is
+a +-585 m NED square (15 m inside the 600 m map edge), `max_distance_m` is
+850 m, and `command_ttl_s` is 360 s. The TTL is sized for the worst single goto
+in wall-clock time: the executor clamps one goto to 850 m, which at the 8 m/s
+cruise is 850 / 8 = 106 s of simulation time, i.e. ~304 s of wall time at the
+RTF 0.35 that Koko sustains on the 1.2 km worlds, plus acceleration (~3 s), yaw
+alignment and the arrival slowdown.
+
+Horizontal speed is altitude-gated. `cruise_speed_m_s: 8.0` applies only while
+the vehicle's current altitude above home and the commanded target altitude are
+both at/above `cruise_min_altitude_m` - 26 m for forest (above the 23 m tree
+cap) and 38 m for urban (above the 34 m building/roof-equipment cap). Below
+that, or on a leg whose commanded target altitude is lower, the proven
+`max_speed_m_s: 3.0` limit applies. A GUIDED velocity target is not clipped by
+ArduPilot's waypoint-speed parameters (Copter 4.7's velocity/acceleration
+submode feeds the target straight into the position controller), so
+`horus_sitl_procedural.parm` changes no speed parameter: 8 m/s is well inside
+the default 30 deg `ATC_ANGLE_MAX`, and the default 2.5 m/s^2 `WP_ACC` ramp
+reaches it in ~3.2 s. Its `FENCE_RADIUS 870` covers the map corners
+(600 * sqrt(2) = 848.5 m) with margin.
 
 ### Verification and limits
 
@@ -399,7 +444,8 @@ its model chain (`horus_iris/iris_with_gimbal/horus_sensor_payload` outdoors,
 derives the seven topics. Bridge startup fails if any configured topic produces
 no valid scan; diagnostics are written to `logs/tof_bridge.log`.
 
-The outdoor profile `config/ardupilot/horus_sitl_outdoor.parm` loads the same
+The outdoor profiles `config/ardupilot/horus_sitl_outdoor.parm` and
+`config/ardupilot/horus_sitl_procedural.parm` load the same
 `PRX1_TYPE 2` / `AVOID_ENABLE 3` / `AVOID_MARGIN 1.0` proximity-avoidance
 settings as the indoor profile, so ArduPilot's simple avoidance brakes before
 trees, buildings and vehicles instead of flying through them.

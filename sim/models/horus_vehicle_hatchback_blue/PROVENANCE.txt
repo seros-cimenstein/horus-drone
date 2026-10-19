@@ -5,7 +5,8 @@ Author (model.config): Nate Koenig
 Licence: Creative Commons Zero v1.0 Universal (CC0 1.0) (Fuel model-level publisher metadata at import time; the archive itself embeds no licence text)
 Changes by HORUS: copied only the mesh and texture files listed below; textures larger than 1024 px were downscaled; OBJ material texture paths were rewritten; the upstream model.sdf and any plugins/scripts were not used.
 Files: materials/textures/hatchback_blue.png, meshes/hatchback.obj
-Copied: materials/textures/wheels3.png from sim/models/horus_vehicle_hatchback/materials/textures/wheels3.png (base Hatchback v3 archive, CC0 1.0)
+Shared: texture wheels3.png references sim/models/horus_vehicle_hatchback/materials/textures/wheels3.png (base Hatchback v3 archive, CC0 1.0); not copied
+Linked: meshes/hatchback.obj is a relative symlink to the byte-identical sim/models/horus_vehicle_hatchback/meshes/hatchback.obj
 
 Upstream model.config (verbatim):
 <?xml version="1.0"?>

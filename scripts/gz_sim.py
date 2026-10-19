@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import math
-import re
 import subprocess
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+from sim.campaign.gz_topics import sim_time_s, topic_messages
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,16 +47,13 @@ class _SimClock:
     Statistics are read from a ``gz topic -e`` subprocess rather than an in-process subscription:
     a Python transport callback in this process starves the thread that delivers set_pose service
     replies, so requests time out. A pipe reader thread releases the GIL while it waits.
+    Extrapolation uses the rate measured between consecutive messages (Δsim/Δwall); the
+    message's own ``real_time_factor`` is wrong under lockstep and is ignored.
     """
-
-    _SIM_TIME = re.compile(r"sim_time\s*\{([^}]*)\}")
-    _SIM_SEC = re.compile(r"\bsec:\s*(\d+)")
-    _SIM_NSEC = re.compile(r"\bnsec:\s*(\d+)")
-    _RTF = re.compile(r"real_time_factor:\s*([0-9.eE+-]+)")
 
     def __init__(self, topic: str = "/world/horus_indoor/stats") -> None:
         self.topic = topic
-        self._sample: tuple[float, float, float] | None = None  # sim_s, wall_s, real_time_factor
+        self._sample: tuple[float, float, float] | None = None  # sim_s, wall_s, measured rate
         self._lock = threading.Lock()
         self._process = subprocess.Popen(
             # stdbuf: the gz CLI block-buffers when piped, which would deliver the clock in bursts.
@@ -68,29 +65,22 @@ class _SimClock:
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self) -> None:
-        buffer: list[str] = []
         assert self._process.stdout is not None
-        for line in self._process.stdout:
-            buffer.append(line)
-            if not line.strip():  # messages are separated by a blank line
-                self._parse("".join(buffer))
-                buffer.clear()
+        for text, _truncated in topic_messages(self._process.stdout):
+            self._parse(text)
 
-    def _parse(self, text: str) -> None:
-        sim = self._SIM_TIME.search(text)
-        rtf = self._RTF.search(text)
-        if sim is None:
+    def _parse(self, text: str, wall_seconds: float | None = None) -> None:
+        sim_seconds = sim_time_s(text)
+        if sim_seconds is None:
             return
-        sec = self._SIM_SEC.search(sim.group(1))
-        nsec = self._SIM_NSEC.search(sim.group(1))
-        sim_seconds = int(sec.group(1) if sec else 0) + int(nsec.group(1) if nsec else 0) * 1e-9
-        factor = float(rtf.group(1)) if rtf else 0.0
+        now = time.monotonic() if wall_seconds is None else wall_seconds
         with self._lock:
-            self._sample = (
-                sim_seconds,
-                time.monotonic(),
-                max(0.0, factor) if math.isfinite(factor) else 0.0,
-            )
+            previous = self._sample
+            rate = 0.0 if previous is None else previous[2]
+            # Messages delivered in a burst carry no timing information: keep the last rate.
+            if previous is not None and now - previous[1] >= 0.05 and sim_seconds >= previous[0]:
+                rate = (sim_seconds - previous[0]) / (now - previous[1])
+            self._sample = (sim_seconds, now, rate)
 
     def close(self) -> None:
         self._process.terminate()

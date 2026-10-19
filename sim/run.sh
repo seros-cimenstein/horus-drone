@@ -149,10 +149,12 @@ case "${command}" in
       if ! world="$(generate_procedural_world "${kind}" "${seed}" "${stratum}")"; then
         exit 1
       fi
-      # Generated worlds use the procedural flight profile: the SITL parameter file and the
+      # Generated worlds use the procedural flight profile: the SITL parameter files and the
       # executor config every later MCP/mission start should load. Explicit overrides win.
-      export HORUS_SITL_PARAM_FILE="${HORUS_SITL_PARAM_FILE:-/horus/config/ardupilot/horus_sitl_procedural.parm}"
-      export HORUS_CONFIG="${HORUS_CONFIG:-/horus/config/horus_procedural_${kind}.yaml}"
+      world_profile="$(horus_world_profile "${world}")"
+      read -r profile_config profile_params <<< "${world_profile}"
+      export HORUS_SITL_PARAM_FILE="${HORUS_SITL_PARAM_FILE:-${profile_params}}"
+      export HORUS_CONFIG="${HORUS_CONFIG:-${profile_config}}"
     fi
     run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
     if (( gui_client_enabled == 1 )); then
@@ -196,7 +198,7 @@ case "${command}" in
     fi
     if (( gui_enabled == 1 )); then
       if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-        printf 'GUI image %s is missing; build it with: docker build -f sim/docker/Dockerfile.gui-overlay -t %s .\n' \
+        printf 'GUI image %s is missing; build it with: HORUS_SIM_IMAGE=%s ./sim/run.sh build\n' \
           "${IMAGE}" "${IMAGE}" >&2
         exit 1
       fi

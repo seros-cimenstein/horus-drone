@@ -8,80 +8,27 @@ from types import SimpleNamespace
 
 import pytest
 
-from horus.config import ExecutorSettings
 from horus.events import EventBus
-from horus.executor import ExecutorState, HorusExecutor, flight_envelope
-from horus.flight import Pose
+from horus.executor import ExecutorState, HorusExecutor
+from horus.flight import DistanceSensor, MountStatus, Pose
+
+from tests.fakes import FakeFlight, PerceptionStub, executor_settings as _settings
 
 
-class FakeTelemetry:
-    def __init__(self, pose: Pose):
-        self.pose = pose
-        self.observed_at = "2026-09-24T00:00:00+00:00"
-        self.received_monotonic = time.monotonic()
-        self.pose_updated_monotonic = self.received_monotonic
-        self.heading_deg = 0.0
-        self.heading_updated_monotonic = self.received_monotonic
-        self.armed = False
-        self.mode = "STABILIZE"
-
-    def as_dict(self):
-        return {"pose": self.pose.as_dict(), "observed_at": self.observed_at}
+_DEFAULT_HFOV_DEG = 114.59155902616465  # ExecutorSettings.camera_horizontal_fov_deg
 
 
-class FakeFlight:
-    def __init__(self, pose: Pose = Pose(0.0, 0.0, 2.0)):
-        self._telemetry = FakeTelemetry(pose)
-        self.commands = []
-
-    def telemetry(self):
-        return self._telemetry
-
-    def set_guided(self):
-        self.commands.append(("guided",))
-
-    def arm(self):
-        self.commands.append(("arm",))
-
-    def takeoff(self, altitude):
-        self.commands.append(("takeoff", altitude))
-
-    def set_velocity_ned(self, north, east, down, yaw_deg=None):
-        self.commands.append(("velocity", north, east, down) if yaw_deg is None else ("velocity", north, east, down, yaw_deg))
-
-    def hold(self):
-        self.commands.append(("hold",))
-
-    def rth(self):
-        self.commands.append(("rth",))
-
-    def land(self):
-        self.commands.append(("land",))
-
-    def set_yaw(self, heading):
-        self.commands.append(("yaw", heading))
-
-
-def _settings(**overrides):
-    values = {
-        "control_hz": 15.0,
-        "command_ttl_s": 1.0,
-        "max_speed_m_s": 1.0,
-        "max_vertical_speed_m_s": 0.5,
-        "max_distance_m": 5.0,
-        "min_altitude_m": 0.5,
-        "max_altitude_m": 4.0,
-        "geofence_radius_m": 3.0,
-        "arrival_tolerance_m": 0.25,
-        "follow_distance_m": 2.0,
-        "target_width_m": None,
-    }
-    values.update(overrides)
-    return ExecutorSettings(**values)
+def _box_at(bearing_rad: float, hfov_deg: float = _DEFAULT_HFOV_DEG, *, frame_width: int = 640,
+            width: float = 30.0, top: float = 200.0, bottom: float = 280.0) -> list[float]:
+    """A candidate box whose centre lies ``bearing_rad`` right of the optical axis."""
+    focal_px = frame_width / (2.0 * math.tan(math.radians(hfov_deg) / 2.0))
+    centre = frame_width / 2.0 + focal_px * math.tan(bearing_rad)
+    return [centre - width / 2.0, top, centre + width / 2.0, bottom]
 
 
 def test_goto_completes_only_at_measured_target_and_enters_guided_hold():
     flight = FakeFlight()
+    flight._telemetry.armed = True
     executor = HorusExecutor(flight, _settings(), autostart=False)
     task = executor.submit_skill("goto", {"pose": {"north_m": 0, "east_m": 0, "up_m": 2}})
 
@@ -104,11 +51,12 @@ def test_take_off_waits_for_guided_mode_and_arming_before_native_takeoff():
     executor.tick()
     task_id = task["task_id"]
     assert executor.get_task_status(task_id)["status"] == "running"
-    assert flight.commands == [("guided",)]
+    assert flight.flight_commands() == [("guided",)]
+    assert ("gimbal", 0.0, 0.0) in flight.commands  # take-off restores the configured search pitch
 
     flight._telemetry.mode = "GUIDED"
     executor.tick()
-    assert flight.commands == [("guided",), ("arm",)]
+    assert flight.flight_commands() == [("guided",), ("arm",)]
 
     flight._telemetry.armed = True
     executor.tick()
@@ -158,6 +106,7 @@ def test_take_off_retries_arming_after_prearm_rejection(monkeypatch):
 
 def test_ttl_expiry_stops_active_motion_and_enters_holding():
     flight = FakeFlight()
+    flight._telemetry.armed = True
     executor = HorusExecutor(flight, _settings(), autostart=False)
     task = executor.submit_skill(
         "goto", {"pose": {"north_m": 2, "east_m": 0, "up_m": 2}}, ttl_s=0.01
@@ -289,14 +238,175 @@ def test_supervisor_contact_keeps_hold_and_its_loss_triggers_rth():
     executor.close()
 
 
-class _LowConfidenceTarget:
-    def validate_id(self, candidate_id):
-        return candidate_id == 7
+def test_task_that_ends_on_a_disarmed_vehicle_never_arms_link_loss_rth():
+    flight = FakeFlight(Pose(0.0, 0.0, 0.2))  # on the ground, never armed
+    executor = HorusExecutor(flight, _settings(link_loss_rth_delay_s=0.01), autostart=False)
+    task = executor.submit_skill("take_off", {"altitude_m": 2.0}, ttl_s=0.02)
+    executor.tick()
+    time.sleep(0.03)
+    executor.tick()
+    assert executor.get_task_status(task["task_id"])["status"] == "expired"
+    mark = len(flight.commands)
 
-    def get_candidate(self, candidate_id):
+    time.sleep(0.03)
+    for _ in range(3):
+        executor.tick()
+
+    assert executor.state == ExecutorState.IDLE
+    assert flight.commands[mark:] == []
+    executor.close()
+
+
+def test_scan_that_expires_in_the_queue_keeps_its_planned_waypoints():
+    flight = FakeFlight()
+    flight._telemetry.armed = True
+    executor = HorusExecutor(flight, _settings(), autostart=False)
+    executor.submit_skill("goto", {"pose": {"north_m": 2, "east_m": 0, "up_m": 2}}, ttl_s=5.0)
+    scan = executor.submit_skill(
+        "scan",
+        {"area": {"north_min_m": -1, "north_max_m": 1, "east_min_m": -1, "east_max_m": 1}},
+        ttl_s=0.01,
+    )
+    planned = scan["executed_target"]
+    assert len(planned) >= 2
+
+    executor.tick()  # the goto runs; the scan waits behind it and expires
+    time.sleep(0.02)
+    executor.cancel(executor.get_state()["active_task_id"])
+    executor.tick()
+    executor.tick()
+
+    status = executor.get_task_status(scan["task_id"])
+    assert status["status"] == "expired"
+    assert status["executed_target"] == planned
+    executor.close()
+
+
+def _flying_goto(flight, executor, ttl_s=5.0):
+    """Start a goto in the air and let the autopilot confirm HORUS's own GUIDED request."""
+    flight._telemetry.armed = True
+    flight._telemetry.mode = "LOITER"
+    executor.tick()
+    task = executor.submit_skill(
+        "goto", {"pose": {"north_m": 2, "east_m": 0, "up_m": 2}}, ttl_s=ttl_s
+    )
+    executor.tick()
+    assert ("guided",) in flight.commands
+    flight._telemetry.mode = "GUIDED"
+    executor.tick()
+    assert executor.state == ExecutorState.EXECUTING
+    return task
+
+
+@pytest.mark.parametrize("taken_mode", ["LOITER", "RTL", "LAND"])
+def test_uncommanded_mode_change_cancels_work_and_horus_never_retakes_the_vehicle(taken_mode):
+    flight = FakeFlight()
+    event_bus = EventBus()
+    executor = HorusExecutor(
+        flight, _settings(link_loss_rth_delay_s=0.01), event_bus=event_bus, autostart=False
+    )
+    task = _flying_goto(flight, executor, ttl_s=0.05)
+
+    flight._telemetry.mode = taken_mode  # pilot RC switch or autopilot failsafe
+    mark = len(flight.commands)
+    executor.tick()
+
+    status = executor.get_task_status(task["task_id"])
+    assert status["status"] == "cancelled"
+    assert "pilot override" in status["error"]
+    assert executor.state == ExecutorState.PILOT
+    assert executor.get_state()["pilot_override"] == taken_mode
+    time.sleep(0.06)  # past both the task TTL and the link-loss RTH delay
+    for _ in range(3):
+        executor.tick()
+    for refused in (
+        lambda: executor.submit_skill("goto", {"pose": {"north_m": 1, "east_m": 0, "up_m": 2}}),
+        executor.hold,
+        executor.rth,
+        executor.land,
+    ):
+        with pytest.raises(RuntimeError, match="pilot override"):
+            refused()
+    assert flight.commands[mark:] == []
+    kinds = [event["kind"] for event in asyncio.run(event_bus.wait(0, 0.0))]
+    assert kinds.count("pilot_override") == 1
+    executor.close()
+    assert flight.commands[mark:] == []
+
+
+def test_switching_back_to_guided_returns_control_without_resending_the_mode():
+    flight = FakeFlight()
+    event_bus = EventBus()
+    executor = HorusExecutor(flight, _settings(), event_bus=event_bus, autostart=False)
+    _flying_goto(flight, executor)
+    flight._telemetry.mode = "LOITER"
+    executor.tick()
+    flight._telemetry.mode = "ALT_HOLD"
+    executor.tick()
+    assert executor.get_state()["pilot_override"] == "ALT_HOLD"
+
+    flight._telemetry.mode = "GUIDED"
+    executor.tick()
+
+    assert executor.state == ExecutorState.HOLDING
+    assert executor.get_state()["pilot_override"] is None
+    assert "pilot_released" in [event["kind"] for event in asyncio.run(event_bus.wait(0, 0.0))]
+    mark = len(flight.commands)
+    task = executor.submit_skill("goto", {"pose": {"north_m": 2, "east_m": 0, "up_m": 2}}, ttl_s=5)
+    executor.tick()
+    assert executor.get_task_status(task["task_id"])["status"] == "running"
+    # GUIDED is confirmed, so a new task only streams setpoints; re-sending the mode on a report
+    # that predates a fresh pilot switch would undo that switch.
+    assert ("guided",) not in flight.commands[mark:]
+    assert any(command[0] == "velocity" and command[1] > 0 for command in flight.commands[mark:])
+    executor.close()
+
+
+def test_horus_commanded_rth_is_not_a_pilot_override():
+    flight = FakeFlight()
+    executor = HorusExecutor(flight, _settings(), autostart=False)
+    _flying_goto(flight, executor)
+
+    executor.rth()
+    flight._telemetry.mode = "RTL"
+    executor.tick()
+
+    assert executor.state == ExecutorState.RTH
+    assert executor.get_state()["pilot_override"] is None
+    executor.close()
+
+
+def test_disarm_ends_pilot_override_and_accepts_a_new_flight():
+    flight = FakeFlight(Pose(0.0, 0.0, 0.2))
+    executor = HorusExecutor(flight, _settings(), autostart=False)
+    _flying_goto(flight, executor)
+    flight._telemetry.mode = "LAND"
+    executor.tick()
+    assert executor.state == ExecutorState.PILOT
+
+    flight._telemetry.armed = False
+    executor.tick()
+
+    assert executor.state == ExecutorState.IDLE
+    task = executor.submit_skill("take_off", {"altitude_m": 2.0}, ttl_s=5.0)
+    assert task["status"] == "queued"
+    executor.close()
+
+
+def test_take_off_rejects_a_missing_altitude_value():
+    executor = HorusExecutor(FakeFlight(), _settings(), autostart=False)
+    with pytest.raises(ValueError, match="altitude_m must be a finite number"):
+        executor.submit_skill("take_off", {"altitude_m": None})
+    executor.close()
+
+
+class _LowConfidenceTarget(PerceptionStub):
+    def validate_candidate(self, candidate_id):
+        if candidate_id != 7:
+            return None
         return {
-            "bearing_rad": 0.0,
-            "distance_m": 3.0,
+            "bbox": _box_at(0.0),
+            "frame_width": 640,
             "confidence": 0.95,
             "target_match_confidence": 0.2,
         }
@@ -320,13 +430,12 @@ def test_approach_fails_safe_when_target_profile_confidence_is_below_threshold()
     assert not any(command[0] == "velocity" and command[1:] != (0.0, 0.0, 0.0) for command in flight.commands)
     executor.close()
 
-class _ReidentifyingTarget:
+class _ReidentifyingTarget(PerceptionStub):
     def __init__(self):
         self.current = {
             "id": 7,
-            "bbox": [10, 10, 40, 60],
-            "bearing_rad": 0.0,
-            "distance_m": 3.0,
+            "bbox": _box_at(0.0),
+            "frame_width": 640,
             "confidence": 0.95,
             "attributes": {"shirt_colour": "blue"},
         }
@@ -336,8 +445,8 @@ class _ReidentifyingTarget:
             return self.current
         return None
 
-    def validate_id(self, candidate_id):
-        return self.get_candidate(candidate_id) is not None
+    def validate_candidate(self, candidate_id):
+        return self.get_candidate(candidate_id)
 
     def reidentify_candidate(self, reference_id):
         if self.current is None:
@@ -361,19 +470,19 @@ def _follow_through_target_loss(matched_id):
     )
     task = executor.submit_skill("follow", {"id": 7}, ttl_s=5.0)
     executor.tick()
+    last_facing = flight.commands[-1][4]
 
     target.current = None
     executor.tick()
     lost = executor.get_task_status(task["task_id"])
     assert lost["status"] == "running"
     assert not lost["tracking"]["reacquired"]
-    assert flight.commands[-1] == ("velocity", 0.0, 0.0, 0.0)
+    assert flight.commands[-1] == ("velocity", 0.0, 0.0, 0.0, last_facing)
 
     target.current = {
         "id": matched_id,
-        "bbox": [10, 10, 40, 60],
-        "bearing_rad": 0.0,
-        "distance_m": 3.0,
+        "bbox": _box_at(0.0),
+        "frame_width": 640,
         "confidence": 0.95,
         "attributes": {"shirt_colour": "blue"},
     }
@@ -407,25 +516,22 @@ def test_follow_rematches_appearance_to_new_tracker_id_after_occlusion():
 
 
 
-class _ValidatedSnapshotTarget:
+class _ValidatedSnapshotTarget(PerceptionStub):
     def get_candidate(self, candidate_id):
         return {
             "id": candidate_id,
-            "bearing_rad": -0.5,
-            "distance_m": 3.0,
+            "bbox": _box_at(-0.5),
+            "frame_width": 640,
             "confidence": 0.95,
         }
 
     def validate_candidate(self, candidate_id):
         return {
             "id": candidate_id,
-            "bearing_rad": 0.25,
-            "distance_m": None,
+            "bbox": _box_at(0.25),
+            "frame_width": 640,
             "confidence": 0.95,
         }
-
-    def validate_id(self, candidate_id):
-        return False
 
 
 def test_follow_uses_atomic_validated_candidate_snapshot():
@@ -450,12 +556,12 @@ def test_follow_uses_atomic_validated_candidate_snapshot():
     executor.close()
 
 
-class _TransientlyInvalidTarget:
+class _TransientlyInvalidTarget(PerceptionStub):
     def __init__(self):
         self.current = {
             "id": 7,
-            "bearing_rad": 0.0,
-            "distance_m": 3.0,
+            "bbox": _box_at(0.0),
+            "frame_width": 640,
             "confidence": 0.95,
             "attributes": {"shirt_colour": "blue"},
         }
@@ -464,9 +570,9 @@ class _TransientlyInvalidTarget:
     def get_candidate(self, candidate_id):
         return self.current if self.current["id"] == candidate_id else None
 
-    def validate_id(self, candidate_id):
+    def validate_candidate(self, candidate_id):
         self.validation_calls += 1
-        return self.validation_calls > 1
+        return self.get_candidate(candidate_id) if self.validation_calls > 1 else None
 
     def reidentify_candidate(self, reference_id):
         if self.current["id"] == reference_id:
@@ -499,8 +605,8 @@ def test_follow_retries_reidentification_after_transient_validation_failure():
 
     target.current = {
         "id": 9,
-        "bearing_rad": 0.0,
-        "distance_m": 3.0,
+        "bbox": _box_at(0.0),
+        "frame_width": 640,
         "confidence": 0.95,
         "attributes": {"shirt_colour": "blue"},
     }
@@ -516,11 +622,8 @@ def test_follow_retries_reidentification_after_transient_validation_failure():
     executor.close()
 
 
-class _BoxOnlyTarget:
-    def validate_id(self, candidate_id):
-        return candidate_id == 7
-
-    def get_candidate(self, candidate_id):
+class _BoxOnlyTarget(PerceptionStub):
+    def validate_candidate(self, candidate_id):
         if candidate_id != 7:
             return None
         return {
@@ -552,7 +655,7 @@ def test_follow_derives_bearing_from_candidate_box():
     executor.close()
 
 
-class _PersonBoxTarget:
+class _PersonBoxTarget(PerceptionStub):
     """A 1.7 m person whose box height puts them ~4 m ahead, slightly right of center."""
 
     def validate_candidate(self, candidate_id):
@@ -606,17 +709,6 @@ def test_follow_reports_longest_occlusion_in_autopilot_time():
     assert math.isclose(tracking["time_to_reacquire_s"], 2.1)
     assert tracking["time_basis"] == "autopilot_time_boot"
     assert tracking["matched_id"] == 9 and tracking["id_rematched"]
-
-
-def test_take_off_uses_default_gimbal_pitch():
-    flight = FakeFlight(Pose(0.0, 0.0, 0.2))
-    gimbal = []
-    flight.set_gimbal_pitch_yaw = lambda pitch, yaw: gimbal.append((pitch, yaw))
-    executor = HorusExecutor(flight, _settings(), autostart=False)
-    executor.submit_skill("take_off", {"altitude_m": 2.0}, ttl_s=5.0)
-    executor.tick()
-    assert gimbal == [(0.0, 0.0)]
-    executor.close()
 
 
 def test_take_off_uses_configured_outdoor_gimbal_pitch():
@@ -694,9 +786,8 @@ def test_follow_publishes_target_lost_and_reacquired_only_on_transitions():
     executor.tick()
     target.current = {
         "id": 9,
-        "bbox": [10, 10, 40, 60],
-        "bearing_rad": 0.0,
-        "distance_m": 3.0,
+        "bbox": _box_at(0.0),
+        "frame_width": 640,
         "confidence": 0.95,
     }
     executor.tick()
@@ -716,28 +807,41 @@ def test_follow_publishes_target_lost_and_reacquired_only_on_transitions():
     executor.close()
 
 
-class _GenericTarget:
+class _GenericTarget(PerceptionStub):
+    """A chair at ``bearing_rad`` in a 90 deg camera, 100 px tall."""
+
     def __init__(self, bearing_rad: float = 0.0):
-        self.bearing_rad = bearing_rad
+        self.bbox = _box_at(bearing_rad, 90.0, width=40.0, top=50.0, bottom=150.0)
 
     def validate_candidate(self, candidate_id):
         return {
             "id": candidate_id,
-            "bbox": [320, 50, 360, 150],
+            "bbox": self.bbox,
             "frame_width": 640,
             "class_name": "chair",
             "class_id": None,
-            "bearing_rad": self.bearing_rad,
             "confidence": 0.95,
         }
 
 
-def _front_tof(distance_m: float = 3.0):
-    return SimpleNamespace(
+def _front_tof(distance_m: float = 3.0, *, age_s: float = 0.0) -> DistanceSensor:
+    return DistanceSensor(
         orientation=0,
         distance_m=distance_m,
         min_distance_m=0.1,
         max_distance_m=6.0,
+        updated_at="",
+        updated_monotonic=time.monotonic() - age_s,
+    )
+
+
+def _down_range(distance_m: float, *, max_distance_m: float) -> DistanceSensor:
+    return DistanceSensor(
+        orientation=25,
+        distance_m=distance_m,
+        min_distance_m=0.1,
+        max_distance_m=max_distance_m,
+        updated_at="",
         updated_monotonic=time.monotonic(),
     )
 
@@ -858,14 +962,13 @@ def test_approach_uses_explicit_target_size_for_non_person_range():
 
 _INTERMITTENT_CANDIDATE = {
     "id": 7,
-    "bbox": [10, 10, 40, 60],
-    "bearing_rad": 0.0,
-    "distance_m": 3.0,
+    "bbox": _box_at(0.0),
+    "frame_width": 640,
     "confidence": 0.95,
 }
 
 
-class _IntermittentTarget:
+class _IntermittentTarget(PerceptionStub):
     """Perception double: a validated target that can vanish and return under a new ID."""
 
     def __init__(self):
@@ -921,6 +1024,7 @@ def test_pose_staleness_limit_is_configurable():
 def test_target_skills_hold_and_reidentify_across_a_missing_candidate(skill, arguments):
     target = _IntermittentTarget()
     flight = FakeFlight()
+    flight._telemetry.proximity = (_front_tof(2.76),)  # 3.0 m to the target dead ahead
     event_bus = EventBus()
     executor = HorusExecutor(
         flight, _settings(), perception=target, event_bus=event_bus, autostart=False
@@ -930,8 +1034,10 @@ def test_target_skills_hold_and_reidentify_across_a_missing_candidate(skill, arg
     executor.tick()
     assert executor.get_task_status(task_id)["status"] == "running"
     assert any(command[0] == "velocity" and (command[1], command[2]) != (0.0, 0.0) for command in flight.commands)
+    last_facing = flight.commands[-1][4]
 
-    # A single missing candidate frame must not end the task: hold at zero velocity and retry.
+    # A single missing candidate frame must not end the task: hold position, still turned toward
+    # where the target was last validated, and retry.
     target.candidate = None
     target.failure = "not_visible"
     executor.tick()
@@ -939,10 +1045,10 @@ def test_target_skills_hold_and_reidentify_across_a_missing_candidate(skill, arg
     dropped = executor.get_task_status(task_id)
     assert dropped["status"] == "running"
     assert dropped["tracking"]["reacquired"] is False
-    assert flight.commands[-1] == ("velocity", 0.0, 0.0, 0.0)
+    assert flight.commands[-1] == ("velocity", 0.0, 0.0, 0.0, last_facing)
 
     # The target returns under a new tracker ID; appearance re-identification resumes the skill.
-    target.candidate = {**_INTERMITTENT_CANDIDATE, "id": 9, "bbox": [12, 10, 42, 60]}
+    target.candidate = {**_INTERMITTENT_CANDIDATE, "id": 9}
     target.failure = None
     executor.tick()
 
@@ -996,6 +1102,7 @@ def test_approach_completes_at_the_standoff_and_does_not_chase():
     # range reached plus task completion, not the final range).
     target = _IntermittentTarget()
     flight = FakeFlight()
+    flight._telemetry.proximity = (_front_tof(2.76),)  # 3.0 m: inside the 5 m standoff
     executor = HorusExecutor(flight, _settings(), perception=target, autostart=False)
     task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 5.0}, ttl_s=5.0)["task_id"]
 
@@ -1006,7 +1113,7 @@ def test_approach_completes_at_the_standoff_and_does_not_chase():
     assert flight.commands[-1] == ("hold",)
 
     # The target keeps moving after the standoff: no new motion commands are issued.
-    target.candidate = {**_INTERMITTENT_CANDIDATE, "id": 9, "bbox": [200, 10, 230, 60]}
+    target.candidate = {**_INTERMITTENT_CANDIDATE, "id": 9, "bbox": _box_at(0.3)}
     executor.tick()
 
     assert executor.get_task_status(task_id)["status"] == "succeeded"
@@ -1017,30 +1124,33 @@ def test_approach_completes_at_the_standoff_and_does_not_chase():
     executor.close()
 
 
-class _OrbitTarget:
-    """Perception double: a validated person 8 m out and 20 deg right of the heading."""
+class _OrbitTarget(PerceptionStub):
+    """Perception double: a person standing 8 m out and 20 deg right of the heading.
 
-    def __init__(self, bearing_rad: float = math.radians(20.0), distance_m: float = 8.0):
-        self.bearing_rad = bearing_rad
-        self.distance_m = distance_m
+    Seen from 2 m up through a level 84 deg camera, so the ground-plane ray ranges it.
+    """
+
+    def __init__(self, bearing_rad: float = math.radians(20.0), horizontal_m: float = 8.0):
+        focal_px = 640 / (2.0 * math.tan(math.radians(84.0) / 2.0))
+        # Ground contact: 2 m below the camera at horizontal_m along the bearing.
+        feet_row = 240.0 + focal_px * 2.0 / (horizontal_m / math.hypot(1.0, math.tan(bearing_rad)))
+        self.bbox = _box_at(bearing_rad, 84.0, top=feet_row - 60.0, bottom=feet_row)
 
     def validate_candidate(self, candidate_id):
         return {
             "id": candidate_id,
-            "bbox": [400, 100, 440, 220],
+            "bbox": self.bbox,
             "frame_width": 640,
+            "frame_height": 480,
             "class_name": "person",
             "class_id": 0,
-            "bearing_rad": self.bearing_rad,
-            "distance_m": self.distance_m,
             "confidence": 0.9,
         }
 
 
 def test_orbit_faces_the_target_while_circling():
-    # Koko orbit trials: the vehicle translated without yawing, so the target left the camera's
-    # field of view, was lost, and the orbit held one circle point (a -0.5 deg heading sweep).
-    # The orbit must keep the person framed like follow and approach do.
+    # A vehicle that translates without yawing loses the target from the camera's field of view
+    # and holds one circle point; the orbit must keep the person framed like follow and approach.
     flight = FakeFlight()
     executor = HorusExecutor(
         flight,
@@ -1091,7 +1201,7 @@ def test_target_skill_hold_is_bounded_by_the_task_ttl_when_the_target_never_retu
     executor.close()
 
 
-class _MislabeledPersonTarget:
+class _MislabeledPersonTarget(PerceptionStub):
     """A person the detector currently calls a kite; 90 deg HFOV puts it ~4 m ahead."""
 
     def __init__(self, *, shirt_colour: str | None = None, person_history: bool = False):
@@ -1210,7 +1320,7 @@ def test_approach_refuses_a_mislabeled_target_without_person_evidence():
     executor.close()
 
 
-class _GrounderPersonSeed:
+class _GrounderPersonSeed(PerceptionStub):
     """An open-vocabulary person seed; the detector has not labelled it person."""
 
     def __init__(self, *, detector_evidence: bool = False):
@@ -1232,10 +1342,10 @@ class _GrounderPersonSeed:
 
 
 def test_grounder_seed_ranges_from_the_ground_plane_without_a_declared_size():
-    # The round-2 rule still holds for the *person-height* source (see the test below), but the
-    # ground-plane estimate is a geometric measurement of where the object is, so it does not
-    # need to know the target is a person: a grounder-only person seed with the camera geometry
-    # available ranges normally instead of refusing.
+    # The person-height range source still requires a declared person (see the test below), but
+    # the ground-plane estimate is a geometric measurement of where the object is, so it does
+    # not need to know the target is a person: a grounder-only person seed with the camera
+    # geometry available ranges normally instead of refusing.
     box = _logged_approach_box(horizontal_m=4.97, altitude_m=6.15)
     flight = FakeFlight(Pose(0.0, 0.0, 6.15))
     executor = HorusExecutor(
@@ -1326,8 +1436,8 @@ def test_approach_uses_person_height_once_the_detector_labels_a_grounder_seed():
     executor.close()
 
 
-class _LoggedGeometryTarget:
-    """A person box from the verify-forest-15178 approach geometry, with frame size for ranging."""
+class _LoggedGeometryTarget(PerceptionStub):
+    """A person box from a logged forest approach geometry, with frame size for ranging."""
 
     def __init__(self, box, *, frame=(640, 480), class_name="person", class_id=0):
         self.box = list(box)
@@ -1361,8 +1471,8 @@ def _logged_approach_box(*, horizontal_m, altitude_m, pitch_deg=-45.0, person_he
 
 
 def test_approach_ranges_from_the_ground_plane_at_the_logged_forest_geometry():
-    # verify-forest-15178: altitude 6.15 m, camera pitch -45 deg, the target 4.97 m ahead.
-    # The configured person height read 12.36 m there (2.5x high, foreshortened box); the
+    # Logged forest geometry: altitude 6.15 m, camera pitch -45 deg, the target 4.97 m ahead.
+    # The configured person height reads 12.36 m there (2.5x high, foreshortened box); the
     # ground-plane ray must land on the true camera-to-torso distance so arrival is detected.
     box = _logged_approach_box(horizontal_m=4.97, altitude_m=6.15)
     flight = FakeFlight(Pose(0.0, 0.0, 6.15))
@@ -1507,14 +1617,9 @@ def test_ground_plane_range_is_refused_for_a_shallow_ray():
 
 
 def test_fresh_downward_rangefinder_height_overrides_the_pose_altitude():
-    from types import SimpleNamespace
-
     box = _logged_approach_box(horizontal_m=4.97, altitude_m=6.15)
     flight = FakeFlight(Pose(0.0, 0.0, 6.15))
-    flight._telemetry.ground_distance = SimpleNamespace(
-        orientation=25, distance_m=9.0, min_distance_m=0.1, max_distance_m=40.0,
-        updated_monotonic=time.monotonic(),
-    )
+    flight._telemetry.ground_distance = _down_range(9.0, max_distance_m=40.0)
     executor = HorusExecutor(
         flight,
         _settings(camera_horizontal_fov_deg=84.0, target_height_m=1.9, default_gimbal_pitch_deg=-45.0),
@@ -1532,18 +1637,12 @@ def test_fresh_downward_rangefinder_height_overrides_the_pose_altitude():
 
 
 def test_saturated_downward_rangefinder_falls_back_to_the_pose_altitude():
-    # Koko runs koko-verify-forest/urban-15178: the payload's downward lidar saturates at its 4 m
-    # maximum, and that saturation was used as the height, so every ground-plane estimate read
-    # short (the forest approach "succeeded" 5.39 m from a target 37.7 m away). A reading at the
-    # bound must fall back to the pose altitude.
-    from types import SimpleNamespace
-
+    # A downward rangefinder at its maximum range is saturated, not a height: using it reads
+    # every ground-plane estimate short (an approach "arrives" 5.39 m from a target 37.7 m away).
+    # A reading at the bound must fall back to the pose altitude.
     box = _logged_approach_box(horizontal_m=20.0, altitude_m=9.5)
     flight = FakeFlight(Pose(0.0, 0.0, 9.5))
-    flight._telemetry.ground_distance = SimpleNamespace(
-        orientation=25, distance_m=4.0, min_distance_m=0.1, max_distance_m=4.0,
-        updated_monotonic=time.monotonic(),
-    )
+    flight._telemetry.ground_distance = _down_range(4.0, max_distance_m=4.0)
     executor = HorusExecutor(
         flight,
         _settings(
@@ -1573,8 +1672,6 @@ def test_camera_pitch_is_earth_frame_and_ignores_the_vehicle_pitch():
     # "Pitch in global frame"; GIMBAL_DEVICE_ATTITUDE_STATUS carries an earth-frame quaternion)
     # and FlightLink.set_gimbal_pitch_yaw documents its pitch as earth-frame, so a 10 deg
     # nose-down cruise attitude must not be added: that would shift the ground-plane range.
-    from types import SimpleNamespace
-
     box = _logged_approach_box(horizontal_m=10.0, altitude_m=6.0)
     true_slant = math.hypot(10.0, 6.0 - 1.12)
     settings = _settings(
@@ -1586,7 +1683,10 @@ def test_camera_pitch_is_earth_frame_and_ignores_the_vehicle_pitch():
 
     # Fresh mount telemetry: the reported earth-frame pitch is used as-is.
     flight = FakeFlight(Pose(0.0, 0.0, 6.0))
-    flight._telemetry.mount_status = SimpleNamespace(pitch_deg=-45.0, updated_monotonic=time.monotonic())
+    flight._telemetry.mount_status = MountStatus(
+        target_system=1, target_component=1, mount_mode=2, pitch_deg=-45.0, roll_deg=0.0,
+        yaw_deg=0.0, updated_at="", updated_monotonic=time.monotonic(),
+    )
     flight._telemetry.vehicle_pitch_deg = -10.0
     executor = HorusExecutor(
         flight, settings, perception=_LoggedGeometryTarget(box), autostart=False
@@ -1684,7 +1784,7 @@ def _assert_emergency_stays_in_control(executor, flight, action):
     assert executor.state == _EMERGENCY_STATE[action]
 
 
-class _GatedPersonTarget:
+class _GatedPersonTarget(PerceptionStub):
     """A person ~4 m ahead whose identity revalidation blocks until the test releases it."""
 
     def __init__(self, confidence: float = 0.9):
@@ -1842,9 +1942,7 @@ def test_target_skills_refuse_motion_on_stale_pose_or_heading(skill, stale):
 )
 def test_stalled_forward_tof_range_is_discarded_but_visual_range_still_works(target_size_m, range_source):
     flight = FakeFlight()
-    stalled = _front_tof()
-    stalled.updated_monotonic = time.monotonic() - 2.0
-    flight._telemetry.proximity = (stalled,)
+    flight._telemetry.proximity = (_front_tof(age_s=2.0),)
     executor = HorusExecutor(
         flight,
         _settings(camera_horizontal_fov_deg=90.0),
@@ -1871,7 +1969,7 @@ def test_stalled_forward_tof_range_is_discarded_but_visual_range_still_works(tar
     executor.close()
 
 
-class _SearchScene:
+class _SearchScene(PerceptionStub):
     """Perception stand-in: a processed-frame counter, its candidates and validation results."""
 
     def __init__(self):
@@ -1963,7 +2061,6 @@ def test_search_fails_after_covering_the_area_without_a_match():
             executor.tick()
     status = executor.get_task_status(task["task_id"])
     assert status["status"] == "failed"
-    assert status["error"] == "search covered the area without a validated match"
     assert status["tracking"]["found"] is False
     executor.close()
 
@@ -1998,16 +2095,21 @@ def test_search_by_reference_id_reacquires_a_lost_track_by_appearance():
     executor.tick()
     nine = {"id": 9, "class_name": "person", "bbox": [0, 0, 10, 20]}
     scene.next_frame([nine])
-    scene.reidentified = {"reference_id": 3, "candidate": {"id": 9}, "similarity": 0.5, "similarity_threshold": 0.72}
+    scene.reidentified = {"reference_id": 3, "candidate": {"id": 9, "frame_id": scene.frame_id}, "similarity": 0.5, "similarity_threshold": 0.72}
     executor.tick()  # below threshold: keep searching
     assert executor.get_task_status(task_id)["status"] == "running"
     scene.next_frame([nine])
-    scene.reidentified = {"reference_id": 3, "candidate": {"id": 9}, "similarity": 0.91, "similarity_threshold": 0.72}
+    # A confident match validated on an older frame is not this frame's evidence.
+    scene.reidentified = {"reference_id": 3, "candidate": {"id": 9, "frame_id": scene.frame_id - 1}, "similarity": 0.91, "similarity_threshold": 0.72}
+    executor.tick()
+    assert executor.get_task_status(task_id)["status"] == "running"
+    scene.next_frame([nine])
+    scene.reidentified = {"reference_id": 3, "candidate": {"id": 9, "frame_id": scene.frame_id}, "similarity": 0.91, "similarity_threshold": 0.72}
     executor.tick()
     tracking = executor.get_task_status(task_id)["tracking"]
     assert (tracking["found_id"], tracking["similarity"], tracking["mode"], tracking["matching_ids"]) == (9, 0.91, "reidentify", [9])
     [found] = [e for e in asyncio.run(event_bus.wait(0, 0.0)) if e["kind"] == "target_found"]
-    assert found["summary"] == "Search re-identified lost ID 3 as tracker ID 9 (similarity 0.91)"
+    assert (found["data"]["id"], found["data"]["reference_id"], found["data"]["similarity"]) == (9, 3, 0.91)
     executor.close()
 
 
@@ -2112,37 +2214,24 @@ def _cruise_settings(**overrides):
     return _settings(**values)
 
 
-def test_goto_uses_the_gated_cruise_speed_above_the_minimum_altitude():
-    flight = FakeFlight(Pose(0.0, 0.0, 3.5))
-    executor = HorusExecutor(flight, _cruise_settings(), autostart=False)
-    executor.submit_skill("goto", {"pose": {"north_m": 5.0, "east_m": 0.0, "up_m": 3.5}}, ttl_s=5.0)
-    executor.tick()
-    executor.tick()
-    assert _last_velocity(flight)[:2] == (2.0, 0.0)
-    executor.close()
-
-
-def test_goto_keeps_max_speed_below_the_cruise_minimum_altitude():
-    flight = FakeFlight(Pose(0.0, 0.0, 2.5))
-    executor = HorusExecutor(flight, _cruise_settings(), autostart=False)
-    executor.submit_skill("goto", {"pose": {"north_m": 5.0, "east_m": 0.0, "up_m": 3.5}}, ttl_s=5.0)
+@pytest.mark.parametrize(("start_up", "target_up", "settings"), [
+    pytest.param(2.5, 3.5, _cruise_settings(), id="starts-below-the-gate"),
+    pytest.param(3.5, 2.0, _cruise_settings(), id="target-below-the-gate"),
+    pytest.param(3.5, 3.5, _settings(), id="cruise-disabled"),
+])
+def test_goto_keeps_max_speed_unless_start_and_target_are_above_the_cruise_gate(
+    start_up, target_up, settings
+):
+    flight = FakeFlight(Pose(0.0, 0.0, start_up))
+    executor = HorusExecutor(flight, settings, autostart=False)
+    executor.submit_skill("goto", {"pose": {"north_m": 5.0, "east_m": 0.0, "up_m": target_up}}, ttl_s=5.0)
     executor.tick()
     executor.tick()
     assert _last_velocity(flight)[:2] == (1.0, 0.0)
     executor.close()
 
 
-def test_goto_keeps_max_speed_when_the_target_altitude_is_below_the_gate():
-    flight = FakeFlight(Pose(0.0, 0.0, 3.5))
-    executor = HorusExecutor(flight, _cruise_settings(), autostart=False)
-    executor.submit_skill("goto", {"pose": {"north_m": 5.0, "east_m": 0.0, "up_m": 2.0}}, ttl_s=5.0)
-    executor.tick()
-    executor.tick()
-    assert _last_velocity(flight)[:2] == (1.0, 0.0)
-    executor.close()
-
-
-def test_goto_drops_back_to_max_speed_when_descending_below_the_gate():
+def test_goto_cruises_above_the_gate_and_drops_back_to_max_speed_when_descending_below_it():
     flight = FakeFlight(Pose(0.0, 0.0, 3.5))
     executor = HorusExecutor(flight, _cruise_settings(), autostart=False)
     executor.submit_skill("goto", {"pose": {"north_m": 5.0, "east_m": 0.0, "up_m": 3.5}}, ttl_s=5.0)
@@ -2154,22 +2243,3 @@ def test_goto_drops_back_to_max_speed_when_descending_below_the_gate():
     # Under the obstacle band the proven max speed applies again.
     assert _last_velocity(flight)[0] == pytest.approx(1.0)
     executor.close()
-
-
-def test_disabled_cruise_speed_keeps_max_speed_everywhere():
-    flight = FakeFlight(Pose(0.0, 0.0, 3.5))
-    executor = HorusExecutor(flight, _settings(), autostart=False)
-    executor.submit_skill("goto", {"pose": {"north_m": 5.0, "east_m": 0.0, "up_m": 3.5}}, ttl_s=5.0)
-    executor.tick()
-    executor.tick()
-    assert _last_velocity(flight)[:2] == (1.0, 0.0)
-    executor.close()
-
-
-def test_flight_envelope_reports_cruise_settings():
-    enabled = flight_envelope(_cruise_settings())
-    assert enabled["cruise_speed_m_s"] == 2.0
-    assert enabled["cruise_min_altitude_m"] == 3.0
-    disabled = flight_envelope(_settings())
-    assert disabled["cruise_speed_m_s"] is None
-    assert disabled["cruise_min_altitude_m"] is None

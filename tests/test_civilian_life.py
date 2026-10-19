@@ -9,7 +9,8 @@ import numpy as np
 import pytest
 import yaml
 
-from sim.scripts.civilian_life import MotionEngine, load_scenario, point_in_polygon, select_agents
+from sim.campaign.civilian_spec import load_scenario, point_in_polygon, select_agents
+from sim.scripts.civilian_life import MotionEngine
 
 
 def _load(tmp_path: Path, agents, **fields):
@@ -475,9 +476,8 @@ def test_group_selection_defaults_to_ambient_and_can_select_multiple_groups(tmp_
 
 def test_wander_startle_flees_within_the_declared_speed_cap(tmp_path):
     """A startle makes a wanderer flee above its walk speed but within max_speed_m_s and
-    accel_m_s2. The campaign's civilian check once bounded animals by their nominal walk
-    speed and flagged seed 12648's ani_deer_01 for legitimate flee motion; the declared cap
-    is max_speed_m_s, so that is what the check (and this test) must use."""
+    accel_m_s2. The declared cap is max_speed_m_s, not the nominal walk speed, so legitimate
+    flee motion must stay inside it (and the civilian check must bound by it)."""
     meadow = [[21.6757, -12.3315], [19.0454, -5.9814], [12.6953, -3.3511], [6.3452, -5.9814],
               [3.7149, -12.3315], [6.3452, -18.6816], [12.6953, -21.3119], [19.0454, -18.6816]]
     scenario = _load(

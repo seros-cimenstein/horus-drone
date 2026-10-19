@@ -7,9 +7,11 @@ from horus.flight.link import (
     Velocity,
     VELOCITY_ONLY_MASK,
 )
+from horus.flight.port import FlightLink
 
 __all__ = [
     "DistanceSensor",
+    "FlightLink",
     "MavlinkFlightLink",
     "MountStatus",
     "Pose",

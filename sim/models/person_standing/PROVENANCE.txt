@@ -1,0 +1,11 @@
+Source: Gazebo Fuel OpenRobotics/Standing person (https://fuel.gazebosim.org/1.0/OpenRobotics/models/Standing%20person)
+Author (model.config): Marina Kollmitz; model created with MakeHuman (http://www.makehuman.org/)
+Licence: Creative Commons Zero v1.0 Universal (CC0 1.0)
+Mesh: the one shared standing.dae lives in sim/models/person_blue/meshes and references these textures; person_standing, person_red and person_green load it per submesh and override only the v2_tshirt02 material in model.sdf.
+Changes by HORUS (2026-10-18): textures larger than 1024 px were downscaled to 1024 x 1024 with sim/scripts/import_licensed_assets.py's _save_texture (Pillow LANCZOS, PNG optimize), the importer's MAX_TEXTURE_PX convention:
+  jeans01_normals.png 2048 px (4017244 B, sha256 2aa953834fa0bcf240fe069dc1ef283d801573e077bc5f9da04847370e9837d1)
+  jeans_basic_diffuse.png 2048 px (4501616 B, sha256 c4b2f9126873078ecf8a3678e28622196fa6cb47e131b6067d6ffe81919b0ca6)
+  male02_diffuse_black.png 2048 px (4040719 B, sha256 37c166c53575369f57cf233e775f87ef225b3fe9f66ff7ba34b3abb12dcd46be)
+  teeth.png 2048 px (1799930 B, sha256 d0afb57869c6fbb56b98f5efc4aec629ee7593e70d8dd2bfb9de923acfb65f43)
+  young_lightskinned_male_diffuse.png 2048 px (4448702 B, sha256 4233a4e1e2d423daf8e5aa25521df93253be54b0ab6490147afae39b076f4fcb)
+The unreferenced male02_diffuse_black-unmodified.png and eyebrow001-unmodified.png were removed.

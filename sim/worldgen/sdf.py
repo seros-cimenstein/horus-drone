@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -46,6 +45,21 @@ TREE_DECIDUOUS = (
 
 def f(value: float) -> str:
     return f"{value:.4f}".rstrip("0").rstrip(".") or "0"
+
+
+def floats(*values: float) -> str:
+    """Space-separated ``f`` values (poses, sizes, scales)."""
+    return " ".join(f(value) for value in values)
+
+
+def rgba(rgb: tuple[float, ...], scale: float = 255.0) -> str:
+    """An opaque SDF colour from channels in ``0..scale``, each clamped to 1."""
+    return " ".join(f"{min(1.0, value / scale):.3f}" for value in rgb) + " 1"
+
+
+def collide_surface(bitmask: int) -> str:
+    """A collision ``<surface>`` that only contacts collisions sharing a ``bitmask`` bit."""
+    return f"<surface><contact><collide_bitmask>{bitmask:#06x}</collide_bitmask></contact></surface>"
 
 
 def pose(x: float, y: float, z: float, yaw: float = 0.0) -> str:
