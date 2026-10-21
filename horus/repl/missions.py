@@ -78,6 +78,9 @@ class _MissionRun:
     run_number: int = 0
     run_started_at: datetime | None = None
     variables: dict[str, Any] = field(default_factory=dict)
+    # This run's step records for the result file: number, kind and what the step returned.
+    records: list[dict[str, Any]] = field(default_factory=list)
+    step_result: Any = None
 
     async def start_driver(self) -> None:
         if self.driver_process is None:
@@ -104,6 +107,7 @@ async def _step_start_driver(run: _MissionRun, number: int, step: Mapping[str, A
         raise ValueError(f"mission start_driver step {number} is malformed")
     await run.start_driver()
     print(f"  {number}. start_driver: {run.driver_path.name}")
+    run.step_result = run.driver_path.name
     return True
 
 
@@ -129,6 +133,7 @@ async def _step_select_candidate(run: _MissionRun, number: int, step: Mapping[st
     else:
         selected = await _poll_candidate(run.session, selection, timeout_s, rule)
     run.variables[store_as] = selected
+    run.step_result = selected
     print(f"  {number}. select_candidate: {json.dumps(selected, ensure_ascii=False)}")
     return True
 
@@ -160,6 +165,7 @@ async def _step_resolve_candidate(run: _MissionRun, number: int, step: Mapping[s
     resolution = _resolution_spec(_step_body(step, "resolve_candidate", number))
     outcome = await _resolve_candidate(run.session, resolution)
     run.variables[resolution["store_as"]] = outcome["candidate"] if outcome["outcome"] == "resolved" else outcome
+    run.step_result = outcome
     print(f"  {number}. resolve_candidate: {json.dumps(outcome, ensure_ascii=False)}")
     if outcome["outcome"] == "abstain":
         # Abstaining is a valid answer: the remaining steps need an identity.
@@ -178,6 +184,7 @@ async def _step_assert_reacquired(run: _MissionRun, number: int, step: Mapping[s
         config=config,
     )
     print(f"  {number}. assert_reacquired: {result_path}")
+    run.step_result = {"result_path": str(result_path), "assertions": result["assertions"]}
     if not result["assertions"]["passed"]:
         raise RuntimeError(f"mission reacquisition assertion failed; result written to {result_path}")
     return True
@@ -193,6 +200,7 @@ async def _step_text(run: _MissionRun, number: int, step: Mapping[str, Any]) -> 
         run.commander = HorusCommander(run.server_url, run.bearer_token, run.commander_settings)
         run.commander_task = asyncio.create_task(run.commander.run())
     response = await run.commander.submit_task(text)
+    run.step_result = response
     print(f"  {number}. commander: {response}")
     return True
 
@@ -206,12 +214,14 @@ async def _step_tool(run: _MissionRun, number: int, step: Mapping[str, Any]) -> 
         raise ValueError(f"mission step {number} uses unsupported skill {name!r}")
     result = await call_json(run.session, name, args)
     print(f"  {number}. {name}: {json.dumps(result, ensure_ascii=False)}")
+    run.step_result = {"tool": name, "arguments": args, "response": result}
     task_id = result.get("task_id") if isinstance(result, Mapping) else None
     stored_result = result
     if task_id and step.get("wait", True):
         timeout = float(step.get("timeout_s", args.get("ttl_s", 60.0)))
         terminal = await _wait_task(run.session, str(task_id), timeout)
         print(f"     result: {json.dumps(terminal, ensure_ascii=False)}")
+        run.step_result["terminal"] = terminal
         expected_status = step.get("expect_status", "succeeded")
         if terminal.get("status") != expected_status and not step.get("continue_on_failure", False):
             raise RuntimeError(f"mission step {number} ended {terminal.get('status')}: {terminal.get('error')}")
@@ -233,6 +243,22 @@ _STEP_HANDLERS: dict[str, Callable[[_MissionRun, int, Mapping[str, Any]], Awaita
     "text": _step_text,
     "tool": _step_tool,
 }
+
+
+async def _run_step(run: _MissionRun, number: int, step: Any) -> bool:
+    """Run one step and record it (also when it raises); False when the run should stop."""
+    run.check_driver()
+    if not isinstance(step, Mapping):
+        raise ValueError(f"mission step {number} must be a mapping")
+    kind = next((kind for kind in _STEP_HANDLERS if kind in step), "tool")
+    run.step_result = None
+    try:
+        proceed = await _STEP_HANDLERS[kind](run, number, step)
+    except Exception as exc:
+        run.records.append({"number": number, "kind": kind, "result": run.step_result, "error": f"{type(exc).__name__}: {exc}"})
+        raise
+    run.records.append({"number": number, "kind": kind, "result": run.step_result})
+    return proceed
 
 
 def _mission_driver(mission: Mapping[str, Any], mission_path: Path) -> tuple[Path | None, list[str], float | None, bool]:
@@ -283,6 +309,12 @@ async def run_mission(
     if repeats < 1:
         raise ValueError("repeat count must be positive")
     driver_path, driver_args, driver_min_duration, driver_step = _mission_driver(mission, mission_path)
+    final_steps = mission.get("finally", [])
+    if not isinstance(final_steps, list):
+        raise ValueError("mission finally must be a list of steps")
+    result_dir = mission.get("result_dir")
+    if result_dir is not None and (not isinstance(result_dir, str) or not result_dir.strip()):
+        raise ValueError("mission result_dir must be a non-empty relative path")
     run = _MissionRun(
         session=session,
         path=mission_path,
@@ -300,15 +332,10 @@ async def run_mission(
         for run_index in range(repeats):
             run.run_number = run_index + 1
             run.variables = {}
+            run.records = []
             run.run_started_at = datetime.now(timezone.utc)
             print(f"Run {run.run_number}/{repeats}")
-            for number, step in enumerate(mission["steps"], 1):
-                run.check_driver()
-                if not isinstance(step, Mapping):
-                    raise ValueError(f"mission step {number} must be a mapping")
-                kind = next((kind for kind in _STEP_HANDLERS if kind in step), "tool")
-                if not await _STEP_HANDLERS[kind](run, number, step):
-                    break
+            await _run_once(run, mission["steps"], final_steps, result_dir)
         run.check_driver()
         if driver_min_duration is not None and run.driver_started_at is not None:
             remaining = driver_min_duration - (time.monotonic() - run.driver_started_at)
@@ -327,6 +354,60 @@ async def run_mission(
         finally:
             if run.driver_process is not None:
                 await _stop_mission_driver(run.driver_process)
+
+
+async def _run_once(run: _MissionRun, steps: list[Any], final_steps: list[Any], result_dir: str | None) -> None:
+    """One run: the steps until the end or an abstain, then the ``finally`` steps, then the result.
+
+    ``finally`` steps (e.g. return home and land) also run after an abstain or a failed step, so
+    the vehicle is not left airborne; a cancelled run skips them. With ``result_dir`` the run's
+    outcome (completed, abstained, failed, cancelled) and every step record go to a JSON file.
+    """
+    outcome, error = "completed", None
+    try:
+        for number, step in enumerate(steps, 1):
+            if not await _run_step(run, number, step):
+                outcome = "abstained"
+                break
+    except Exception as exc:
+        outcome, error = "failed", f"{type(exc).__name__}: {exc}"
+        raise
+    except BaseException as exc:
+        outcome, error = "cancelled", f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        try:
+            if outcome != "cancelled" and final_steps:
+                print(f"  run {run.run_number} {outcome}; finally steps")
+                for offset, step in enumerate(final_steps, 1):
+                    await _run_step(run, len(steps) + offset, step)
+        finally:
+            if result_dir is not None:
+                path = _write_run_result(run, result_dir, outcome, error)
+                print(f"  run {run.run_number} result: {path}")
+
+
+def _write_run_result(run: _MissionRun, result_dir: str, outcome: str, error: str | None) -> Path:
+    directory = (run.path.parent / result_dir).resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    finished = datetime.now(timezone.utc)
+    record = {
+        "schema_version": 1,
+        "mission": run.name,
+        "run": run.run_number,
+        "started_at": run.run_started_at.isoformat() if run.run_started_at else None,
+        "finished_at": finished.isoformat(),
+        "outcome": outcome,
+        "error": error,
+        "steps": run.records,
+        "variables": run.variables,
+    }
+    stamp = finished.strftime("%Y%m%dT%H%M%S.%fZ")
+    path = directory / f"{run.path.stem}-run-{run.run_number:03d}-{stamp}-result.json"
+    with path.open("x", encoding="utf-8") as stream:
+        json.dump(record, stream, ensure_ascii=False, indent=2, default=str)
+        stream.write("\n")
+    return path
 
 
 def _variable_name(value: Any) -> str:

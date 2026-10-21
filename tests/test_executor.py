@@ -191,6 +191,29 @@ def test_polygon_geofence_keeps_corridor_target_inside_margin():
     executor.close()
 
 
+def test_target_velocity_is_limited_at_the_fence_edge_corner_and_after_an_overshoot():
+    from horus.executor.geofence import FENCE_LOOKAHEAD_S, Envelope
+
+    square = Envelope(_settings(
+        max_distance_m=40.0, geofence_radius_m=8.0, geofence_polygon_ned=((-10, -10), (-10, 10), (10, 10), (10, -10))
+    ))
+    # Far inside: unchanged.
+    assert square.limit_velocity(Pose(0.0, 0.0, 5.0), 3.0, 0.0) == (3.0, 0.0, False)
+    # 1 m short of the north edge at 3 m/s: the point one lookahead ahead lands on the edge; the
+    # along-edge component stays.
+    north, east, limited = square.limit_velocity(Pose(9.0, 0.0, 5.0), 3.0, 0.5)
+    assert limited and math.isclose(north, 1.0 / FENCE_LOOKAHEAD_S) and east == 0.5
+    # Into the corner: both outward components are cut.
+    north, east, limited = square.limit_velocity(Pose(9.0, 9.0, 5.0), 3.0, 3.0)
+    assert limited and 9.0 + north * FENCE_LOOKAHEAD_S <= 10.0 + 1e-9 and 9.0 + east * FENCE_LOOKAHEAD_S <= 10.0 + 1e-9
+    # Outside after an overshoot: no outward motion, motion back in is kept.
+    assert square.limit_velocity(Pose(11.0, 0.0, 5.0), 1.0, 0.0)[:2] == (0.0, 0.0)
+    assert square.limit_velocity(Pose(11.0, 0.0, 5.0), -1.0, 0.0) == (-1.0, 0.0, False)
+    # Radius fence (3 m): same rule along the radius.
+    north, east, limited = Envelope(_settings()).limit_velocity(Pose(2.5, 0.0, 2.0), 1.0, 0.0)
+    assert limited and math.isclose(north, 0.5 / FENCE_LOOKAHEAD_S) and east == 0.0
+
+
 def test_emergency_hold_preempts_queued_skill_without_waiting_for_tick():
     flight = FakeFlight()
     executor = HorusExecutor(flight, _settings(), autostart=False)
@@ -1121,6 +1144,33 @@ def test_approach_completes_at_the_standoff_and_does_not_chase():
         command for command in flight.commands
         if command[0] == "velocity" and (command[1], command[2]) != (0.0, 0.0)
     ]
+    executor.close()
+
+
+def test_approach_stops_at_the_geofence_instead_of_chasing_a_target_beyond_it():
+    # Target skills steer by velocity, so the fence applies to the velocity: a person beyond the
+    # fence must not pull the vehicle out of it (GTA C5: the pavement beyond the fence runs past
+    # a solid structure).
+    from horus.executor.geofence import FENCE_LOOKAHEAD_S
+
+    target = _IntermittentTarget()
+    flight = FakeFlight(Pose(2.5, 0.0, 2.0))  # 0.5 m inside the 3 m radius fence, facing north
+    flight._telemetry.proximity = (_front_tof(4.0),)  # inside the ToF's 6 m range
+    executor = HorusExecutor(flight, _settings(), perception=target, autostart=False)
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 1.0}, ttl_s=5.0)["task_id"]
+
+    executor.tick()
+
+    north = [command for command in flight.commands if command[0] == "velocity"][-1][1]
+    assert 0.0 < north <= 0.5 / FENCE_LOOKAHEAD_S + 1e-9
+    status = executor.get_task_status(task_id)
+    assert status["status"] == "running" and status["tracking"]["fence_limited"] is True
+
+    flight._telemetry.pose = Pose(2.99, 0.0, 2.0)
+    executor.tick()
+
+    status = executor.get_task_status(task_id)
+    assert status["status"] == "failed" and "geofence" in status["error"]
     executor.close()
 
 

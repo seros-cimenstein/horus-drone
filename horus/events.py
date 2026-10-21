@@ -17,7 +17,7 @@ TERMINAL_TASK_STATUSES = frozenset({"succeeded", "failed", "cancelled", "expired
 EXECUTOR_EVENT_KINDS = frozenset({
     "task_finished", "target_lost", "target_reacquired", "target_found", "link_lost",
     "link_restored", "auto_rth", "emergency", "landed", "precision_landing_stalled",
-    "pilot_override", "pilot_released",
+    "pilot_override", "pilot_released", "fence_limit",
 })
 PLAN_EVENT_KINDS = frozenset({"plan_finished", "plan_log"})
 # watch_region occupancy transitions, then watch lifecycle changes.

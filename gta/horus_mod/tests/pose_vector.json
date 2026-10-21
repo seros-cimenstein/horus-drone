@@ -1,0 +1,12 @@
+{
+  "comment": "Shared HPOS v1 pose packet test vector: gta/horus_mod/tests (C# parser) and tests/test_gta_bridge.py (Python encoder) both check it.",
+  "hex": "48504f5301000000cb04fb711f01000000000000000029400000000000000ac000000000000034c00000c03f000034c2000087430000a842",
+  "seq": 1234567890123,
+  "north_m": 12.5,
+  "east_m": -3.25,
+  "down_m": -20.0,
+  "roll_deg": 1.5,
+  "pitch_deg": -45.0,
+  "yaw_deg": 270.0,
+  "hfov_deg": 84.0
+}
