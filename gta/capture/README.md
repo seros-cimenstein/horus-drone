@@ -124,5 +124,7 @@ While GTA itself holds port 5610, put a `horus_capture.ini` with `port=5620` nex
 copy of the plugin and pass `--port 5620` to `check_stream.py`.
 
 In GTA V Enhanced 1.0.1158.16 under Proton Experimental the plugin loads through the ASI loader,
-hooks the game's swap chain and serves its 1920x1080 BGRA8 back buffer at the configured 15 Hz
-(checked on the startup screens; the frames match the display).
+hooks the game's swap chain and serves its BGRA8 back buffer at the configured 15 Hz (checked on
+the startup screens; the frames match the display). The frame size is the game's render size:
+1920x1080 in borderless windowed mode on Koko, and 1280x720 since `gta_mods.sh install` sets
+exclusive fullscreen 1280x720 (`gta/horus_mod/README.md` "Drone camera size").

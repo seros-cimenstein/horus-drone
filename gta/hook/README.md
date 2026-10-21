@@ -571,8 +571,14 @@ Back up `system.reg`/`user.reg` to `~/horus-gta/` first.
 `system.reg` and `user.reg` without starting wine: `NDP\v4\Full` `Release` ≥ 528040 (4.8; Koko has
 528049, 4.8.03761), and a `ProfileList\<SID>` key with `ProfileImagePath` for the SID named in
 `user.reg`'s header. If either is missing, it prints the command above and exits 1 with nothing
-installed. It then sets `<PauseOnFocusLoss value="0" />` in
-`drive_c/users/steamuser/Documents/Rockstar Games/GTAV Enhanced/settings.xml`. Otherwise GTA pauses its
-script threads (and HorusGta) whenever its window loses focus. If the value is not already 0, the
-file is first copied to `~/horus-gta/settings.xml.<timestamp>.bak`. A missing file or element is
-an error: start GTA once to create the file. Each result is printed as one `check …` line.
+installed. It then checks four values in
+`drive_c/users/steamuser/Documents/Rockstar Games/GTAV Enhanced/settings.xml`:
+
+- `PauseOnFocusLoss` 0. Otherwise GTA pauses its script threads (and HorusGta) whenever its window
+  loses focus.
+- `ScreenWidth` 1280, `ScreenHeight` 720 and `Windowed` 0 (exclusive fullscreen): the drone camera
+  size (`gta/horus_mod/README.md` "Drone camera size").
+
+If any value differs, the file is first copied to `~/horus-gta/settings.xml.<timestamp>.bak` and
+only the differing values are rewritten. A missing file or element is an error: start GTA once to
+create the file. Each value is printed as one `check …` line.

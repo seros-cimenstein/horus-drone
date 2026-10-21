@@ -18,7 +18,8 @@
 # install also sets dinput8/xinput1_4 to native,builtin in the game's Proton prefix registry, so Wine
 # loads the ASI loader without any Steam launch options. Full install first checks (read-only) that
 # the prefix has .NET 4.8 and a ProfileList entry for its user SID, failing with the setup commands
-# if not, and sets GTA's PauseOnFocusLoss to 0 (settings.xml backed up to ~/horus-gta first).
+# if not, and sets GTA's PauseOnFocusLoss to 0 and its video mode to exclusive fullscreen 1280x720
+# (the drone camera size; settings.xml backed up to ~/horus-gta first).
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -113,30 +114,39 @@ sys.exit(0 if ok else 1)
 PY
 }
 
-# GTA pauses script threads (and with them HorusGta) while its window is unfocused unless
-# PauseOnFocusLoss is 0. Backs settings.xml up to ~/horus-gta with a timestamp before changing it.
-set_pause_on_focus_loss() {
-  [[ -f "${settings}" ]] || { echo "check PauseOnFocusLoss: MISSING ${settings}; start GTA once to create it" >&2; return 1; }
-  local value backup
-  value="$(python3 - "${settings}" <<'PY'
-import re, sys
-m = re.search(rb'<PauseOnFocusLoss value="([^"]*)" />', open(sys.argv[1], "rb").read())
-print(m.group(1).decode() if m else "")
+# The settings.xml values HorusGta needs:
+# - PauseOnFocusLoss 0: otherwise GTA pauses script threads, and with them HorusGta, while its
+#   window is unfocused.
+# - ScreenWidth/ScreenHeight 1280x720 with Windowed 0 (exclusive fullscreen): the drone camera is
+#   the game's back buffer, and in borderless windowed mode (Windowed 3) GTA renders at the
+#   desktop's size whatever ScreenWidth/Height say (gta/horus_mod/README.md "Drone camera size").
+# Each value is checked; if any differs, settings.xml is backed up to ~/horus-gta with a timestamp
+# and the differing values are rewritten in place (other bytes, CRLF included, unchanged).
+GAME_SETTINGS=(PauseOnFocusLoss=0 ScreenWidth=1280 ScreenHeight=720 Windowed=0)
+set_game_settings() {
+  [[ -f "${settings}" ]] || { echo "check settings.xml: MISSING ${settings}; start GTA once to create it" >&2; return 1; }
+  python3 - "${settings}" "${HOME}/horus-gta/settings.xml.$(date +%Y%m%dT%H%M%S).bak" "${GAME_SETTINGS[@]}" <<'PY'
+import re, shutil, sys
+path, backup, wanted = sys.argv[1], sys.argv[2], [item.split("=", 1) for item in sys.argv[3:]]
+data = open(path, "rb").read()
+changed = []
+for key, value in wanted:
+    pattern = rb'<' + key.encode() + rb' value="([^"]*)" />'
+    m = re.search(pattern, data)
+    if not m:
+        print(f'check {key}: no <{key} value="…" /> in {path}; set it to {value} by hand', file=sys.stderr)
+        sys.exit(1)
+    if m.group(1).decode() == value:
+        print(f"check {key}: ok ({value})")
+        continue
+    changed.append((key, m.group(1).decode(), value))
+    data = data[:m.start(1)] + value.encode() + data[m.end(1):]
+if changed:
+    shutil.copy2(path, backup)
+    open(path, "wb").write(data)
+    for key, old, value in changed:
+        print(f"check {key}: was {old}, set to {value} (backup {backup})")
 PY
-)"
-  if [[ -z "${value}" ]]; then
-    echo "check PauseOnFocusLoss: no <PauseOnFocusLoss value=\"…\" /> in ${settings}; set it to 0 by hand" >&2
-    return 1
-  fi
-  if [[ "${value}" == 0 ]]; then echo "check PauseOnFocusLoss: ok (0)"; return 0; fi
-  backup="${HOME}/horus-gta/settings.xml.$(date +%Y%m%dT%H%M%S).bak"
-  cp -p -- "${settings}" "${backup}"
-  python3 - "${settings}" <<'PY'
-import re, sys
-data = open(sys.argv[1], "rb").read()
-open(sys.argv[1], "wb").write(re.sub(rb'<PauseOnFocusLoss value="[^"]*" />', b'<PauseOnFocusLoss value="0" />', data, count=1))
-PY
-  echo "check PauseOnFocusLoss: was ${value}, set to 0 (backup ${backup})"
 }
 
 game_version() {
@@ -180,7 +190,7 @@ case "${action}" in
       unzip -q -j "${SHV_ZIP}" bin/args.txt bin/dinput8.dll bin/xinput1_4.dll -d "${stage}"
     else
       check_prefix || { echo "Prefix setup incomplete; nothing installed." >&2; exit 1; }
-      set_pause_on_focus_loss
+      set_game_settings
       for z in "${SHV_ZIP}" "${HORUS_HOOK_DLL}" "${SHVDN_ZIP}" "${FPV_ZIP}" "${HORUS_MOD_DLL}" "${HORUS_MOD_INI}"; do [[ -f "${z}" ]] || { echo "missing ${z}" >&2; exit 1; }; done
       unzip -q -j "${SHV_ZIP}" bin/args.txt bin/dinput8.dll bin/xinput1_4.dll bin/NativeTrainer.asi -d "${stage}"
       cp -- "${HORUS_HOOK_DLL}" "${stage}/ScriptHookV.dll"
