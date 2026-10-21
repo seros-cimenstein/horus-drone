@@ -8,7 +8,10 @@ executor:
   max_vertical_speed_m_s: 1.5
   # One command may cross the inset fence (31 x 24 m, diagonal 39.3 m), not more.
   max_distance_m: 40.0
-  min_altitude_m: 1.0
+  # Every target altitude (take-off, goto, scans, an agent's choice) is clamped to at least 6 m: the
+  # plane sweeps below found the air clear from 6 m up, while the kiosk roof (4.4 m) and unmapped
+  # low objects stand below. Landing is ArduPilot's LAND, which this floor does not limit.
+  min_altitude_m: 6.0
   # The urban profile's ceiling. No mapped obstacle inside the fence reaches above 4.4 m (below).
   max_altitude_m: 48.0
   # Obstacles mapped in GTA on 2026-10-21 (C7, gta/horus_mod/README.md "Checked in game"; NED m
