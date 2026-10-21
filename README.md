@@ -201,7 +201,10 @@ the LAN.
    ```
 
    Verify proximity sensor orientation and Guided velocity avoidance in simulation before moving beyond a prop-free test. Additional EKF, optical-flow, rangefinder, geofence, and failsafe settings depend on the world/vehicle configuration and must be checked against the selected ArduPilot version.
-3. Edit `config/horus.yaml` for the camera source, local geofence/altitude/speed limits, model names, and server port. The defaults use MAVLink TCP `tcp:127.0.0.1:5760` and the OpenCV GStreamer source `udp://0.0.0.0:5600`.
+3. Edit `config/horus.yaml` for the camera source, local geofence/altitude/speed limits, model names, and server port. The defaults use MAVLink TCP `tcp:127.0.0.1:5760` and the OpenCV GStreamer source `udp://0.0.0.0:5600`. `perception.source: gta://127.0.0.1:5610` instead reads frames copied out of GTA V Enhanced's renderer by `horus_capture.asi`; see [`gta/capture/README.md`](gta/capture/README.md).
+
+   **GTA V renderer mode.** SITL keeps flying the vehicle and GTA V only renders the drone camera. `horus-gta-bridge` sends the camera pose (vehicle position plus gimbal attitude, read from SITL serial1 `tcp:127.0.0.1:5762`) over UDP to `HorusGta.dll`, a ScriptHookVDotNet script that puts GTA's scripted camera at that pose every frame; `horus_capture.asi` then serves those frames on `gta://`. The scripts run on the HORUS Script Hook, our own Script Hook V implementation for GTA V Enhanced ([`gta/hook/README.md`](gta/hook/README.md)). See [`gta/horus_mod/README.md`](gta/horus_mod/README.md) for the build, install, origin placement and pose packet.
+
 4. Set a strong server bearer token and start the loopback-only authenticated MCP server:
 
    ```bash
@@ -316,6 +319,24 @@ Label filters (`watch_region`, `search`, `resolve_candidate`) compare tracker la
        timeout_s: 15.0
    ```
 
+   Top-level `finally` steps run after every run's steps, also after an abstain or a failed
+   step (not after a cancelled run), so a mission can always return home and land; a failed
+   `finally` step fails the mission. With a top-level `result_dir` (relative to the mission
+   YAML), each run writes `<mission>-run-NNN-<UTC>-result.json` there: the outcome
+   (`completed`, `abstained`, `failed` or `cancelled`), the error, every step's record (the
+   tool's arguments, response and terminal task status; the `resolve_candidate` or
+   `select_candidate` outcome; a commander response), and the mission variables, so a resolved
+   candidate or an abstain reason is on file. `missions/S14_gta_find_person.yaml` uses both:
+
+   ```yaml
+   result_dir: ../runs
+   finally:
+     - tool: goto
+       arguments: {pose: {north_m: 0, east_m: 0, up_m: 8}, ttl_s: 180}
+     - tool: land
+       delay_s: 40
+   ```
+
 7. For every world that carries the ToF payload (`horus_indoor.sdf`, `horus_forest*`, `horus_urban*`), `start_sim.sh` automatically launches one ToF bridge after SITL opens TCP `127.0.0.1:5763`. To run or restart it manually on a running world:
 
    ```bash
@@ -328,7 +349,7 @@ Label filters (`watch_region`, `search`, `resolve_candidate`) compare tracker la
 
 Use `config/ardupilot/horus_sitl_nogps.parm` for the Copter-4.7.1 GPS-denied profile. It disables both simulated GPS1 and the GPS1 receiver backend, skips only the GPS-lock pre-arm check (`ARMING_SKIPCHK 8`), enables SITL optical flow, selects optical-flow horizontal velocity and barometer vertical position in EKF3, and configures the downward MAVLink rangefinder at orientation 25. All other ArduPilot pre-arm checks remain enabled. The profile retains the existing MAVLink proximity-avoidance settings; the indoor ToF bridge connects to SITL at TCP `127.0.0.1:5763`.
 
-`executor.geofence_polygon_ned` optionally replaces the home-centered radius with an inset simple polygon whose vertices are `[north_m, east_m]`. The indoor profile maps Gazebo `(x east, y north)` to NED `[y, x]`, encloses the room plus north corridor along the wall centre lines, and uses a 1.2 m inset: 0.1 m half wall thickness, the 1.0 m `AVOID_MARGIN` that ArduPilot proximity avoidance holds from wall faces (set in `config/ardupilot/horus_sitl*.parm`; the ArduPilot default is 2 m), and 0.1 m slack. With a smaller inset an edge target lies inside the avoidance margin, so the executor and avoidance fight and the task never arrives. Targets outside the inset polygon project to the nearest in-fence point; task responses retain the requested target, executed target, and clamp reason.
+`executor.geofence_polygon_ned` optionally replaces the home-centered radius with an inset simple polygon whose vertices are `[north_m, east_m]`. The indoor profile maps Gazebo `(x east, y north)` to NED `[y, x]`, encloses the room plus north corridor along the wall centre lines, and uses a 1.2 m inset: 0.1 m half wall thickness, the 1.0 m `AVOID_MARGIN` that ArduPilot proximity avoidance holds from wall faces (set in `config/ardupilot/horus_sitl*.parm`; the ArduPilot default is 2 m), and 0.1 m slack. With a smaller inset an edge target lies inside the avoidance margin, so the executor and avoidance fight and the task never arrives. Targets outside the inset polygon project to the nearest in-fence point; task responses retain the requested target, executed target, and clamp reason. `approach`, `follow` and `orbit` steer toward a tracked target by velocity instead of a target point, so the same inset fence (or radius) limits their velocity: the outward part is cut so that the position 1.5 s ahead (`geofence.FENCE_LOOKAHEAD_S`) stays inside, and the vehicle slows to a stop at the edge while motion along it and back inside continues. The task's `tracking.fence_limited` turns true and a `fence_limit` event is published the first time. An `approach` whose target lies beyond the fence fails once it can no longer close the range (`approach stopped at the geofence edge …`) instead of waiting for its TTL.
 
 Set `flight.gps_free_mode: true` in `config/horus.yaml` to send the configured WGS-84 `global_origin_latitude_deg`, `global_origin_longitude_deg`, and `global_origin_altitude_m` with `SET_GPS_GLOBAL_ORIGIN` on MAVLink connect. This sets the EKF global origin only; it does not fabricate local-position telemetry.
 

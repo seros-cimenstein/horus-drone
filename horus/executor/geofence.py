@@ -10,6 +10,11 @@ from horus.flight import Pose
 
 _Point = tuple[float, float]
 _GEOMETRY_EPSILON = 1e-9
+# Target skills (approach/follow/orbit) steer by velocity, not by a clamped target. A velocity is
+# limited when the position it reaches this far ahead would leave the inset fence, so the vehicle
+# starts slowing that far from the inset edge (4.5 m at 3 m/s) and the inset margin absorbs the
+# braking overshoot.
+FENCE_LOOKAHEAD_S = 1.5
 
 
 def _cross(left: _Point, right: _Point) -> float:
@@ -254,6 +259,52 @@ class Envelope:
                 east *= scale
                 reasons.append("horizontal target clamped to geofence radius")
         return Pose(north, east, altitude), reasons
+
+    def _outside(self, point: _Point) -> tuple[_Point, float] | None:
+        """Unit direction from the nearest fence point out to ``point`` and the distance; None inside."""
+        if self.polygon is not None:
+            if _point_in_polygon(point, self.polygon):
+                return None
+            nearest = _nearest_polygon_point(point, self.polygon)
+            offset = (point[0] - nearest[0], point[1] - nearest[1])
+        else:
+            radius = math.hypot(*point)
+            if radius <= self.settings.geofence_radius_m:
+                return None
+            scale = (radius - self.settings.geofence_radius_m) / radius
+            offset = (point[0] * scale, point[1] * scale)
+        depth = math.hypot(*offset)
+        if depth <= _GEOMETRY_EPSILON:
+            return None
+        return (offset[0] / depth, offset[1] / depth), depth
+
+    def limit_velocity(
+        self, position: Pose, north_m_s: float, east_m_s: float, lookahead_s: float = FENCE_LOOKAHEAD_S
+    ) -> tuple[float, float, bool]:
+        """Horizontal velocity limited so the point ``lookahead_s`` ahead stays inside the fence.
+
+        While that point lies outside, the outward component (along the direction from the
+        nearest fence point) is cut by just enough to bring it back to the edge, repeated for a
+        corner. Motion along the edge and back inside stays, so the vehicle slows to a stop at
+        the edge. From outside (an overshoot) no outward motion is left. Returns
+        (north, east, limited).
+        """
+        velocity = (float(north_m_s), float(east_m_s))
+        limited = False
+        for _ in range(4):
+            ahead = (position.north_m + velocity[0] * lookahead_s, position.east_m + velocity[1] * lookahead_s)
+            outside = self._outside(ahead)
+            if outside is None or outside[1] <= 1e-6:
+                return velocity[0], velocity[1], limited
+            normal, depth = outside
+            outward = velocity[0] * normal[0] + velocity[1] * normal[1]
+            if outward <= _GEOMETRY_EPSILON:
+                # Outside already (an overshoot) and moving back in or along the edge.
+                return velocity[0], velocity[1], limited
+            cut = min(outward, depth / lookahead_s)
+            velocity = (velocity[0] - cut * normal[0], velocity[1] - cut * normal[1])
+            limited = True
+        return 0.0, 0.0, True
 
     def scan_waypoints(
         self, area: Mapping[str, Any]
