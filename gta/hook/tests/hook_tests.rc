@@ -1,0 +1,25 @@
+// Version resource of horus_hook_tests.exe. The tests load ScriptHookV.dll into this process, so
+// this executable stands in for the game: 1.0.1158.16 is GTA V Enhanced's build on Koko, which
+// Script Hook V 3889.0 does not list (getGameVersion VER_UNK, getGameVersionInfo 1.0.1158.16).
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 1,0,1158,16
+PRODUCTVERSION 1,0,1158,16
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904b0"
+    BEGIN
+      VALUE "FileDescription", "HORUS Script Hook unit tests (stand-in for GTA5_Enhanced.exe)"
+      VALUE "FileVersion", "1.0.1158.16"
+      VALUE "ProductVersion", "1.0.1158.16"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

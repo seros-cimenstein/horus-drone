@@ -11,3 +11,8 @@ __pycache__/
 /sim/logs/*
 !/sim/logs/koko_bringup.md
 /sim/generated/
+/gta/build/
+/gta/horus_mod/build/
+/gta/horus_mod/.cache/
+/gta/horus_mod/*/bin/
+/gta/horus_mod/*/obj/

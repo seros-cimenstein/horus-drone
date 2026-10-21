@@ -24,10 +24,17 @@ source "${SIM_DIR}/scripts/procedural_world.sh"
 
 usage() {
   cat <<'EOF'
-Usage: ./sim/run.sh <build|start [--procedural [--seed N] [--kind forest|urban] [--stratum baseline|chaotic]] [--gui] [--gui-client] [world]|gui-client|stop [--purge]|status|s0|frame|logs>
+Usage: ./sim/run.sh <build|start [--procedural [--seed N] [--kind forest|urban] [--stratum baseline|chaotic]] [--gui] [--gui-client] [world]|start --gta|gui-client|stop [--purge]|status|s0|frame|logs>
 
   build             Build the Ubuntu 22.04 + Gazebo Harmonic + ArduPilot image
   start [--gui] [--gui-client] [world]
+  start --gta       GTA V renderer mode: ArduCopter SITL (built-in quad physics, no Gazebo) and
+                    horus-gta-bridge (serial1 tcp:5762 -> udp HORUS_GTA_TARGET, default
+                    127.0.0.1:5611); HORUS flies on tcp:5760 (gta/horus_mod/README.md)
+  start --gta --json-physics
+                    GTA V physics mode: ArduCopter SITL on its JSON backend; HorusGta.dll in GTA
+                    (udp HORUS_GTA_PHYSICS_ADDRESS:9002, default 127.0.0.1) flies the quad and
+                    feeds SITL its sensors; no bridge. HORUS flies on tcp:5760
   --procedural      Generate a randomized world (sim/generated) and start it; without
                     --seed a random 5-digit seed is chosen and printed for reproduction
   --seed N          Procedural seed (implies --procedural)
@@ -70,6 +77,8 @@ case "${command}" in
     procedural=0
     seed=""
     kind=""
+    gta=0
+    json_physics=0
     stratum=""
     while (( $# > 0 )); do
       case "$1" in
@@ -106,6 +115,12 @@ case "${command}" in
           procedural=1
           shift
           ;;
+        --gta)
+          gta=1
+          ;;
+        --json-physics)
+          json_physics=1
+          ;;
         --gui)
           gui_enabled=1
           ;;
@@ -134,6 +149,16 @@ case "${command}" in
       esac
       shift
     done
+    if (( json_physics == 1 && gta == 0 )); then
+      printf -- '--json-physics is a GTA mode option; use start --gta --json-physics.\n' >&2
+      usage >&2
+      exit 2
+    fi
+    if (( gta == 1 )) && (( procedural == 1 || gui_enabled == 1 || world_set == 1 )); then
+      printf -- '--gta runs SITL without Gazebo; it takes no world, --procedural or --gui option.\n' >&2
+      usage >&2
+      exit 2
+    fi
     if (( procedural == 1 )); then
       if (( gui_client_enabled == 1 )); then
         printf 'gui-client observes a remote world and cannot start a procedural world.\n' >&2
@@ -190,6 +215,14 @@ case "${command}" in
       container_run_dir="${container_run_root}/${run_id}"
       container_workdir=/horus
       container_command=(/horus/sim/scripts/start_gui_client.sh)
+    elif (( gta == 1 )); then
+      container_run_root=/horus/sim/run
+      container_run_dir="${container_run_root}/${run_id}"
+      container_workdir=/horus
+      container_command=(/horus/sim/scripts/start_gta_sitl.sh)
+      # The GTA profile becomes the container default, so the bridge sends its camera FOV and any
+      # HORUS process started in the container loads the same profile.
+      export HORUS_CONFIG="${HORUS_CONFIG:-/horus/config/horus_gta.yaml}"
     else
       container_run_root=/horus/sim/run
       container_run_dir="${container_run_root}/${run_id}"
@@ -257,6 +290,8 @@ case "${command}" in
     fi
     mkdir -p "${RUN_ROOT}" "${SIM_DIR}/logs"
     gpu_mode="${HORUS_SIM_GPU:-auto}"
+    # SITL's built-in physics renders nothing; GTA draws the camera view on the host.
+    (( gta == 1 )) && gpu_mode=off
     gpu_args=()
     nvidia_enabled=false
     mesa_enabled=false
@@ -326,7 +361,7 @@ case "${command}" in
         printf 'NVIDIA GPU enabled by HORUS_SIM_GPU=on.\n'
         ;;
       off)
-        printf 'GPU rendering disabled by HORUS_SIM_GPU=off; using CPU rendering.\n'
+        (( gta == 1 )) || printf 'GPU rendering disabled by HORUS_SIM_GPU=off; using CPU rendering.\n'
         ;;
       *)
         printf 'HORUS_SIM_GPU must be auto, amd, mesa, on, or off (got %s).\n' "${gpu_mode}" >&2
@@ -354,6 +389,13 @@ case "${command}" in
     )
     if [[ -n "${GZ_RELAY:-}" ]]; then
       gz_args+=(--env "GZ_RELAY=${GZ_RELAY}")
+    fi
+    gta_env_args=()
+    if (( gta == 1 )); then
+      gta_env_args=(--env "HORUS_GTA_TARGET=${HORUS_GTA_TARGET:-127.0.0.1:5611}")
+      if (( json_physics == 1 )); then
+        gta_env_args+=(--env HORUS_GTA_PHYSICS=json --env "HORUS_GTA_PHYSICS_ADDRESS=${HORUS_GTA_PHYSICS_ADDRESS:-127.0.0.1}")
+      fi
     fi
     gui_client_env_args=()
     if (( gui_client_enabled == 1 )); then
@@ -390,6 +432,7 @@ case "${command}" in
       "${resource_args[@]}" \
       "${gui_client_env_args[@]}" \
       "${config_env_args[@]}" \
+      "${gta_env_args[@]}" \
       --env "HORUS_SITL_PARAM_FILE=${HORUS_SITL_PARAM_FILE:-}" \
       --env HORUS_SIM_CONTAINER=1 \
       --env "HORUS_SIM_GUI=${gui_enabled}" \
@@ -454,10 +497,16 @@ case "${command}" in
           "${SIM_DIR}/scripts/stop_sim.sh" || true
         exit 1
       fi
-      printf 'Started %s. Runtime files: %s/run/%s/ (Gazebo and SITL logs are in logs/).\n' \
+      printf 'Started %s. Runtime files: %s/run/%s/ (SITL logs are in logs/).\n' \
         "${CONTAINER}" "${SIM_DIR}" "${run_id}"
       printf 'MAVLink flight endpoint (single TCP client): tcp:127.0.0.1:5760\n'
-      if [[ "${world}" == "horus_indoor.sdf" ]]; then
+      if (( gta == 1 && json_physics == 1 )); then
+        printf 'GTA physics: SITL JSON backend -> udp %s:9002 (HorusGta.dll in GTA answers with the quad state)\n' \
+          "${HORUS_GTA_PHYSICS_ADDRESS:-127.0.0.1}"
+      elif (( gta == 1 )); then
+        printf 'GTA pose stream: horus-gta-bridge on tcp:127.0.0.1:5762 -> udp %s (logs/gta_bridge.log)\n' \
+          "${HORUS_GTA_TARGET:-127.0.0.1:5611}"
+      elif [[ "${world}" == "horus_indoor.sdf" ]]; then
         printf 'Indoor ToF bridge endpoint: tcp:127.0.0.1:5763\n'
       fi
     fi

@@ -469,3 +469,22 @@ def test_velocity_comes_from_the_message_that_supplies_the_pose():
     telemetry = link.telemetry()
     assert telemetry.pose.as_dict() == {"north_m": 1.0, "east_m": 2.0, "up_m": 3.0}
     assert telemetry.velocity.as_dict() == {"north_m_s": 0.25, "east_m_s": 0.5, "down_m_s": -0.125}
+
+
+def test_global_position_without_a_fix_is_neither_pose_nor_origin():
+    link = MavlinkFlightLink(FlightSettings(), connection=FakeConnection())
+
+    def global_position(lat: int, lon: int, relative_alt: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            get_type=lambda: "GLOBAL_POSITION_INT", vx=0, vy=0, vz=0, hdg=0,
+            lat=lat, lon=lon, relative_alt=relative_alt,
+        )
+
+    # Before its EKF has a position ArduPilot reports lat = lon = 0: no pose yet.
+    link._consume(global_position(0, 0, 0))
+    assert link.telemetry().pose is None
+    # The first real fix becomes the origin, so the pose starts at (0, 0), not 4000 km away.
+    link._consume(global_position(-353632620, 1491652370, 100))
+    assert link.telemetry().pose.as_dict() == {"north_m": 0.0, "east_m": 0.0, "up_m": 0.1}
+    link._consume(global_position(-353631720, 1491652370, 100))
+    assert link.telemetry().pose.north_m == pytest.approx(10.0, abs=0.05)

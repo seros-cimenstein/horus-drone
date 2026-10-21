@@ -48,6 +48,7 @@ horus-mcp = "horus.mcp_server.server:main"
 horus-mcp-call = "horus.mcp_server.client:main"
 horus-commander-serve = "horus.commander.server:main"
 horus-gz-bridge = "horus.gz_bridge:main"
+horus-gta-bridge = "horus.gta_bridge:main"
 horus-tof-bridge = "horus.tof_bridge.cli:main"
 horus-grounder = "horus.grounder.server:main"
 

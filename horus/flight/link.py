@@ -418,14 +418,17 @@ class MavlinkFlightLink:
                 # Until LOCAL_POSITION_NED arrives, pose and velocity fall back to this message,
                 # kept in the same relative-meter NED frame; afterwards LOCAL_POSITION_NED alone
                 # feeds both, so velocity always comes from the message that produced the pose.
-                if not self._local_position_seen:
+                # ArduPilot reports lat = lon = 0 until its EKF has a position; such a message is
+                # not a position, and taking it as the origin would put the pose thousands of
+                # kilometres off.
+                latitude = float(message.lat) / 1e7
+                longitude = float(message.lon) / 1e7
+                if not self._local_position_seen and (latitude, longitude) != (0.0, 0.0):
                     self._velocity = Velocity(
                         float(message.vx) / 100.0,
                         float(message.vy) / 100.0,
                         float(message.vz) / 100.0,
                     )
-                    latitude = float(message.lat) / 1e7
-                    longitude = float(message.lon) / 1e7
                     if self._global_origin is None:
                         self._global_origin = (latitude, longitude)
                     origin_lat, origin_lon = self._global_origin

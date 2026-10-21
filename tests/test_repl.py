@@ -237,6 +237,90 @@ def test_resolve_candidate_ignores_a_first_match_returned_after_the_deadline(tmp
     assert "follow" not in [name for name, _ in calls]
 
 
+def _run_with_finally(tmp_path, *, table, take_off_status="succeeded"):
+    """Mission: take_off, resolve a person, approach; finally rth + land; result JSON under runs/."""
+    import asyncio
+    import io
+    from contextlib import redirect_stdout
+    from unittest.mock import patch
+
+    from horus.repl.missions import run_mission
+
+    missions = tmp_path / "missions"
+    missions.mkdir()
+    mission = missions / "find.yaml"
+    mission.write_text(
+        "name: find\n"
+        "result_dir: ../runs\n"
+        "steps:\n"
+        "  - tool: take_off\n"
+        "    arguments: {altitude_m: 10}\n"
+        "  - resolve_candidate: {class_name: person, store_as: target, timeout_s: 1.0, settle_s: 0.5}\n"
+        "  - tool: approach\n"
+        "    arguments: {id: $target.id, dist_m: 14}\n"
+        "finally:\n"
+        "  - tool: rth\n"
+        "  - tool: land\n",
+        encoding="utf-8",
+    )
+    clock = [100.0]
+    calls = []
+
+    async def tool_call(_session, name, arguments=None):
+        calls.append(name)
+        if name == "list_candidates":
+            frame = sum(1 for called in calls if called == "list_candidates")
+            return {"frame_id": frame, "observation_age_s": 0.1, "pose": {}, "candidate_table": table}
+        if name == "wait_for_task":
+            status = take_off_status if arguments["task_id"] == "take_off-1" else "succeeded"
+            return {"task_id": arguments["task_id"], "status": status, "error": None if status == "succeeded" else "boom"}
+        if name in ("take_off", "approach"):
+            return {"task_id": f"{name}-1"}
+        return {"state": name}
+
+    async def sleep(seconds):
+        clock[0] += seconds
+
+    error = None
+    with patch("horus.repl.missions.call_json", side_effect=tool_call), patch("horus.repl.missions.asyncio.sleep", sleep), \
+            patch("horus.repl.missions.time.monotonic", lambda: clock[0]), redirect_stdout(io.StringIO()):
+        try:
+            asyncio.run(run_mission(session=object(), path=mission))
+        except RuntimeError as exc:
+            error = exc
+    results = sorted((tmp_path / "runs").glob("find-run-001-*-result.json"))
+    assert len(results) == 1
+    return json.loads(results[0].read_text(encoding="utf-8")), [name for name in calls if name != "list_candidates"], error
+
+
+def test_mission_finally_lands_after_an_abstain_and_the_result_names_the_reason(tmp_path):
+    result, calls, error = _run_with_finally(tmp_path, table=[_row(5, "car")])
+    assert error is None
+    assert result["outcome"] == "abstained"
+    resolve = next(step for step in result["steps"] if step["kind"] == "resolve_candidate")
+    assert (resolve["result"]["outcome"], resolve["result"]["reason"]) == ("abstain", "no_match")
+    # The approach is skipped, but the vehicle still goes home and lands.
+    assert calls == ["take_off", "wait_for_task", "rth", "land"]
+    assert [step["result"]["tool"] for step in result["steps"][-2:]] == ["rth", "land"]
+
+
+def test_mission_result_names_the_resolved_candidate(tmp_path):
+    result, calls, error = _run_with_finally(tmp_path, table=[_row(4, "person")])
+    assert error is None and result["outcome"] == "completed"
+    assert result["variables"]["target"]["id"] == 4
+    approach = next(step for step in result["steps"] if step["kind"] == "tool" and step["result"]["tool"] == "approach")
+    assert approach["result"]["arguments"] == {"id": 4, "dist_m": 14}
+    assert calls[-2:] == ["rth", "land"]
+
+
+def test_mission_finally_lands_after_a_failed_step_and_the_failure_is_recorded(tmp_path):
+    result, calls, error = _run_with_finally(tmp_path, table=[_row(4, "person")], take_off_status="failed")
+    assert error is not None and "ended failed" in str(error)
+    assert result["outcome"] == "failed" and "ended failed" in result["error"]
+    assert result["steps"][0]["result"]["terminal"]["status"] == "failed" and "error" in result["steps"][0]
+    assert calls == ["take_off", "wait_for_task", "rth", "land"]
+
+
 def test_resolve_candidate_bounds_a_hanging_list_candidates_call():
     import asyncio
     from unittest.mock import patch
