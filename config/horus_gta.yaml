@@ -48,6 +48,9 @@ executor:
 perception:
   # Frames from horus_capture.asi (gta/capture/README.md) in the game on the same host.
   source: gta://127.0.0.1:5610
+  # horus_capture serves at most 15 frames/s (its max_hz); read all of them instead of the 5/s
+  # default. GTA renders 1280x720 for the camera (gta/horus_mod/README.md "Drone camera size").
+  max_fps: 15.0
   # As config/horus_forest.yaml; start --gta does not start the grounder, so the pass is
   # detector-only unless one is running.
   vocabulary:

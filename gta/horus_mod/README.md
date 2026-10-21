@@ -298,6 +298,32 @@ scripts/koko/gta_mods.sh install  # full stack: HORUS Script Hook, SHVDN, Los Sa
 mapping, ini, receive state). `tests/` runs it headless with `dotnet run`. The script itself is
 `src/HorusGtaScript.cs`.
 
+## Drone camera size
+
+The drone camera is the game's own frame: `horus_capture.asi` copies the back buffer about to be
+presented (`gta/capture/README.md`), so its size is GTA's render size. `gta_mods.sh install` sets
+exclusive fullscreen 1280x720 in GTA's `settings.xml` (`ScreenWidth` 1280, `ScreenHeight` 720,
+`Windowed` 0; backed up first, `gta/hook/README.md` "Proton prefix setup").
+
+Exclusive fullscreen is needed because in borderless windowed mode (`Windowed` 3, Koko's
+setting until 2026-10-21) GTA renders at the desktop's 1920x1080 whatever `ScreenWidth`/`ScreenHeight` say.
+Checked on Koko on 2026-10-21:
+
+- **Windowed 3, 1280x720 set**: frames still 1920x1080, 14.95 fps, about 0.08 s old.
+- **Windowed 0, 1280x720**: frames 1280x720. The window still covers the 1920x1080 panel, scaled
+  up.
+
+HORUS reads all 15 frames/s the plugin serves: `perception.max_fps` is 15 in
+`config/horus_gta.yaml` (5 by default). The detector runs on each frame it reads, one at a time;
+with yolov8n at about 140 ms per frame on Koko, horus-mcp processes about 6.3 frames/s
+(`get_state` `processing.fps` 6.2–6.6 at 8 m), against 5.0 before.
+
+Measured on 2026-10-21 with SITL on the JSON backend and the drone camera on screen. A client
+(`koko:~/horus-gta/run18/m2_rate.py`, `GtaFrameStream` with `require_active=True`) pulled gta:// for
+60 s: 898 distinct frames, 14.96 frames/s, all 1280x720 and all `camera_active`, aged 0.007–0.033 s
+(median 0.017) at arrival (`run18/m2_rate_60s.txt`). horus-mcp's `last_frame_age_s` stayed at or
+below 0.20 s over 60 s while the drone held at 8 m.
+
 ## Checked in game
 
 GTA V Enhanced 1.0.1158.16 under Proton, on the HORUS Script Hook (`gta/hook`): ArduPilot SITL
