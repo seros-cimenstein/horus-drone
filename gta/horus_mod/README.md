@@ -625,6 +625,36 @@ docker exec -e HORUS_MCP_TOKEN="$token" -w /horus horus-sim /opt/horus-venv/bin/
 - **Contacts:** HorusGta logged only the six ground contacts (rest and five touchdowns). The
   real-time factor was 0.68–1.01.
 
+Claude-commanded mission in GTA, 2026-10-21 21:50–21:52 (`koko:~/horus-gta/run18/attempt1/`).
+`missions/S15_gta_claude_find_person.yaml` holds one `text:` step with the operator's request:
+"find a person on the plaza, hover near them, then come back and land". The REPL ran on the laptop
+and reached horus-mcp on Koko through an SSH tunnel (`ssh -N -L 18000:127.0.0.1:8000 koko`). It
+started Claude Code (Opus, high effort) with only the HORUS MCP tools, and Claude chose every
+call. Before the run the GTA profile's altitude floor went from 1 m to 6 m, so no agent-chosen
+target can go below the clear air C7 measured; `get_map` reported the range 6–48 m.
+
+- **Claude's calls**: `get_state`, `get_map`, then one onboard `run_plan`:
+  - take off to 6 m;
+  - `search` the inset fence for `person`;
+  - if a person is found: `approach` it to 3 m, `follow` it for 25 s if the approach arrives,
+    otherwise wait 5 s;
+  - in every branch: `rth()` and `land()`.
+
+  Then `wait_for_plan`, and `get_state` to check.
+- **Flight**: take-off succeeded, and the search stopped on person 4. About 2 s later that
+  person left the frame, so the approach expired ("tracked target 4 is not visible") and the
+  hover near them did not happen. The plan's fallback waited 5 s, then ArduPilot's RTL climbed to
+  15 m, flew home and landed. Final state: disarmed, NED (−0.01, 0.03).
+- **Claude's report** stated exactly that: person 4 found, approach expired, returning home. It
+  offered to re-fly the hover leg with a longer approach TTL and `follow`.
+- **Contacts**: HorusGta logged only the two ground contacts (rest, and touchdown at
+  (−0.06, 0.03)) and no intersection.
+- **Records**: the REPL transcript and Claude's event stream (`runs/s15/attempt1/`, 5 tool calls,
+  `final_result`), the server's tool log (`runs/s15-attempt1/events.jsonl` in the container),
+  and the run result `S15_gta_claude_find_person-run-001-20261021T185147.095605Z-result.json`
+  (outcome `completed`, with Claude's final answer). The grounder is not started in GTA mode,
+  which Claude noted; `person` is a detector class, so the search did not need it.
+
 Memory budget of a HORUS mission in GTA (C6), from the C5 session. A throwaway sampler
 (`koko:~/horus-gta/run12/memsample.py`, CSV `run12/mem.csv`) logged every 10 s from 01:48:44 to
 02:26:48:
