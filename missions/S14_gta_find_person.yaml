@@ -1,0 +1,45 @@
+name: S14-gta-find-person
+# GTA V Legion Square on the JSON-physics chain (sim/run.sh start --gta --json-physics, GTA with
+# HorusGta.dll, horus-mcp with config/horus_gta.yaml). Deterministic, no commander.
+#
+# Altitude 8 m: C7 swept 6-12 m clear over the whole fence; the only obstacle inside it, a kiosk
+# roof at NED (0, -12), tops 4.4 m. A first run at 10 m (2026-10-21 02:06) found a person, but the
+# detector saw them in too few frames and resolve_candidate abstained `unstable`. At 8 m a
+# standing pedestrian 8-12 m away horizontally (11-14 m slant) is about 45-60 px tall at the
+# detector's 640 px input (vertical FOV 53.7 deg over 360 px); C4's 17 px misses were from 25 m.
+# Detector-only (yolov8n, COCO "person"): start --gta runs no grounder, to keep memory for GTA.
+# Runs at 8 m on 2026-10-21 (gta/horus_mod/README.md "Checked in game", C5) abstained `no_match`
+# twice and `unstable` once: the pedestrians kept to the walkways at the square's edges, 15-20 px
+# tall near the top of the view, where yolov8n scored them 0.28-0.43.
+#
+# The search covers the inset fence (north -13..18, east -18..6) and stops on a validated person;
+# resolve_candidate then needs exactly one stable person ID over fresh frames or abstains. The
+# approach keeps the altitude (horizontal velocity only) and stops at a 12 m slant range, about
+# 9 m horizontally from the person; the executor's geofence limit stops it at the fence edge if
+# the person stands beyond. finally returns home at 8 m and lands, also after an abstain or a
+# failed step. The run's outcome and every step go to runs/S14_gta_find_person-run-*-result.json.
+result_dir: ../runs
+steps:
+  - tool: take_off
+    arguments: {altitude_m: 8, ttl_s: 180}
+  - tool: search
+    arguments:
+      area: {north_min_m: -13, north_max_m: 18, east_min_m: -18, east_max_m: 6, altitude_m: 8, spacing_m: 8}
+      class_name: person
+      ttl_s: 300
+    # Covering the area without a person fails the search; resolve_candidate then abstains.
+    continue_on_failure: true
+  - resolve_candidate:
+      class_name: person
+      store_as: person
+      timeout_s: 15
+      settle_s: 2
+  - tool: approach
+    arguments: {id: $person.id, dist_m: 12, ttl_s: 90}
+  - tool: hold
+    delay_s: 20
+finally:
+  - tool: goto
+    arguments: {pose: {north_m: 0, east_m: 0, up_m: 8}, ttl_s: 180}
+  - tool: land
+    delay_s: 40

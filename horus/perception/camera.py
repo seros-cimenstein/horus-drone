@@ -1,4 +1,4 @@
-"""OpenCV camera input (RTP/H.264, video files, camera indices) and its supervised capture loop."""
+"""OpenCV camera input (RTP/H.264, files, camera indices, GTA V readback) and its supervised capture loop."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def _has_gstreamer(cv2_module: Any) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class CameraConfig:
-    """Camera source options; ``source='udp'`` reads the simulation's RTP stream."""
+    """Camera source options: ``'udp'`` reads the simulation's RTP stream, ``gta://host:port`` GTA V."""
 
     source: str | int = "udp"
     udp_host: str = "0.0.0.0"
@@ -89,6 +89,13 @@ class OpenCVCameraReader:
             raise RuntimeError("OpenCV is required to open a camera or video source") from exc
 
         source = self.config.source
+        if isinstance(source, str) and source.lower().startswith("gta://"):
+            from .gta_stream import GtaFrameStream, parse_gta_uri
+
+            host, port = parse_gta_uri(source)
+            self._capture = GtaFrameStream(host, port, timeout_s=self.config.read_timeout_s)
+            self._next_read_at = time.monotonic()
+            return self
         is_rtp_uri = isinstance(source, str) and source.lower().startswith(("udp://", "rtp://"))
         use_rtp = isinstance(source, str) and (
             source.lower() in {"udp", "rtp", "udp://", "rtp://"} or is_rtp_uri

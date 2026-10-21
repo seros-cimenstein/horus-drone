@@ -1,0 +1,58 @@
+# GTA V renderer mode (sim/run.sh start --gta [--json-physics], gta/horus_mod/README.md): GTA V
+# draws the camera view at HorusGta.ini's origin (Legion Square, GTA x=195, y=-933). With
+# --json-physics the quad flies in GTA and collides with it; without, SITL flies over its own flat
+# plane and the camera passes through walls. As config/horus_urban.yaml except the source, fence
+# and person height.
+executor:
+  max_speed_m_s: 3.0
+  max_vertical_speed_m_s: 1.5
+  # One command may cross the inset fence (31 x 24 m, diagonal 39.3 m), not more.
+  max_distance_m: 40.0
+  min_altitude_m: 1.0
+  # The urban profile's ceiling. No mapped obstacle inside the fence reaches above 4.4 m (below).
+  max_altitude_m: 48.0
+  # Obstacles mapped in GTA on 2026-10-21 (C7, gta/horus_mod/README.md "Checked in game"; NED m
+  # from home, heights above home ground):
+  #   - the grey colonnade structure at the square's NE: horizontal slabs at 4, 16, 22-24 and
+  #     29-30 m over north 0..17, east 13..24+ (the 40 m square's old fence ran into it; G3 hit
+  #     its west face at (12.5, 13.1));
+  #   - trees along north -20 at east 8..16, tops 18-21 m;
+  #   - 5 m walls at (18, 16), (20, 14), (24, 8); a 4.4 m kiosk roof at (0, -12).
+  # The fence is the convex rectangle north -15..20, east -20..8, so every straight leg between
+  # two points inside stays inside. geofence_margin_m insets targets by 2 m to north -13..18,
+  # east -18..6. From that inset fence the colonnade's mapped cells are at least 8 m away (its
+  # face at least 6 m, allowing the 2 m mapping grid), the trees' at least 7 m (none at north
+  # -16) and the walls' at least 6 m. Vertical sweeps every 4 m from 60 m down to 2 m found only
+  # the kiosk inside the fence, and plane sweeps at 6, 8, 10 and 12 m above home, lines 1 m apart
+  # in both directions over north -16..20, east -20..10, crossed nothing. So scan at 6 m or
+  # higher; below that stand the kiosk and unmapped low objects (planters, benches, lamps).
+  geofence_polygon_ned:
+    - [-15.0, -20.0]
+    - [-15.0, 8.0]
+    - [20.0, 8.0]
+    - [20.0, -20.0]
+  geofence_margin_m: 2.0
+  arrival_tolerance_m: 0.4
+  follow_distance_m: 3.0
+  # GTA pedestrians are ordinary adult heights (the 1.9 m of the sim profiles is the MakeHuman
+  # mesh); not yet measured in GTA frames.
+  target_height_m: 1.75
+  # horus-gta-bridge sends this value to HorusGta.dll as the camera's horizontal FOV, so the
+  # rendered view and HORUS's camera model agree.
+  camera_horizontal_fov_deg: 84.0
+  # The servo gimbal of start --gta's SITL rests at -45 deg (bridge log), as in the outdoor sims.
+  default_gimbal_pitch_deg: -45.0
+perception:
+  # Frames from horus_capture.asi (gta/capture/README.md) in the game on the same host.
+  source: gta://127.0.0.1:5610
+  # As config/horus_forest.yaml; start --gta does not start the grounder, so the pass is
+  # detector-only unless one is running.
+  vocabulary:
+    - person
+    - person lying on the ground
+    - person sitting on the ground
+  ring_buffer_s: 30.0
+commander:
+  timeout_s: 900.0
+  claude_model: opus
+  claude_effort: high

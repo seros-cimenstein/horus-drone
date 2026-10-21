@@ -1,0 +1,26 @@
+LIBRARY ScriptHookV.dll
+EXPORTS
+    "?createTexture@@YAHPEBD@Z" = shv_createTexture
+    "?drawTexture@@YAXHHHHMMMMMMMMMMMM@Z" = shv_drawTexture
+    "?getGameVersion@@YA?AW4eGameVersion@@XZ" = shv_getGameVersion
+    "?getGameVersionInfo@@YA?AUGameVersionInfo@@XZ" = shv_getGameVersionInfo
+    "?getGlobalPtr@@YAPEA_KH@Z" = shv_getGlobalPtr
+    "?getScriptHandleBaseAddress@@YAPEAEH@Z" = shv_getScriptHandleBaseAddress
+    "?keyboardHandlerRegister@@YAXP6AXKGEHHHH@Z@Z" = shv_keyboardHandlerRegister
+    "?keyboardHandlerUnregister@@YAXP6AXKGEHHHH@Z@Z" = shv_keyboardHandlerUnregister
+    "?nativeCall@@YAPEA_KXZ" = shv_nativeCall
+    "?nativeCanExecuteInThisContext@@YA_NXZ" = shv_nativeCanExecuteInThisContext
+    "?nativeInit@@YAX_K@Z" = shv_nativeInit
+    "?nativePush64@@YAX_K@Z" = shv_nativePush64
+    "?presentCallbackRegister@@YAXP6AXPEAX@Z@Z" = shv_presentCallbackRegister
+    "?presentCallbackUnregister@@YAXP6AXPEAX@Z@Z" = shv_presentCallbackUnregister
+    "?scriptRegister@@YAXPEAUHINSTANCE__@@P6AXXZ@Z" = shv_scriptRegister
+    "?scriptRegisterAdditionalThread@@YAXPEAUHINSTANCE__@@P6AXXZ@Z" = shv_scriptRegisterAdditionalThread
+    "?scriptUnregister@@YAXP6AXXZ@Z" = shv_scriptUnregisterFunction
+    "?scriptUnregister@@YAXPEAUHINSTANCE__@@@Z" = shv_scriptUnregisterModule
+    "?scriptWait@@YAXK@Z" = shv_scriptWait
+    "?scriptsAreLaunchedUsingReloading@@YA_NXZ" = shv_scriptsAreLaunchedUsingReloading
+    "?worldGetAllObjects@@YAHPEAHH@Z" = shv_worldGetAllObjects
+    "?worldGetAllPeds@@YAHPEAHH@Z" = shv_worldGetAllPeds
+    "?worldGetAllPickups@@YAHPEAHH@Z" = shv_worldGetAllPickups
+    "?worldGetAllVehicles@@YAHPEAHH@Z" = shv_worldGetAllVehicles

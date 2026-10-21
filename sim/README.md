@@ -208,6 +208,105 @@ its tree-canopy collisions make every leg unsafe; it instead follows the open
 trail and clearing. At the safe hiker standoff, the lying figure is visible but
 the detector has not produced a target box; do not infer a tracker ID.
 
+## GTA V renderer mode (no Gazebo)
+
+GTA V Enhanced can render the drone camera instead of Gazebo (`gta/horus_mod/README.md`).
+`run.sh start --gta` starts only ArduCopter SITL, using its built-in quad physics, and
+`horus-gta-bridge`. Gazebo, the GUI, world files and the GPU are not used:
+
+```bash
+./sim/run.sh start --gta     # SITL + bridge in the horus-sim container (HORUS_SIM_IMAGE as usual)
+./sim/run.sh s0              # 5 m takeoff and land on tcp:5760, as with Gazebo
+./sim/run.sh stop            # stops SITL and the bridge and removes the container
+```
+
+With real drone physics in GTA instead (`gta/horus_mod/README.md` "Physics"):
+
+```bash
+./sim/run.sh start --gta --json-physics   # SITL on its JSON backend, no bridge
+scripts/koko/gta_game.sh start             # GTA with HorusGta.dll answers SITL on udp 9002
+```
+
+- SITL runs `--model JSON:${HORUS_GTA_PHYSICS_ADDRESS:-127.0.0.1}`. `sitl-overrides.parm` adds
+  `FRAME_CLASS 1`, `FRAME_TYPE 1` (quad X, the motor order HorusGta's quad uses) and
+  `SIM_RATE_HZ 800`.
+- SITL steps only when HorusGta answers its servo frames, so its clock is GTA's. 800 Hz is the
+  lowest rate that arms: at 400 Hz, `PreArm: Gyro 0 rate 400Hz < loop rate*1.8 720Hz`.
+- SITL boots only once a MAVLink client holds tcp:5760, and sends no servo frames before then.
+  HorusGta logs `physics: no SITL frame for 1.9 s` in that gap, and HORUS (or any client) on 5760
+  starts it. No keeper is used, because no bridge needs serial1.
+- Without GTA, `gta/horus_mod/build/physics_sim/horus-gta-physics-sim` answers instead, over flat
+  ground.
+- HORUS's first `GLOBAL_POSITION_INT` arrives before the EKF has a position (lat = lon = 0),
+  because HORUS connects before SITL boots. `horus/flight/link.py` ignores such messages; taking
+  one as the origin had put HORUS's pose 4000 km off (G3).
+- ArduPilot's servo gimbal (`MNT1_TYPE 1`) already subtracts the vehicle's lean from SERVO9–11, so
+  HorusGta treats those outputs as angles relative to the body (G4).
+- ArduPilot's clock is the sum of HorusGta's timestamp steps. Its `time_boot_ms` is physics
+  time, which runs slower than wall time when the real-time factor is below 1 (0.46–1.00 per 5 s
+  in the G5 session). Compare telemetry with GTA traces by physics time, not by receive time.
+
+Checked on Koko on 2026-10-20 23:57–00:04 (G5, `koko:~/horus-gta/run10/`):
+
+- **Start:** `start --gta --json-physics`, then GTA. A pymavlink client on 5760 armed and hovered
+  at 5 m for 120 s, with roll/pitch RMS 0.10°/0.10°, EKF flags 0x33f and no failsafe.
+- **HORUS:** `horus-mcp` then took off to 15 m, flew to the NW corner and landed. The camera stayed
+  `streaming` (`last_frame_age_s` 0.10–0.23), and `list_candidates` found a car.
+- **Frame timing:** from a state answered to SITL to its frame reaching HORUS took 53.0 ms p50 and
+  63.0 ms p95 of wall time. The telemetry HORUS pairs with a frame was 10.7 ms (p50), at most
+  42 ms, of physics time newer than the rendered state.
+- **Details:** in `gta/horus_mod/README.md` "Checked in game".
+
+`sim/scripts/start_gta_sitl.sh` runs inside the container:
+
+- SITL runs from the run directory (`sim/run/<id>/`), because it writes `eeprom.bin` and its logs
+  to its cwd. From `/opt/ardupilot` ArduCopter fails with "PreArm: Param storage failed".
+- `sitl-overrides.parm` holds `LOG_DISARMED 0` and the servo-gimbal lines (`MNT1_*`,
+  `SERVO9-11_FUNCTION`) of `config/ardupilot/common.parm`. The proximity, rangefinder and fence
+  fragments depend on Gazebo sensors or worlds and are left out.
+- SITL boots, and opens serial1 (5762), only once a client holds serial0 (5760). A keeper client
+  holds 5760 until the bridge is connected on 5762, then releases it. `sim.ready` follows, and HORUS
+  (or `s0`) can connect to 5760.
+- The bridge runs from the mounted checkout (`python -m horus.gta_bridge`) and sends to
+  `HORUS_GTA_TARGET` (default `127.0.0.1:5611`, HorusGta.dll in GTA on the same host). Its output
+  is in `logs/gta_bridge.log`. If SITL or the bridge exits, the container stops.
+- Unlike `start_sim.sh`, it does not start the grounder (`scripts/start_grounder.sh`), which keeps
+  memory free for GTA on the same host.
+- `HORUS_CONFIG` defaults to `/horus/config/horus_gta.yaml` in the container, as `--procedural`
+  does with its profile. The bridge takes its FOV (84°) and default pitch (-45°) from it, and HORUS
+  processes started in the container load it. The profile's fence is the rectangle north
+  -15..20 m, east -20..8 m around home (the Legion Square origin in `HorusGta.ini`), clear of the
+  obstacles mapped in GTA, and it reads frames from `gta://127.0.0.1:5610`.
+
+Checked on Koko on 2026-10-20 (image `horus-sim:local-s1s2`, GTA not running). `start --gta` was
+ready in 2.3 s. The bridge sends nothing until the EKF has a position; it started 45 s after
+start and then logged `250 packets in 5 s` with gimbal pitch -45°. That run predates the GTA
+profile and used `config/horus.yaml`, whose default pitch is 0°, so the -45° was the gimbal's.
+`s0` took off to 4.86 m and landed, and the bridge followed with down = -4.62 m. A
+`DO_MOUNT_CONTROL` to -20° changed the logged pitch to -20.0 within 5 s. `stop` removed the
+container, and no SITL or bridge process was left.
+
+HORUS itself runs in the same container, against SITL on 5760 and GTA frames on 5610:
+
+```bash
+docker exec -d -e HORUS_MCP_TOKEN="$token" -w /horus horus-sim \
+  bash -c '/opt/horus-venv/bin/python -m horus.mcp_server.server > /horus/runs/mcp.log 2>&1'
+docker exec -e HORUS_MCP_TOKEN="$token" -e HORUS_MCP_URL=http://127.0.0.1:8000/mcp -w /horus horus-sim \
+  /opt/horus-venv/bin/python -m horus.mcp_server.client list_candidates   # JPEG under runs/manager/
+```
+
+The checkout needs `models/yolov8n.onnx` and `models/osnet_x0_25_msmt17.onnx` (not synced by the
+usual rsync, which excludes `/models`) and a `runs/` directory. Without a grounder, perception runs
+detector-only and `get_state` reports the grounder `unavailable`. With no MCP call for
+`link_loss_rth_delay_s` (30 s) the hovering vehicle returns home. Results from the checked run are
+in `gta/horus_mod/README.md` "Checked in game".
+
+`missions/S14_gta_find_person.yaml` is the GTA mission: search the fence for a person at 8 m,
+resolve one, approach, hold, then return home and land (also after an abstain). Run it in the
+container with `/opt/horus-venv/bin/horus --server-url http://127.0.0.1:8000/mcp --config
+config/horus_gta.yaml --mission missions/S14_gta_find_person.yaml`. Each run writes
+`runs/S14_gta_find_person-run-NNN-<UTC>-result.json`.
+
 ## Visual commander demo
 
 The GUI plugin is built into the canonical image as a final layer. For quick

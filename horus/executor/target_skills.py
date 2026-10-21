@@ -46,7 +46,7 @@ def step_target(executor: HorusExecutor, task: SkillTask) -> bool:
             # until a calibrated range estimate is available.
             _turn_to(executor, facing_deg)
             return False
-        _range_velocity(executor, heading, distance - desired, yaw_deg=facing_deg)
+        _range_velocity(executor, task, heading, distance - desired, yaw_deg=facing_deg)
         return False
     if task.skill in ("approach", "orbit") and distance is None:
         # Turn in place until the target is inside the forward ToF's bearing gate.
@@ -69,11 +69,16 @@ def step_target(executor: HorusExecutor, task: SkillTask) -> bool:
         if distance <= desired + executor.settings.arrival_tolerance_m:
             _turn_to(executor, facing_deg)
             return True
-        _range_velocity(executor, heading, distance - desired, yaw_deg=facing_deg)
+        progress = _range_velocity(executor, task, heading, distance - desired, yaw_deg=facing_deg)
+        if progress < _MIN_APPROACH_PROGRESS_M_S:
+            raise RuntimeError(
+                f"approach stopped at the geofence edge {distance:.1f} m from the target "
+                f"(standoff {desired:g} m): the target lies beyond the fence"
+            )
         return False
     if task.skill == "orbit":
         radius = float(task.executed_target["radius_m"])
-        _orbit_velocity(executor, heading, distance, radius, yaw_deg=facing_deg)
+        _orbit_velocity(executor, task, heading, distance, radius, yaw_deg=facing_deg)
         return False
     raise RuntimeError(f"unsupported target skill {task.skill}")
 
@@ -243,23 +248,48 @@ def _hold_facing_last_target(executor: HorusExecutor, task: SkillTask) -> None:
     _turn_to(executor, task._last_target_facing_deg)
 
 
+# Below this speed toward the target (after the geofence limit) an approach makes no progress.
+_MIN_APPROACH_PROGRESS_M_S = 0.05
+
+
+def _send_velocity(
+    executor: HorusExecutor, task: SkillTask, north: float, east: float, yaw_deg: float | None
+) -> tuple[float, float]:
+    """Command a horizontal target-skill velocity limited to the geofence; returns what was sent.
+
+    goto and scan clamp their targets; approach, follow and orbit steer toward a tracked
+    target by velocity, so the fence is applied to the velocity itself (Envelope.limit_velocity).
+    """
+    pose = executor._current_pose()
+    if pose is None:
+        raise RuntimeError(f"{task.skill} needs a pose to keep inside the geofence")
+    north, east, limited = executor.envelope.limit_velocity(pose, north, east)
+    if limited and not task.tracking.get("fence_limited"):
+        task.tracking["fence_limited"] = True
+        logger.warning("%s target=%s: motion limited at the geofence", task.skill, task.arguments["id"])
+        executor._publish_event(
+            "fence_limit", f"{task.skill.capitalize()} motion limited at the geofence", task_id=task.task_id
+        )
+    executor._command(executor.flight.set_velocity_ned, north, east, 0.0, yaw_deg=yaw_deg)
+    return north, east
+
+
 def _range_velocity(
-    executor: HorusExecutor, heading: float, range_error: float, *, yaw_deg: float | None = None
-) -> None:
+    executor: HorusExecutor, task: SkillTask, heading: float, range_error: float, *, yaw_deg: float | None = None
+) -> float:
+    """Close the range along ``heading``; returns the speed sent in the closing direction (m/s)."""
     max_speed = executor.settings.max_speed_m_s
     speed = min(max_speed, max(0.0, abs(range_error) * 0.5))
     direction = 1.0 if range_error > 0 else -1.0
-    executor._command(
-        executor.flight.set_velocity_ned,
-        direction * speed * math.cos(heading),
-        direction * speed * math.sin(heading),
-        0.0,
-        yaw_deg=yaw_deg,
+    north, east = _send_velocity(
+        executor, task, direction * speed * math.cos(heading), direction * speed * math.sin(heading), yaw_deg
     )
+    return direction * (north * math.cos(heading) + east * math.sin(heading))
 
 
 def _orbit_velocity(
     executor: HorusExecutor,
+    task: SkillTask,
     bearing: float,
     distance: float,
     radius: float,
@@ -281,4 +311,4 @@ def _orbit_velocity(
         north *= max_speed / magnitude
         east *= max_speed / magnitude
     # Face the target while circling; translating sideways would carry it out of the camera view.
-    executor._command(executor.flight.set_velocity_ned, north, east, 0.0, yaw_deg=yaw_deg)
+    _send_velocity(executor, task, north, east, yaw_deg)
