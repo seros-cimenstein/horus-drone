@@ -1147,17 +1147,26 @@ def test_approach_completes_at_the_standoff_and_does_not_chase():
     executor.close()
 
 
-def test_approach_stops_at_the_geofence_instead_of_chasing_a_target_beyond_it():
+def test_approach_stops_at_the_geofence_instead_of_chasing_a_target_beyond_it(monkeypatch):
     # Target skills steer by velocity, so the fence applies to the velocity: a person beyond the
     # fence must not pull the vehicle out of it (GTA C5: the pavement beyond the fence runs past
-    # a solid structure).
+    # a solid structure). Held at the fence, it gives up only after the settle time in view.
     from horus.executor.geofence import FENCE_LOOKAHEAD_S
+    from horus.executor.target_skills import _FENCE_BLOCKED_SETTLE_S
+
+    real_monotonic, offset = time.monotonic, [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + offset[0])
+
+    def later(seconds, tof_m):
+        offset[0] += seconds
+        flight._telemetry.pose_updated_monotonic = flight._telemetry.heading_updated_monotonic = time.monotonic()
+        flight._telemetry.proximity = (_front_tof(tof_m),)
 
     target = _IntermittentTarget()
     flight = FakeFlight(Pose(2.5, 0.0, 2.0))  # 0.5 m inside the 3 m radius fence, facing north
     flight._telemetry.proximity = (_front_tof(4.0),)  # inside the ToF's 6 m range
     executor = HorusExecutor(flight, _settings(), perception=target, autostart=False)
-    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 1.0}, ttl_s=5.0)["task_id"]
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 1.0}, ttl_s=30.0)["task_id"]
 
     executor.tick()
 
@@ -1168,9 +1177,45 @@ def test_approach_stops_at_the_geofence_instead_of_chasing_a_target_beyond_it():
 
     flight._telemetry.pose = Pose(2.99, 0.0, 2.0)
     executor.tick()
+    assert executor.get_task_status(task_id)["status"] == "running"
+
+    # Lost for longer than the settle time, then re-identified: only ticks in view count.
+    target.candidate = None
+    later(_FENCE_BLOCKED_SETTLE_S + 1.0, 4.0)
+    executor.tick()
+    target.candidate = dict(_INTERMITTENT_CANDIDATE)
+    later(0.1, 4.0)
+    executor.tick()
+    assert executor.get_task_status(task_id)["status"] == "running"
+
+    later(_FENCE_BLOCKED_SETTLE_S, 4.0)
+    executor.tick()
 
     status = executor.get_task_status(task_id)
     assert status["status"] == "failed" and "geofence" in status["error"]
+    executor.close()
+
+
+def test_approach_held_at_the_fence_arrives_on_a_range_sample_within_tolerance(monkeypatch):
+    # GTA S15 attempt 2: held at the fence 6.2 m from a person with the standoff at 5.82 m and a
+    # 0.4 m tolerance, the approach failed on one range sample; the next could have arrived.
+    real_monotonic, offset = time.monotonic, [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + offset[0])
+    flight = FakeFlight(Pose(2.99, 0.0, 2.0))  # at the 3 m radius fence, facing north
+    # Ranged 1.29 m (the ToF reading plus its 0.24 m offset): 0.04 m past the 1.25 m arrival range.
+    flight._telemetry.proximity = (_front_tof(1.05),)
+    executor = HorusExecutor(flight, _settings(), perception=_IntermittentTarget(), autostart=False)
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 1.0}, ttl_s=30.0)["task_id"]
+
+    executor.tick()
+    assert executor.get_task_status(task_id)["status"] == "running"
+
+    offset[0] += 0.5
+    flight._telemetry.pose_updated_monotonic = flight._telemetry.heading_updated_monotonic = time.monotonic()
+    flight._telemetry.proximity = (_front_tof(0.95),)  # the next sample, 1.19 m
+    executor.tick()
+
+    assert executor.get_task_status(task_id)["status"] == "succeeded"
     executor.close()
 
 
