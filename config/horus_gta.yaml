@@ -6,35 +6,29 @@
 executor:
   max_speed_m_s: 3.0
   max_vertical_speed_m_s: 1.5
-  # One command may cross the inset fence (31 x 24 m, diagonal 39.3 m), not more.
   max_distance_m: 40.0
+  # Obstacles are left to the emulated ToF payload (--json-physics: HorusGta.dll casts the seven
+  # beams into the game, sim/scripts/start_gta_sitl.sh) and ArduPilot's proximity avoidance, which
+  # stops guided velocity 1 m (AVOID_MARGIN) before what a beam sees within 4 m. The fence is only
+  # the operating area: 40 m around home, the plaza and its edges. The beams are level and 45 deg
+  # apart, so they miss what is above or below the drone and a thin pole between two beams; the
+  # mapped obstacles below include such cases (the colonnade's overhanging slabs, tree canopies).
+  geofence_radius_m: 40.0
   # Every target altitude (take-off, goto, scans, an agent's choice) is clamped to at least 6 m: the
   # plane sweeps below found the air clear from 6 m up, while the kiosk roof (4.4 m) and unmapped
   # low objects stand below. Landing is ArduPilot's LAND, which this floor does not limit.
   min_altitude_m: 6.0
-  # The urban profile's ceiling. No mapped obstacle inside the fence reaches above 4.4 m (below).
+  # The urban profile's ceiling.
   max_altitude_m: 48.0
   # Obstacles mapped in GTA on 2026-10-21 (C7, gta/horus_mod/README.md "Checked in game"; NED m
   # from home, heights above home ground):
   #   - the grey colonnade structure at the square's NE: horizontal slabs at 4, 16, 22-24 and
-  #     29-30 m over north 0..17, east 13..24+ (the 40 m square's old fence ran into it; G3 hit
-  #     its west face at (12.5, 13.1));
+  #     29-30 m over north 0..17, east 13..24+ (G3 hit its west face at (12.5, 13.1));
   #   - trees along north -20 at east 8..16, tops 18-21 m;
   #   - 5 m walls at (18, 16), (20, 14), (24, 8); a 4.4 m kiosk roof at (0, -12).
-  # The fence is the convex rectangle north -15..20, east -20..8, so every straight leg between
-  # two points inside stays inside. geofence_margin_m insets targets by 2 m to north -13..18,
-  # east -18..6. From that inset fence the colonnade's mapped cells are at least 8 m away (its
-  # face at least 6 m, allowing the 2 m mapping grid), the trees' at least 7 m (none at north
-  # -16) and the walls' at least 6 m. Vertical sweeps every 4 m from 60 m down to 2 m found only
-  # the kiosk inside the fence, and plane sweeps at 6, 8, 10 and 12 m above home, lines 1 m apart
-  # in both directions over north -16..20, east -20..10, crossed nothing. So scan at 6 m or
-  # higher; below that stand the kiosk and unmapped low objects (planters, benches, lamps).
-  geofence_polygon_ned:
-    - [-15.0, -20.0]
-    - [-15.0, 8.0]
-    - [20.0, 8.0]
-    - [20.0, -20.0]
-  geofence_margin_m: 2.0
+  # Vertical sweeps every 4 m from 60 m down to 2 m over north -15..20, east -20..8 found only the
+  # kiosk there, and plane sweeps at 6, 8, 10 and 12 m above home over north -16..20, east -20..10
+  # crossed nothing; below 6 m stand the kiosk and unmapped low objects (planters, benches, lamps).
   arrival_tolerance_m: 0.4
   follow_distance_m: 3.0
   # GTA pedestrians are ordinary adult heights (the 1.9 m of the sim profiles is the MakeHuman

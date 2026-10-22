@@ -40,10 +40,24 @@ namespace HorusGta
         public double TraceHz;
     }
 
+    /// <summary>The range sensors (README "Range sensors", <see cref="RangeSensors"/>).</summary>
+    public struct SensorSettings
+    {
+        /// <summary>Cast the beams and send their datagrams; false casts and sends nothing.</summary>
+        public bool Enabled;
+        /// <summary>UDP destination of the range datagrams (IPv4 host and port).</summary>
+        public string Host;
+        public int Port;
+        /// <summary>Sweeps per second of physics sim time, 10..20.</summary>
+        public double RateHz;
+
+        public string Target => Host + ":" + Port.ToString(CultureInfo.InvariantCulture);
+    }
+
     /// <summary>
     /// HorusGta.ini: [pose] bind, port, timeout_s; [origin] x, y, heading_deg, optional z;
     /// [scene] weather, hour, freeze_time (empty = leave the game's); [physics] bind, port,
-    /// budget_ms, hfov_deg, trace_hz.
+    /// budget_ms, hfov_deg, trace_hz; [sensors] enabled, target, rate_hz.
     /// </summary>
     public sealed class ModConfig
     {
@@ -72,6 +86,8 @@ namespace HorusGta
         /// lockstep answers (800 Hz needs ~27 per tick in real time); HORUS's 84° camera.
         /// </summary>
         public PhysicsSettings Physics = new PhysicsSettings { Bind = "127.0.0.1", Port = 9002, BudgetMs = 10, HfovDeg = 84, TraceHz = 0 };
+        /// <summary>On, to the HORUS range bridge (horus.tof_bridge.gta) on loopback, 20 sweeps per sim second.</summary>
+        public SensorSettings Sensors = new SensorSettings { Enabled = true, Host = "127.0.0.1", Port = 5612, RateHz = RangeSensors.DefaultRateHz };
         /// <summary>Problems found while parsing; each falls back to the default.</summary>
         public readonly List<string> Warnings = new List<string>();
 
@@ -164,6 +180,27 @@ namespace HorusGta
                 case "physics.trace_hz":
                     if (TryNumber(value, out double trace) && trace >= 0 && trace <= 100) Physics.TraceHz = trace;
                     else Warn(n, $"physics.trace_hz '{value}' is not 0..100");
+                    break;
+                case "sensors.enabled":
+                    if (value == "1" || value.Equals("true", StringComparison.OrdinalIgnoreCase)) Sensors.Enabled = true;
+                    else if (value == "0" || value.Equals("false", StringComparison.OrdinalIgnoreCase)) Sensors.Enabled = false;
+                    else Warn(n, $"sensors.enabled '{value}' is not 1 or 0");
+                    break;
+                case "sensors.target":
+                    {
+                        int colon = value.LastIndexOf(':');
+                        if (colon > 0 && IPAddress.TryParse(value.Substring(0, colon), out var sip) && sip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+                            && int.TryParse(value.Substring(colon + 1), NumberStyles.None, CultureInfo.InvariantCulture, out int sport) && sport >= 1 && sport <= 65535)
+                        {
+                            Sensors.Host = value.Substring(0, colon);
+                            Sensors.Port = sport;
+                        }
+                        else Warn(n, $"sensors.target '{value}' is not an IPv4 host:port");
+                    }
+                    break;
+                case "sensors.rate_hz":
+                    if (TryNumber(value, out double rate) && rate >= RangeSensors.MinRateHz && rate <= RangeSensors.MaxRateHz) Sensors.RateHz = rate;
+                    else Warn(n, $"sensors.rate_hz '{value}' is not 10..20");
                     break;
                 default:
                     Warn(n, $"unknown setting [{section}] {key}", usesDefault: false);
