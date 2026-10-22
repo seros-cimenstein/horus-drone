@@ -75,7 +75,9 @@ def step_target(executor: HorusExecutor, task: SkillTask) -> bool:
         progress = _range_velocity(executor, task, heading, distance - desired, yaw_deg=facing_deg)
         if progress >= _MIN_APPROACH_PROGRESS_M_S:
             task._fence_blocked_since = None
+            _check_stall(executor, task, telemetry, progress, distance, desired)
             return False
+        task._stall_since = None
         # Blocked at the fence. A monocular range jitters by more than the arrival tolerance from
         # frame to frame, so one sample just outside it does not decide: keep checking arrival while
         # the fence holds the vehicle, and give up only once that has lasted the settle time.
@@ -93,6 +95,52 @@ def step_target(executor: HorusExecutor, task: SkillTask) -> bool:
         _orbit_velocity(executor, task, heading, distance, radius, yaw_deg=facing_deg)
         return False
     raise RuntimeError(f"unsupported target skill {task.skill}")
+
+
+# A vehicle commanded toward the target at least this fast (m/s) is expected to move ...
+_STALL_MIN_COMMAND_M_S = 0.3
+# ... at least this far (m) ...
+_STALL_MIN_MOVE_M = 0.3
+# ... within this long (s); otherwise something outside HORUS holds it.
+_STALL_S = 3.0
+
+
+def _check_stall(
+    executor: HorusExecutor, task: SkillTask, telemetry: Any, command_m_s: float, distance: float, desired: float
+) -> None:
+    """Fail an approach the autopilot keeps from moving instead of letting it run to its TTL.
+
+    ArduPilot's proximity avoidance (AVOID_ENABLE) holds the vehicle about AVOID_MARGIN from an
+    obstacle whatever velocity HORUS commands, so an approach whose straight line to the target
+    runs into a tree or a wall would otherwise push until it expires (GTA, 2026-10-22: 90 s held
+    1.05 m from the tree line). The window restarts whenever the vehicle has moved, the command
+    drops below the threshold, or the target is lost.
+    """
+    now = time.monotonic()
+    pose = telemetry.pose
+    position = (pose.north_m, pose.east_m)
+    moved = (
+        task._stall_position is None
+        or math.hypot(position[0] - task._stall_position[0], position[1] - task._stall_position[1])
+        >= _STALL_MIN_MOVE_M
+    )
+    if command_m_s < _STALL_MIN_COMMAND_M_S or moved or task._stall_since is None:
+        task._stall_since, task._stall_position = now, position
+        return
+    if now - task._stall_since < _STALL_S:
+        return
+    fresh = [sensor for sensor in telemetry.proximity if executor._fresh(sensor.updated_monotonic)]
+    nearest = min(fresh, key=lambda sensor: sensor.distance_m, default=None)
+    cause = (
+        "something outside HORUS holds it"
+        if nearest is None
+        else f"nearest obstacle {nearest.distance_m:.2f} m away (proximity orientation {nearest.orientation}); "
+        "ArduPilot's obstacle avoidance holds it there"
+    )
+    raise RuntimeError(
+        f"approach blocked {distance:.1f} m from the target (standoff {desired:g} m): the vehicle has not "
+        f"moved for {_STALL_S:g} s while commanded toward it; {cause}"
+    )
 
 
 def _record_range(task: SkillTask, geometry: TargetGeometry) -> None:
@@ -178,8 +226,8 @@ def _target_geometry(executor: HorusExecutor, task: SkillTask) -> TargetGeometry
     except TargetNotVisible as exc:
         if task.skill not in TARGET_SKILLS:
             raise
-        # Only ticks with the target in view count toward giving up at the fence.
-        task._fence_blocked_since = None
+        # Only ticks with the target in view count toward giving up at the fence or as stalled.
+        task._fence_blocked_since = task._stall_since = None
         if task._target_lost_at is None:
             task._target_lost_at = time.monotonic()
             task._target_lost_at_sim_s = executor._sim_time_s(executor._telemetry())

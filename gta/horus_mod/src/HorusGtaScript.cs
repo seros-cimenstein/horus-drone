@@ -89,6 +89,12 @@ namespace HorusGta
         int outsideCam = -1;
         StreamWriter trace;
         double nextTraceS;
+        // Range sensors (README "Range sensors"): swept on the physics clock, one datagram each to [sensors] target.
+        readonly Socket sensorSocket;
+        readonly IPEndPoint sensorTarget;
+        RangeSensors sensors;
+        bool sensorSendFailed;
+        long sensorRaysLogged;
 
         public HorusGtaScript()
         {
@@ -144,6 +150,24 @@ namespace HorusGta
                 physicsSocket = null;
                 Log($"physics: cannot listen on udp {cfg.Physics.Bind}:{cfg.Physics.Port}: {e.Message}");
             }
+
+            if (cfg.Sensors.Enabled)
+            {
+                try
+                {
+                    sensorTarget = new IPEndPoint(IPAddress.Parse(cfg.Sensors.Host), cfg.Sensors.Port);
+                    sensorSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp) { Blocking = false };
+                    Log(string.Format(CultureInfo.InvariantCulture, "range sensors: {0} beams -> udp {1} at {2:g} Hz",
+                        RangeSensors.Beams, cfg.Sensors.Target, cfg.Sensors.RateHz));
+                }
+                catch (Exception e)
+                {
+                    sensorSocket?.Close();
+                    sensorSocket = null;
+                    Log($"range sensors: off (cannot open a udp socket to {cfg.Sensors.Target}: {e.Message})");
+                }
+            }
+            else Log("range sensors: off");
 
             try
             {
@@ -234,6 +258,9 @@ namespace HorusGta
                     HeadingDeg = cfg.Origin.HeadingDeg,
                 };
                 physics = new PhysicsLink(body, ned, new GimbalServo(), ned.Origin, ned.GtaHeadingRad(0));
+                // The sweep runs after each step, inside the tick budget: 7 rays at 20 Hz of sim time.
+                sensors = sensorSocket != null ? RangeSensors.Create(cfg.Sensors, frame, SensorRay) : null;
+                if (sensors != null) physics.Advanced = SweepSensors;
                 physicsLastRealS = now;
                 Log(string.Format(CultureInfo.InvariantCulture,
                     "physics: SITL frames arriving; quad {0} kg, {1}x{2}x{3} props, {4} Kv {5}S, max {6:F0} rpm, hover throttle {7:F3}, resting at ({8:F2}, {9:F2}, {10:F2})",
@@ -467,15 +494,47 @@ namespace HorusGta
             physics.Frame.Euler(body, out double roll, out double pitch, out double yaw);
             Vec3 p = physics.Frame.ToNed(body.P - physics.Frame.Origin);
             Log(string.Format(CultureInfo.InvariantCulture,
-                "physics: sim {0:F1} s, real-time factor {1:F3}, {2:F0} steps/s at {3} Hz, {4} budget hits, {5} idle ticks, {18:F0} world rays/s; ned ({6:F2}, {7:F2}, {8:F2}) rpy ({9:F1}, {10:F1}, {11:F1}) gimbal rpy ({20:F1}, {12:F1}, {21:F1}); rpm {13:F0} {14:F0} {15:F0} {16:F0}{17}{19}",
+                "physics: sim {0:F1} s, real-time factor {1:F3}, {2:F0} steps/s at {3} Hz, {4} budget hits, {5} idle ticks, {18:F0} world rays/s{22}; ned ({6:F2}, {7:F2}, {8:F2}) rpy ({9:F1}, {10:F1}, {11:F1}) gimbal rpy ({20:F1}, {12:F1}, {21:F1}); rpm {13:F0} {14:F0} {15:F0} {16:F0}{17}{19}",
                 physics.SimTimeS, sim / real, (physics.TotalSteps - physicsLogSteps) / real, physics.FrameRate, physicsBudgetHits, physicsTimeouts,
                 p.X, p.Y, p.Z, roll * 180 / Math.PI, pitch * 180 / Math.PI, yaw * 180 / Math.PI, physics.GimbalPitchDeg ?? double.NaN,
                 body.Rpm[0], body.Rpm[1], body.Rpm[2], body.Rpm[3],
                 body.InContact ? (body.LastContact.Value.Normal.Z > 0.7 ? ", on ground" : ", against a wall") : "", (probe.Rays - probeRaysLogged) / real,
-                DroneRayCheck(body), physics.GimbalRollDeg ?? double.NaN, physics.GimbalYawDeg ?? double.NaN));
+                DroneRayCheck(body), physics.GimbalRollDeg ?? double.NaN, physics.GimbalYawDeg ?? double.NaN, SensorStats(real)));
             physicsLogRealS = now; physicsLogSimS = physics.SimTimeS; physicsLogSteps = physics.TotalSteps;
             physicsBudgetHits = 0; physicsTimeouts = 0; probeRaysLogged = probe.Rays;
+            if (sensors != null) sensorRaysLogged = sensors.Rays;
             nextPhysicsLogS = now + ProgressLogIntervalS;
+        }
+
+        /// <summary>For the 5 s log: sensor rays/s over <paramref name="realS"/> and the latest smallest horizontal range.</summary>
+        string SensorStats(double realS)
+        {
+            if (sensors == null) return "";
+            double min = sensors.MinHorizontalM;
+            return string.Format(CultureInfo.InvariantCulture, ", {0:F0} sensor rays/s, min horizontal range {1}",
+                (sensors.Rays - sensorRaysLogged) / realS, double.IsInfinity(min) ? "clear" : min.ToString("F2", CultureInfo.InvariantCulture) + " m");
+        }
+
+        /// <summary>After each physics step: sweep the range sensors when due and send the datagram (a failed send is logged once).</summary>
+        void SweepSensors()
+        {
+            if (!sensors.Update(physics.SimTimeS, physics.Body)) return;
+            try { sensorSocket.SendTo(sensors.Datagram, 0, RangeProtocol.Size, SocketFlags.None, sensorTarget); }
+            catch (Exception e)
+            {
+                if (sensorSendFailed) return;
+                sensorSendFailed = true;
+                Log($"range sensors: udp send to {cfg.Sensors.Target} failed ({(e is SocketException se ? se.SocketErrorCode.ToString() : e.Message)}); further failures are not logged");
+            }
+        }
+
+        /// <summary>Sensor beam: distance from a to the first <see cref="Solid"/> hit towards b (player ped and drone prop ignored), or null.</summary>
+        double? SensorRay(Vec3 a, Vec3 b)
+        {
+            var from = V3(a);
+            var hit = Cast(from, V3(b), Solid);
+            if (!hit.DidHit) return null;
+            return (hit.HitPosition - from).Length();
         }
 
         /// <summary>
@@ -499,6 +558,7 @@ namespace HorusGta
             LogBadPackets(clock.Elapsed.TotalSeconds, true);
             try { socket?.Close(); } catch { }
             try { physicsSocket?.Close(); } catch { }
+            try { sensorSocket?.Close(); } catch { }
             try { log?.Dispose(); } catch { }
         }
 
