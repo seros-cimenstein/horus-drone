@@ -444,8 +444,13 @@ scripts/koko/gta_game.sh stop      # close GTA, the Rockstar launcher and Social
 
 `start` refuses while GTA already runs, while Gazebo runs (a HORUS campaign or simulation), while
 the running Steam client is not signed in, when no display output is enabled (Koko's screen off:
-GTA's swap chain then presents once a second, so scripts and captured frames run at 1 Hz), or when
-Koko has less than `GTA_MIN_AVAILABLE_MIB` (default 9728, see "Memory") MiB available.
+GTA's swap chain then presents once a second, so scripts and captured frames run at 1 Hz), while a
+screen lock covers the desktop (a visible `dark-screenlock` window or an active Cinnamon
+screensaver: the STORY-tab check needs GTA's window focused, and on 2026-10-22 the Rockstar launcher
+stalled under the lock until the 180 s start timeout), or when Koko has less than
+`GTA_MIN_AVAILABLE_MIB` (default 9728, see "Memory") MiB available. The memory refusal lists the
+six largest processes; Steam's web helpers grow over a long session, and restarting Steam frees
+them but brings back its account picker.
 
 Signed in means:
 
