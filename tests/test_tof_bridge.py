@@ -392,3 +392,69 @@ def test_cli_ring_layout_bridges_the_ring_and_the_down_topics(monkeypatch):
     assert isinstance(ring, RingSensorSpec)
     assert ring.topic.endswith("/proximity_ring/scan")
     assert down.topic.endswith("/range_down/scan")
+
+
+def _gta_datagram(ranges, *, seq=1, time_ms=12_345, magic=b"HRNG", version=1):
+    import struct
+
+    return struct.pack("<4sIII7f", magic, version, seq, time_ms, *ranges)
+
+
+def test_gta_sweep_becomes_the_payload_sensors_distance_readings():
+    # Packet order front, front_right, right, rear, left, front_left, down; each beam keeps the
+    # Gazebo payload sensor's MAVLink identity, so ArduPilot and HORUS see the same sectors.
+    from horus.tof_bridge.gta import decode_range_packet, packet_readings
+
+    inf = float("inf")
+    packet = decode_range_packet(_gta_datagram((1.5, inf, 0.02, 3.99, 0.0, 4.5, 0.8)))
+    readings = {reading.sensor_id: reading for reading in packet_readings(packet)}
+
+    assert {i: reading.orientation for i, reading in readings.items()} == {
+        i: orientation for _, orientation, i in PAYLOAD_SENSORS
+    }
+    assert all(r.time_boot_ms == 12_345 and (r.min_distance, r.max_distance) == (5, 400) for r in readings.values())
+    distances = {i: readings[i].current_distance for i in readings}
+    # front 1.5 m; clear and beyond-range beams one past the maximum (no phantom obstacle at 4 m);
+    # hits closer than the 5 cm minimum, even touching the hull, stay obstacles at the minimum.
+    assert distances == {0: 150, 1: 401, 2: 5, 3: 399, 4: 5, 5: 401, 6: 80}
+
+
+@pytest.mark.parametrize(
+    "datagram",
+    [
+        _gta_datagram((1.0,) * 7)[:-1],
+        _gta_datagram((1.0,) * 7, magic=b"HPOS"),
+        _gta_datagram((1.0,) * 7, version=2),
+        _gta_datagram((1.0, float("nan"), 1.0, 1.0, 1.0, 1.0, 1.0)),
+        _gta_datagram((1.0, 1.0, -0.5, 1.0, 1.0, 1.0, 1.0)),
+    ],
+)
+def test_gta_bridge_rejects_anything_but_a_well_formed_sweep(datagram):
+    from horus.tof_bridge.gta import decode_range_packet
+
+    with pytest.raises(ValueError):
+        decode_range_packet(datagram)
+
+
+def test_gta_bridge_forwards_sweeps_from_udp_and_reports_a_malformed_one_once():
+    import socket
+    import time
+
+    from horus.tof_bridge.gta import serve
+
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    receiver.bind(("127.0.0.1", 0))
+    receiver.settimeout(0.2)
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    address = receiver.getsockname()
+    for datagram in (_gta_datagram((2.0,) * 7, seq=1), b"junk", b"junk", _gta_datagram((1.0,) * 7, seq=2)):
+        sender.sendto(datagram, address)
+    sent, logs = [], []
+    deadline = time.monotonic() + 5.0
+    serve(receiver, sent.append, log=logs.append,
+          should_stop=lambda: len(sent) >= 14 or time.monotonic() > deadline)
+    sender.close()
+    receiver.close()
+
+    assert [reading.current_distance for reading in sent] == [200] * 7 + [100] * 7
+    assert sum(line.startswith("dropped:") for line in logs) == 1

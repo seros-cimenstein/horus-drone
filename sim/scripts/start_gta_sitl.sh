@@ -8,6 +8,8 @@
 # Physics mode (HORUS_GTA_PHYSICS=json): SITL on its JSON backend; HorusGta.dll in GTA answers on
 # udp HORUS_GTA_PHYSICS_ADDRESS:9002 with the quad's state, and SITL derives its sensors from it.
 #   serial0 tcp:5760  HORUS
+#   serial2 tcp:5763  horus.tof_bridge.gta <- udp 127.0.0.1:5612: HorusGta's emulated ToF payload
+#                     (seven beams cast into the GTA world) as DISTANCE_SENSOR, as in the Gazebo sims
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,8 +51,9 @@ log_dir="${run_dir}/logs"
 mkdir -p "${log_dir}"
 printf '%s\n' "${run_id}" > "${run_root}/.active"
 
-# The gimbal is the servo mount every HORUS profile uses (config/ardupilot/common.parm); the
-# proximity, rangefinder and fence fragments need Gazebo's sensors or worlds and are left out.
+# The gimbal is the servo mount every HORUS profile uses (config/ardupilot/common.parm). The fence
+# fragments describe Gazebo worlds and are left out; in physics mode the proximity and rangefinder
+# lines are taken too, because HorusGta.dll emulates the ToF payload there.
 param_file="${run_dir}/sitl-overrides.parm"
 {
   printf 'LOG_DISARMED 0\n\n# Mount from /horus/config/ardupilot/common.parm\n'
@@ -62,6 +65,13 @@ param_file="${run_dir}/sitl-overrides.parm"
     # 1200 Hz: arming needs a gyro rate of at least 1.8 x the 400 Hz loop ("PreArm: Gyro 0 rate
     # 400Hz < loop rate*1.8 720Hz" at SIM_RATE_HZ 400).
     printf '\n# GTA physics: quad X, 800 Hz lockstep\nFRAME_CLASS 1\nFRAME_TYPE 1\nSIM_RATE_HZ 800\n'
+    printf '\n# Proximity avoidance and the down rangefinder from /horus/config/ardupilot/common.parm\n'
+    grep -E '^(PRX1_TYPE|AVOID_ENABLE|AVOID_MARGIN|RNGFND1_[A-Z]+)[[:space:]]' /horus/config/ardupilot/common.parm
+    # ArduPilot low-pass filters each proximity face (PRX_FILT, default 0.25 Hz: a 0.64 s time
+    # constant), so a wall approached at the profile's 3 m/s reads about 2 m farther than it is.
+    # On 2026-10-22 a goto into the sculpture face that way braked only from 3.0 to 2.36 m/s before
+    # contact. HorusGta's beams are exact ray casts, with nothing to smooth: 0 turns the filter off.
+    printf 'PRX_FILT 0\n'
   fi
 } > "${param_file}"
 
@@ -71,7 +81,8 @@ export HOME="${run_dir}"
 # Job control gives SITL, the keeper and the bridge separate process groups (stop_sim.sh signals
 # each group through these pid files).
 set -m
-pid_files=("${log_dir}/gta_bridge.pid" "${log_dir}/mavlink_keeper.pid" "${log_dir}/sitl.pid")
+pid_files=("${log_dir}/gta_bridge.pid" "${log_dir}/range_bridge.pid" "${log_dir}/mavlink_keeper.pid"
+  "${log_dir}/sitl.pid")
 rm -f "${pid_files[@]}"
 
 cleanup() {
@@ -111,7 +122,7 @@ port_open() {
 cd -- "${run_dir}"
 if [[ "${physics}" == json ]]; then
   sim_vehicle.py -v ArduCopter -f quad --model "JSON:${physics_address}" --no-rebuild --no-mavproxy \
-    --add-param-file "${param_file}" > "${log_dir}/sitl.log" 2>&1 &
+    --sitl-instance-args=--serial2=tcp:5763 --add-param-file "${param_file}" > "${log_dir}/sitl.log" 2>&1 &
 else
   sim_vehicle.py -v ArduCopter -f quad --no-rebuild --no-mavproxy \
     --add-param-file "${param_file}" > "${log_dir}/sitl.log" 2>&1 &
@@ -129,12 +140,26 @@ until port_open 5760; do
 done
 
 if [[ "${physics}" == json ]]; then
-  # No bridge: the camera rides on HorusGta's physics body. SITL steps only while GTA answers its
-  # servo frames, so HORUS's first connection on 5760 waits for the game, not for this script.
-  printf 'ArduCopter SITL PID %s on its JSON backend -> udp %s:9002 (HorusGta.dll in GTA). Run data: %s\n' \
-    "${sitl_pid}" "${physics_address}" "${run_dir}"
+  # No pose bridge: the camera rides on HorusGta's physics body. SITL steps only while GTA answers
+  # its servo frames, so HORUS's first connection on 5760 waits for the game, not for this script.
+  # SITL opens serial2 only once it has booted (a client on 5760 and GTA answering); the range
+  # bridge keeps trying until then. It runs from the mounted checkout, like the pose bridge.
+  (
+    cd /horus
+    exec /opt/horus-venv/bin/python -m horus.tof_bridge.gta --listen 127.0.0.1:5612 --mavlink tcp:127.0.0.1:5763
+  ) > "${log_dir}/range_bridge.log" 2>&1 &
+  range_bridge_pid=$!
+  printf '%s\n' "${range_bridge_pid}" > "${log_dir}/range_bridge.pid"
+  printf 'ArduCopter SITL PID %s on its JSON backend -> udp %s:9002 (HorusGta.dll in GTA); range bridge PID %s udp 5612 -> tcp:5763. Run data: %s\n' \
+    "${sitl_pid}" "${physics_address}" "${range_bridge_pid}" "${run_dir}"
   : > "${log_dir}/sim.ready"
-  while kill -0 "${sitl_pid}" 2>/dev/null; do sleep 1; done
+  while kill -0 "${sitl_pid}" 2>/dev/null; do
+    if ! kill -0 "${range_bridge_pid}" 2>/dev/null; then
+      printf 'the range bridge exited; inspect %s/range_bridge.log.\n' "${log_dir}" >&2
+      exit 1
+    fi
+    sleep 1
+  done
   printf 'SITL exited; inspect %s/sitl.log.\n' "${log_dir}" >&2
   exit 1
 fi

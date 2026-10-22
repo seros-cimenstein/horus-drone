@@ -1219,6 +1219,45 @@ def test_approach_held_at_the_fence_arrives_on_a_range_sample_within_tolerance(m
     executor.close()
 
 
+def test_an_approach_the_autopilot_holds_in_place_fails_instead_of_running_to_its_ttl(monkeypatch):
+    # GTA, 2026-10-22: ArduPilot's proximity avoidance held the drone 1.05 m from a tree line
+    # between it and the person, and the approach pushed against it for its whole 90 s TTL.
+    import dataclasses
+
+    from horus.executor.target_skills import _STALL_S
+
+    real_monotonic, offset = time.monotonic, [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + offset[0])
+    flight = FakeFlight(Pose(0.0, 0.0, 2.0))  # well inside the 3 m radius fence, facing north
+
+    def later(seconds, pose=None):
+        offset[0] += seconds
+        if pose is not None:
+            flight._telemetry.pose = pose
+        flight._telemetry.pose_updated_monotonic = flight._telemetry.heading_updated_monotonic = time.monotonic()
+        flight._telemetry.proximity = (_front_tof(4.0), dataclasses.replace(_front_tof(1.05), orientation=1))
+
+    later(0.0)
+    executor = HorusExecutor(flight, _settings(), perception=_IntermittentTarget(), autostart=False)
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 1.0}, ttl_s=90.0)["task_id"]
+    executor.tick()
+
+    # Moving: the window restarts, so a long approach that keeps moving never stalls.
+    later(_STALL_S - 0.5, Pose(0.5, 0.0, 2.0))
+    executor.tick()
+    later(_STALL_S - 0.5)
+    executor.tick()
+    assert executor.get_task_status(task_id)["status"] == "running"
+
+    later(1.0)  # held in place for longer than the stall time while commanded toward the target
+    executor.tick()
+
+    status = executor.get_task_status(task_id)
+    assert status["status"] == "failed"
+    assert "has not moved" in status["error"] and "1.05 m" in status["error"]
+    executor.close()
+
+
 class _OrbitTarget(PerceptionStub):
     """Perception double: a person standing 8 m out and 20 deg right of the heading.
 

@@ -51,6 +51,13 @@ static class Tests
         Run(ImuSaturates);
         Run(CameraOnTheMount);
         Run(DroneOrientation);
+        Run(SensorConfig);
+        Run(RangeDatagramLayout);
+        Run(RangeBeamDirections);
+        Run(RangeHullOffsets);
+        Run(RangeSchedule);
+        Run(RangeSensorsDisabled);
+        Run(RangeSensorsOnPhysicsLink);
         Console.WriteLine(failures == 0 ? $"OK: {checks} checks passed" : $"{failures} of {checks} checks FAILED");
         return failures == 0 ? 0 : 1;
     }
@@ -373,6 +380,9 @@ static class Tests
         var d = new ModConfig().Physics;
         Check(c.Physics.Bind == d.Bind && c.Physics.Port == d.Port && c.Physics.BudgetMs == d.BudgetMs && c.Physics.HfovDeg == d.HfovDeg
             && c.Physics.TraceHz == d.TraceHz, "shipped [physics] equals the defaults");
+        var s = new ModConfig().Sensors;
+        Check(c.Sensors.Enabled == s.Enabled && c.Sensors.Host == s.Host && c.Sensors.Port == s.Port && c.Sensors.RateHz == s.RateHz,
+            "shipped [sensors] equals the defaults");
     }
 
     // The bytes horus_capture.asi reads (gta/common/camera_block.hpp): magic, version, seqlock
@@ -819,5 +829,264 @@ static class Tests
                 Near((got - world).Length, 0, $"{c.what}: entity {axis} axis = body {axis}", 1e-9);
             }
         }
+    }
+
+    static void SensorConfig()
+    {
+        var d = ModConfig.Parse("");
+        Check(d.Sensors.Enabled && d.Sensors.Host == "127.0.0.1" && d.Sensors.Port == 5612 && d.Sensors.Target == "127.0.0.1:5612",
+            "sensors default: on, to udp 127.0.0.1:5612");
+        Near(d.Sensors.RateHz, 20, "sensor rate default 20 Hz");
+        var c = ModConfig.Parse("[sensors]\nenabled=0\ntarget = 10.0.0.2:6000 ; bridge host\nrate_hz=10\n");
+        Check(!c.Sensors.Enabled && c.Sensors.Host == "10.0.0.2" && c.Sensors.Port == 6000, "sensors parsed: off, other target");
+        Near(c.Sensors.RateHz, 10, "sensor rate 10 accepted");
+        Check(c.Warnings.Count == 0, "valid sensors section has no warnings: " + string.Join(" | ", c.Warnings));
+        var t = ModConfig.Parse("[sensors]\nenabled=true\nrate_hz=12.5\n[sensors]\nenabled=FALSE\n");
+        Check(!t.Sensors.Enabled && t.Warnings.Count == 0, "enabled accepts true/false too");
+        Near(t.Sensors.RateHz, 12.5, "fractional sensor rate within 10..20 accepted");
+        var bad = ModConfig.Parse("[sensors]\nenabled=yes\ntarget=localhost:5612\ntarget=127.0.0.1\ntarget=127.0.0.1:70000\ntarget=127.0.0.1:-1\nrate_hz=25\nrate_hz=5\nrate_hz=fast\n");
+        Check(bad.Sensors.Enabled && bad.Sensors.Target == "127.0.0.1:5612", "bad sensor values fall back");
+        Near(bad.Sensors.RateHz, 20, "sensor rate outside 10..20 falls back to 20");
+        Check(bad.Warnings.Count == 8 && bad.Warnings[5].Contains("sensors.rate_hz '25' is not 10..20"),
+            "one warning per bad sensors line: " + string.Join(" | ", bad.Warnings));
+    }
+
+    static void RangeDatagramLayout()
+    {
+        var b = new byte[RangeProtocol.Size];
+        RangeProtocol.Encode(b, 5, 1234, new[] { 0.25f, 1f, 2f, 3f, 4f, 0.5f, float.PositiveInfinity });
+        Check(RangeProtocol.Size == 44, "range datagram is 44 bytes");
+        Check(Convert.ToHexString(b).ToLowerInvariant() ==
+            "48524e47" + "01000000" + "05000000" + "d2040000"
+            + "0000803e" + "0000803f" + "00000040" + "00004040" + "00008040" + "0000003f" + "0000807f",
+            "HRNG | version 1 | seq 5 | time_ms 1234 | 7 little-endian f32, +inf = 0x7f800000: " + Convert.ToHexString(b));
+
+        // Through the sensors: a distinct distance per beam shows the order on the wire.
+        var frame = new Airframe();
+        var body = new QuadBody(frame);
+        body.Place(new Vec3(0, 0, 50), 0);
+        double? ByBeam(Vec3 a, Vec3 e)
+        {
+            var dir = (e - a).Normalized;
+            for (int i = 0; i < RangeSensors.Beams; i++)
+                if ((dir - RangeSensors.Direction(i, body.R, body.F, body.U)).Length < 1e-9)
+                    return i == 3 ? null : frame.RadiusM + 1 + 0.25 * i + (i == RangeSensors.Down ? RangeSensors.RestGapM : 0);
+            return null;
+        }
+        var s = new RangeSensors(frame, 20, ByBeam);
+        Check(s.Update(0.0126, body), "first update sweeps");
+        var d = s.Datagram;
+        Check(d[0] == 'H' && d[1] == 'R' && d[2] == 'N' && d[3] == 'G' && BitConverter.ToUInt32(d, 4) == 1, "magic and version");
+        Check(BitConverter.ToUInt32(d, 8) == 1, "first datagram seq 1");
+        Check(BitConverter.ToUInt32(d, 12) == 13, $"time_ms = round(sim time * 1000) (got {BitConverter.ToUInt32(d, 12)})");
+        for (int i = 0; i < RangeSensors.Beams; i++)
+        {
+            float v = BitConverter.ToSingle(d, 16 + 4 * i);
+            if (i == 3) Check(float.IsPositiveInfinity(v), "rear beam clear: +inf");
+            else Near(v, 1 + 0.25 * i, $"{RangeSensors.Names[i]} is float #{i}", 1e-6);
+            Check(v == s.Ranges[i], $"{RangeSensors.Names[i]}: datagram = Ranges");
+        }
+        Check(s.Update(0.0626, body) && BitConverter.ToUInt32(s.Datagram, 8) == 2 && BitConverter.ToUInt32(s.Datagram, 12) == 63,
+            "next sweep: seq 2, time_ms 63");
+        Check(RangeProtocol.TimeMs(0.05) == 50 && RangeProtocol.TimeMs(-1) == 0 && RangeProtocol.TimeMs(1e12) == uint.MaxValue, "time_ms rounds and stays in range");
+        Check(string.Join(",", RangeSensors.Names) == "front,front_right,right,rear,left,front_left,down", "beam order");
+    }
+
+    static void RangeBeamDirections()
+    {
+        var body = new QuadBody(new Airframe());
+        double h = Math.Sqrt(0.5);
+        Vec3 Dir(int i) => RangeSensors.Direction(i, body.R, body.F, body.U);
+        void Expect(int i, Vec3 want, string what) => Near((Dir(i) - want).Length, 0, $"{what}: {RangeSensors.Names[i]} = ({want.X:F3}, {want.Y:F3}, {want.Z:F3})", 1e-12);
+
+        // Level, GTA heading 0: nose north (+Y), right east (+X).
+        body.Place(default, 0);
+        Expect(0, new Vec3(0, 1, 0), "level"); Expect(1, new Vec3(h, h, 0), "level"); Expect(2, new Vec3(1, 0, 0), "level");
+        Expect(3, new Vec3(0, -1, 0), "level"); Expect(4, new Vec3(-1, 0, 0), "level"); Expect(5, new Vec3(-h, h, 0), "level");
+        Expect(6, new Vec3(0, 0, -1), "level");
+
+        // Heading 90 deg (counter-clockwise from +Y): nose west (-X), so right is north.
+        body.Place(default, Math.PI / 2);
+        Expect(0, new Vec3(-1, 0, 0), "heading 90"); Expect(2, new Vec3(0, 1, 0), "heading 90"); Expect(4, new Vec3(0, -1, 0), "heading 90");
+        Expect(3, new Vec3(1, 0, 0), "heading 90"); Expect(1, new Vec3(-h, h, 0), "heading 90"); Expect(6, new Vec3(0, 0, -1), "heading 90");
+
+        // Nose 10 deg up: the front beam climbs with the nose, the down beam leans back, the side beams stay level.
+        double nose = 10 * Math.PI / 180;
+        body.Place(default, 0);
+        body.F = Vec3.Rotate(body.F, body.R, nose); body.U = Vec3.Rotate(body.U, body.R, nose);
+        Expect(0, new Vec3(0, Math.Cos(nose), Math.Sin(nose)), "pitched up 10");
+        Expect(3, new Vec3(0, -Math.Cos(nose), -Math.Sin(nose)), "pitched up 10");
+        Expect(6, new Vec3(0, Math.Sin(nose), -Math.Cos(nose)), "pitched up 10");
+        Expect(2, new Vec3(1, 0, 0), "pitched up 10");
+
+        // Rolled 15 deg right: the right beam dips, the left beam rises.
+        double roll = 15 * Math.PI / 180;
+        body.Place(default, 0);
+        body.R = Vec3.Rotate(body.R, body.F, roll); body.U = Vec3.Rotate(body.U, body.F, roll);
+        Near(Dir(2).Z, -Math.Sin(roll), "rolled right: right beam points 15 deg down", 1e-12);
+        Near(Dir(4).Z, Math.Sin(roll), "rolled right: left beam points 15 deg up", 1e-12);
+        for (int i = 0; i < RangeSensors.Beams; i++) Near(Dir(i).Length, 1, $"{RangeSensors.Names[i]} is a unit vector", 1e-12);
+
+        // The rays: from the body centre along each beam for hull + 4 m.
+        var rays = new System.Collections.Generic.List<(Vec3, Vec3)>();
+        var frame = new Airframe();
+        var s = new RangeSensors(frame, 20, (a, b) => { rays.Add((a, b)); return null; });
+        body.Place(new Vec3(3, 4, 5), Math.PI / 2);
+        s.Update(0, body);
+        Check(rays.Count == 7 && s.Rays == 7, "one ray per beam");
+        for (int i = 0; i < rays.Count; i++)
+        {
+            Near((rays[i].Item1 - body.P).Length, 0, $"{RangeSensors.Names[i]} ray starts at the body centre", 1e-12);
+            Near((rays[i].Item2 - (body.P + Dir(i) * (s.HullM(i) + RangeSensors.MaxRangeM))).Length, 0, $"{RangeSensors.Names[i]} ray ends hull + 4 m along the beam", 1e-12);
+            Check(float.IsPositiveInfinity(s.Ranges[i]), $"{RangeSensors.Names[i]} clear: +inf");
+        }
+        Check(double.IsPositiveInfinity(s.MinHorizontalM), "all clear: min horizontal +inf");
+    }
+
+    static double? FakeRange(Vec3 a, Vec3 b)
+    {
+        var c = FakeRay(a, b, null);
+        return c.HasValue ? (c.Value.Position - a).Length : (double?)null;
+    }
+
+    static void RangeHullOffsets()
+    {
+        var frame = new Airframe();
+        Near(new RangeSensors(frame, 20, FakeRange).HorizontalHullM, 0.12, "horizontal hull = collision sphere radius");
+        Near(new RangeSensors(frame, 20, FakeRange).DownHullM, 0.121, "down hull = resting centre height (radius + 1 mm rest gap)");
+
+        // Fixed hit distances from the centre: minus the hull, clamped at 0, +inf for none or past the reach.
+        var body = new QuadBody(frame);
+        body.Place(new Vec3(0, 0, 10), 0);
+        foreach (var (dist, want, what) in new (double?, double, string)[]
+        {
+            (1.12, 1.0, "1.12 m from the centre reads 1 m"),
+            (0.05, 0, "a hit inside the hull clamps at 0"),
+            (-0.5, 0, "a negative distance clamps at 0"),
+            (4.12, 4.0, "4 m past the hull is in range"),
+            (4.2, double.PositiveInfinity, "beyond hull + 4 m reads +inf"),
+            (null, double.PositiveInfinity, "no hit reads +inf"),
+            (double.NaN, double.PositiveInfinity, "a NaN distance reads +inf, never NaN"),
+        })
+        {
+            var s = new RangeSensors(frame, 20, (a, b) => dist);
+            s.Update(0, body);
+            if (double.IsInfinity(want)) Check(float.IsPositiveInfinity(s.Ranges[0]), what);
+            else Near(s.Ranges[0], want, what, 1e-6);
+            Check(!float.IsNaN(s.Ranges[RangeSensors.Down]) && s.Ranges[RangeSensors.Down] >= 0, $"{what}: down never NaN or negative");
+        }
+
+        // The fake world (ground z = 0, wall x = 10): facing the wall from x 8 at 2 m up.
+        body.Place(new Vec3(8, 0, 2), -Math.PI / 2);
+        var w = new RangeSensors(frame, 20, FakeRange);
+        w.Update(0, body);
+        Near(w.Ranges[0], 2 - 0.12, "front: 2 m to the wall minus the 0.12 m hull", 1e-5);
+        Near(w.Ranges[1], 2 * Math.Sqrt(2) - 0.12, "front_right (towards the wall at 45 deg)", 1e-5);
+        Near(w.Ranges[5], 2 * Math.Sqrt(2) - 0.12, "front_left (towards the wall at 45 deg)", 1e-5);
+        Check(float.IsPositiveInfinity(w.Ranges[3]) && float.IsPositiveInfinity(w.Ranges[2]), "rear and side beams clear");
+        Near(w.Ranges[RangeSensors.Down], 2 - 0.121, "down: height minus the resting centre height", 1e-5);
+        Near(w.MinHorizontalM, 2 - 0.12, "min horizontal = front", 1e-5);
+
+        // Landed on the ground, the down sensor reads 0; stopped at a wall, the front reads the 1 mm gap.
+        var lander = new QuadBody(frame) { Sweep = new WorldProbe((x, y) => FakeRay(x, y, null)).Sweep };
+        lander.Place(new Vec3(0, 0, 1), 0);
+        for (int i = 0; i < 1600; i++) lander.Step(1 / 800.0, All(0));
+        var l = new RangeSensors(frame, 20, FakeRange);
+        l.Update(0, lander);
+        Check(lander.InContact, "landed");
+        Near(l.Ranges[RangeSensors.Down], 0, "landed on flat ground: down reads 0", 1e-6);
+
+        double hover = frame.HoverThrottle();
+        var flyer = new QuadBody(frame) { Sweep = new WorldProbe((x, y) => FakeRay(x, y, null)).Sweep };
+        flyer.Place(new Vec3(8, 0, 5), -Math.PI / 2);
+        for (int i = 0; i < 4; i++) flyer.Rpm[i] = hover * frame.MaxRpm;
+        flyer.V = new Vec3(3, 0, 0);
+        for (int i = 0; i < 800; i++) flyer.Step(1 / 800.0, All(hover));
+        var f = new RangeSensors(frame, 20, FakeRange);
+        f.Update(0, flyer);
+        Check(flyer.P.X > 9.8, $"flew into the wall (x {flyer.P.X:F3})");
+        Check(f.Ranges[0] >= 0 && f.Ranges[0] < 0.01, $"against the wall: front reads ~0 ({f.Ranges[0]:F4} m)");
+    }
+
+    static void RangeSchedule()
+    {
+        var body = new QuadBody(new Airframe());
+        body.Place(new Vec3(0, 0, 5), 0);
+        foreach (var (rate, hz) in new[] { (400, 20.0), (800, 20.0), (800, 10.0), (1200, 15.0) })
+        {
+            var s = new RangeSensors(body.Frame, hz, FakeRange);
+            Near(s.PeriodS, 1 / hz, $"{hz:g} Hz period");
+            var swept = new System.Collections.Generic.List<double>();
+            double t = 0;
+            int stepsPerPeriod = (int)Math.Round(rate / hz);
+            var at = new System.Collections.Generic.List<int>();
+            for (int k = 1; k <= rate; k++)
+            {
+                t += 1.0 / rate;   // as PhysicsLink sums its steps
+                if (s.Update(t, body)) { swept.Add(t); at.Add(k); }
+            }
+            Check(at.Count == (int)hz && at[0] == 1, $"{rate} Hz steps, {hz:g} Hz sensors: first step sweeps, {hz:g} sweeps in 1 s (got {at.Count})");
+            bool even = true;
+            for (int i = 1; i < at.Count; i++) even &= at[i] - at[i - 1] == stepsPerPeriod;
+            Check(even, $"{rate} Hz steps, {hz:g} Hz sensors: one sweep every {stepsPerPeriod} steps, none early ({string.Join(",", at)})");
+            Check(s.Sweeps == at.Count && s.Rays == 7 * at.Count, "7 rays per sweep, none between sweeps");
+        }
+
+        var r = new RangeSensors(body.Frame, 20, FakeRange);
+        Check(r.Update(1.0, body), "first call sweeps immediately");
+        Check(!r.Update(1.0499, body), "no sweep before 50 ms of sim time");
+        Check(r.Update(1.05, body), "sweep at 50 ms");
+        Check(!r.Update(1.05, body), "the same time does not sweep twice");
+        Check(r.Update(1.4, body) && !r.Update(1.42, body), "after a 350 ms gap: one sweep, not a burst of seven");
+        Check(r.Update(1.45, body), "then one period from the late sweep");
+        Check(r.Update(0.0025, body), "sim clock went back (SITL restart): sweeps at once");
+        Check(!r.Update(0.05, body) && r.Update(0.0525, body), "then on the new clock");
+        Check(BitConverter.ToUInt32(r.Datagram, 8) == r.Sweeps && r.Sweeps == 6, "seq keeps counting across the restart");
+
+        foreach (double bad in new[] { 9.9, 20.1, 0, double.NaN })
+        {
+            bool threw = false;
+            try { _ = new RangeSensors(body.Frame, bad, FakeRange); } catch (ArgumentOutOfRangeException) { threw = true; }
+            Check(threw, $"rate {bad} Hz rejected");
+        }
+    }
+
+    static void RangeSensorsDisabled()
+    {
+        int rays = 0;
+        double? Count(Vec3 a, Vec3 b) { rays++; return null; }
+        var off = ModConfig.Parse("[sensors]\nenabled=0\n").Sensors;
+        Check(RangeSensors.Create(off, new Airframe(), Count) == null && rays == 0, "enabled=0: no sensors, nothing cast");
+        var on = RangeSensors.Create(ModConfig.Parse("[sensors]\nrate_hz=10\n").Sensors, new Airframe(), Count);
+        Check(on != null && on.RateHz == 10, "enabled by default, at the configured rate");
+    }
+
+    static void RangeSensorsOnPhysicsLink()
+    {
+        var frame = new Airframe();
+        var body = new QuadBody(frame) { FloorZ = 0 };
+        var ned = new NedFrame { Origin = new Vec3(0, 0, frame.RadiusM + 0.001) };
+        var link = new PhysicsLink(body, ned, new GimbalServo(), ned.Origin, 0);
+        var s = new RangeSensors(frame, 20, (a, b) => b.Z < a.Z ? a.Z : (double?)null);   // flat ground at z = 0
+        var sent = new System.Collections.Generic.List<(uint seq, uint ms)>();
+        var sentAt = new System.Collections.Generic.List<double>();
+        int advanced = 0;
+        link.Advanced = () =>
+        {
+            advanced++;
+            if (!s.Update(link.SimTimeS, link.Body)) return;
+            sent.Add((BitConverter.ToUInt32(s.Datagram, 8), BitConverter.ToUInt32(s.Datagram, 12)));
+            sentAt.Add(link.SimTimeS);
+        };
+        var queue = new System.Collections.Generic.Queue<ServoFrame?>();
+        for (uint n = 1; n <= 41; n++) queue.Enqueue(new ServoFrame { FrameRate = 400, FrameCount = n, Pwm = Pwm(16, 1000) });
+        queue.Enqueue(new ServoFrame { FrameRate = 400, FrameCount = 41, Pwm = Pwm(16, 1000) });
+        var r = link.Pump(1.0, () => queue.Count > 0 ? queue.Dequeue() : null, _ => { }, () => false);
+        Check(r.Steps == 41 && r.Resent == 1 && advanced == 41, $"Advanced runs once per step, not for a re-answered frame ({advanced})");
+        bool times = sent.Count == 3;
+        for (int i = 0; times && i < sent.Count; i++) times = sent[i].seq == i + 1 && sent[i].ms == RangeProtocol.TimeMs(sentAt[i]) && Math.Abs(sent[i].ms - sentAt[i] * 1000) <= 0.5 + 1e-9;
+        Check(times && Math.Abs(sentAt[0] - 1 / 400.0) < 1e-12 && Math.Abs(sentAt[1] - 21 / 400.0) < 1e-9 && Math.Abs(sentAt[2] - 41 / 400.0) < 1e-9,
+            "sweeps at sim 2.5, 52.5, 102.5 ms, seq 1..3, time_ms the sim time: " + string.Join(" ", sent));
+        Near(s.Ranges[RangeSensors.Down], 0, "resting at the origin: down reads 0", 1e-6);
     }
 }

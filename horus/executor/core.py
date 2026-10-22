@@ -85,6 +85,10 @@ class SkillTask:
     _last_target_stop_m: float = 0.0
     # Approach: when progress toward the target first stalled at the geofence (monotonic s).
     _fence_blocked_since: float | None = None
+    # Approach: start (monotonic s) and horizontal position (north, east) of the current window in
+    # which the vehicle, commanded toward the target, has not moved; see target_skills._check_stall.
+    _stall_since: float | None = None
+    _stall_position: tuple[float, float] | None = None
     _range_note_warned: bool = False
     _finished_event_published: bool = False
     _search_frame_id: int | None = None
