@@ -94,6 +94,11 @@ port=9002
 budget_ms=10      ; wall ms per script tick spent answering SITL (the game frame waits meanwhile)
 hfov_deg=84       ; drone camera horizontal FOV, as config/horus_gta.yaml
 trace_hz=0        ; rows/s of scripts/HorusGtaTrace.csv (camera and drone pose read back); 0 = off
+
+[sensors]
+enabled=1         ; 1 = cast and send the range sensors (see "Range sensors"), 0 = nothing
+target=127.0.0.1:5612 ; UDP host:port of the range datagrams
+rate_hz=20        ; sweeps per second of physics sim time, 10..20
 ```
 
 `[scene]` is applied when the camera activates and undone on release. Releasing clears the weather
@@ -240,12 +245,74 @@ HorusGta listens on `[physics]` udp 127.0.0.1:9002:
   tick's only to 1.06° RMS), so `cam_set_*` is the pose the frame renders with.
 - **Log**: `physics: SITL frames arriving`, `physics: driving the camera, SITL frame rate N Hz`,
   the prop's spawn with its model box, each contact, and every 5 s the sim time, real-time
-  factor, steps/s, budget hits, idle ticks, world rays/s, NED, attitude, gimbal roll/pitch/yaw,
-  motor rpm and the prop's ray check.
+  factor, steps/s, budget hits, idle ticks, world rays/s, sensor rays/s and the latest smallest
+  horizontal range (see "Range sensors"), NED, attitude, gimbal roll/pitch/yaw, motor rpm and the
+  prop's ray check.
 
 `build/physics_sim/horus-gta-physics-sim` (built by `build.sh` from `physics_sim/`) runs the same
 Core over flat ground without GTA, for testing the SITL side alone:
 `./horus-gta-physics-sim [--bind 127.0.0.1] [--port 9002] [--tick-ms 33] [--budget-ms 10]`.
+
+### Range sensors
+
+While the physics link flies the quad in game, HorusGta gives it the seven short-range distance
+sensors of the HORUS Gazebo drone, so ArduPilot's simple proximity avoidance can stop it before
+obstacles (`Core/RangeSensors.cs`; `horus-gta-physics-sim` has no world and sends none).
+
+- **Beams**, level in the body frame (they tilt with the drone): front, front_right (45° right),
+  right, rear, left, front_left (45° left), and down along the body's -up axis. Each is one
+  `World.Raycast` from the body centre, with the collision rays' flags and ignores (map, vehicles,
+  peds, objects, glass, foliage; not water, the player's ped or the drone prop).
+- **Range**: the hit distance minus the beam's hull offset, clamped at 0. A beam that hits nothing
+  within 4 m of the hull reads +∞. Each ray is cast for hull + 4 m. The hull offsets come from
+  the collision sphere: horizontally its 0.12 m radius, so 0 means the sphere touches (against a
+  wall the 1 mm rest gap reads 0.001); down 0.121 m, the resting centre height, so the down beam
+  reads 0 when landed on flat ground. The props reach about 0.35 m from the centre but do not
+  collide.
+- **Rate**: `rate_hz` sweeps per second of physics sim time. The first step sweeps, then one sweep
+  per period, run right after the physics step and before its answer goes to SITL; a SITL restart
+  sweeps at once on the new clock. 7 rays at 20 Hz is 140 rays/s, about 35 ms of each sim second
+  at 0.25 ms per ray, inside the `budget_ms` tick budget.
+- **Packet**: one UDP datagram per sweep to `target`, little-endian, 44 bytes: magic `HRNG` |
+  u32 version 1 | u32 seq (counts sweeps) | u32 time_ms (physics sim time, the JSON `timestamp`
+  clock, rounded to the millisecond) | 7 × f32 ranges in metres in the beam order above, +∞
+  when clear, never NaN. The socket does not block; a failed send is logged once and never
+  stops the physics loop.
+- **HORUS side**: `sim/scripts/start_gta_sitl.sh` starts the bridge `horus.tof_bridge.gta` with
+  SITL serial2 (`tcp:5763`). The bridge forwards each beam to ArduPilot as `DISTANCE_SENSOR` with
+  the Gazebo payload's sensor id, orientation and 5–400 cm limits; a clear beam reads 401 cm,
+  which ArduPilot takes as no obstacle. The GTA SITL loads `common.parm`'s proximity lines
+  (`PRX1_TYPE 2`, `AVOID_ENABLE 3`, `AVOID_MARGIN 1.0`) and the down rangefinder, plus
+  `PRX_FILT 0`. ArduPilot's default 0.25 Hz filter on each proximity face makes a wall approached
+  at 3 m/s read about 2 m farther than it is; the ray casts need no smoothing.
+- **Operating area**: `config/horus_gta.yaml` has no obstacle-free box any more, only a 40 m radius
+  around home (`geofence_radius_m`). Obstacles are left to these beams. The level beams, 45° apart,
+  miss what is above or below the drone and a thin pole between two beams.
+- **Log**: `range sensors: 7 beams -> udp 127.0.0.1:5612 at 20 Hz` (or `range sensors: off`) at
+  start, and sensor rays/s and `min horizontal range X m` (or `clear`) in the 5 s physics line.
+
+Checked in game on 2026-10-22, 11:10–11:20 (`koko:~/horus-gta/run19/`): the 2026-10-20 collision
+flight repeated with `horus-mcp`. It took off to 20 m, flew to (12.4, −5) heading east, then a
+`goto` to (12.4, 19) aimed through the sculpture face at east 13.1.
+
+- **Default `PRX_FILT` 0.25** (`avoid1.txt`): the front beam saw the face, but the drone still
+  hit it at 2.36 m/s, down from 3 m/s. ArduPilot's own parameters, read on serial1, confirmed that
+  all seven sensors arrived from system 254.
+- **`PRX_FILT 0`** (`avoid2.txt`): the front beam read 3.57 m and ArduPilot braked, backed off
+  once, and held the drone 1.02–1.05 m from the face (front_right beam) until the `goto`
+  expired. HorusGta logged no contact besides take-off and touchdown.
+- **The S15 mission as a fixed `run_plan`** (no Claude; `plan2.txt`, `plan3.txt`), with the box
+  removed: take off to 8 m, `search` north −20..20, east −25..15 for `person`, `approach` to 4 m,
+  hover 15 s, go home and land.
+  - First run: person 119 was found. The straight line to them ran through the tree line at
+    north −18, east 13.6. ArduPilot held the drone 1.05 m from the canopy, and the approach
+    pushed until its 90 s TTL. Since then an approach the autopilot keeps in place fails after
+    3 s (`approach blocked …`, README "GPS-free S4 and precision landing").
+  - Second run, with that change: person 6 was found. The approach raised its standoff to 7.9 m,
+    lost and re-identified the person (as track 23), arrived, and hovered. The drone landed
+    0.30 m from home.
+  - Both runs logged no contact besides touchdown. Person 6 stood at about (−12, −14), inside the
+    old box, so this run does not yet show the wider reach.
 
 ## Drone physics source: Los Santos FPV
 

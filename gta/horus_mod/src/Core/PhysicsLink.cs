@@ -79,6 +79,8 @@ namespace HorusGta
         public double? GimbalPitchDeg { get; private set; }
         public double? GimbalYawDeg { get; private set; }
         public long TotalSteps { get; private set; }
+        /// <summary>Called after each step, before its answer goes to SITL (e.g. for <see cref="RangeSensors.Update"/> at <see cref="SimTimeS"/>).</summary>
+        public Action Advanced;
 
         /// <summary>
         /// Answer frames until the sim time reaches <paramref name="simTargetS"/>, a frame does not
@@ -129,6 +131,7 @@ namespace HorusGta
             GimbalPitchDeg = Gimbal.PitchDeg(f) ?? GimbalPitchDeg;
             GimbalYawDeg = Gimbal.YawDeg(f) ?? GimbalYawDeg;
             lastReply = SitlJson.Encode(SimTimeS, Body, Frame);
+            Advanced?.Invoke();
         }
 
         /// <summary>
