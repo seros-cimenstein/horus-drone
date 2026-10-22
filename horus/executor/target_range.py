@@ -21,13 +21,26 @@ class TargetNotVisible(RuntimeError):
 
 
 class TargetGeometry(NamedTuple):
-    """Validated target geometry, the range source used, and the detector label seen."""
+    """Validated target geometry, the range source used, and the detector label seen.
+
+    ``horizontal_m`` and ``view_limit_m`` come from the ground-plane fix only: the horizontal
+    distance to the target, and the closest camera-to-torso range at which its ground contact
+    still lies inside the frame (above ``VIEW_BOTTOM_MARGIN`` of the image height from the bottom
+    edge) at the current height and camera pitch.
+    """
 
     bearing_rad: float
     range_m: float | None
     range_source: str | None
     range_note: str | None
     label: str
+    horizontal_m: float | None = None
+    view_limit_m: float | None = None
+
+
+# A target closer than this keeps its ground contact this fraction of the frame height above the
+# bottom edge, so a small overshoot or box jitter does not push it out of view.
+VIEW_BOTTOM_MARGIN = 0.1
 
 
 class _GroundFix(NamedTuple):
@@ -38,6 +51,7 @@ class _GroundFix(NamedTuple):
     horizontal_m: float
     height_m: float
     pitch_deg: float
+    view_limit_m: float
 
 
 def candidate_value(candidate: Any, name: str, default: Any = None) -> Any:
@@ -127,7 +141,15 @@ class TargetRanger:
             range_m = float(range_m)
             if not math.isfinite(range_m) or range_m <= 0:
                 range_m = range_source = range_note = None
-        return TargetGeometry(bearing, range_m, range_source, range_note, class_name)
+        return TargetGeometry(
+            bearing,
+            range_m,
+            range_source,
+            range_note,
+            class_name,
+            ground.horizontal_m if ground is not None else None,
+            ground.view_limit_m if ground is not None else None,
+        )
 
     def _range(
         self,
@@ -316,12 +338,21 @@ class TargetRanger:
         torso_north, _torso_east, torso_down = ray((y1 + y2) * 0.5)
         if torso_north > 1e-9:
             torso_height = max(0.0, height_above_ground - horizontal * (torso_down / torso_north))
-            slant = math.hypot(horizontal, height_above_ground - torso_height)
+            drop = height_above_ground - torso_height
+            slant = math.hypot(horizontal, drop)
         else:
+            drop = height_above_ground
             slant = slant_to_ground
         if not math.isfinite(slant) or slant <= 0.0:
             return None
-        return _GroundFix(slant, math.atan2(east, north), horizontal, height_above_ground, pitch_deg)
+        # Closest approach that keeps the ground contact inside the frame: where its ray reaches
+        # the row VIEW_BOTTOM_MARGIN above the bottom edge (straight down or beyond: no limit).
+        edge_north, _edge_east, edge_down = ray(image_height * (1.0 - VIEW_BOTTOM_MARGIN))
+        horizontal_min = height_above_ground * edge_north / edge_down if edge_north > 0.0 else 0.0
+        view_limit = math.hypot(horizontal_min, drop)
+        return _GroundFix(
+            slant, math.atan2(east, north), horizontal, height_above_ground, pitch_deg, view_limit
+        )
 
     def _forward_proximity_range(self, telemetry: Telemetry) -> float | None:
         """Fresh in-range forward (orientation 0) ToF distance, or None."""
