@@ -681,6 +681,35 @@ target can go below the clear air C7 measured; `get_map` reported the range 6–
   (outcome `completed`, with Claude's final answer). The grounder is not started in GTA mode,
   which Claude noted; `person` is a detector class, so the search did not need it.
 
+Two re-flights on 2026-10-22 checked the approach fixes that followed attempt 1. The executor
+now raises a standoff that the camera cannot hold from the flight height, and while the target
+is lost it closes on the target's last ground position instead of holding.
+Records are in `koko:~/horus-gta/run18/attempt2/` and `run18/attempt3/`, each with
+HorusGta.log, the server's run dir and log, and the REPL transcript.
+
+- **Attempt 2** (08:34–08:35):
+  - Plan: take off to 6 m, search, `approach(pid, dist_m=4.0)`, wait 15 s, go home.
+  - Person 11 was found. The approach raised its standoff to 5.82 m, lost the person for 4 s,
+    and re-identified them as track 13.
+  - On the first range sample after that, the approach failed at the fence 6.2 m from the
+    person. This was a couple of centimetres outside the 0.4 m arrival tolerance (6.22 m).
+  - Claude reported it and landed the drone: NED (0.28, 0.31), disarmed.
+  - Only the rest and touchdown contacts were logged, with no intersection.
+  - Fix: an approach held at the fence gives up only after 1 s of in-view ticks and checks
+    arrival on each of them. Tests:
+    `test_approach_held_at_the_fence_arrives_on_a_range_sample_within_tolerance` and the updated
+    `test_approach_stops_at_the_geofence_instead_of_chasing_a_target_beyond_it`.
+- **Attempt 3** (08:39–08:41), with the fix:
+  - Plan: take off to 8 m, search at 6 m spacing, `approach(pid, 4.0)`, `follow` for 25 s if it
+    arrives.
+  - Person 13 stood beyond the fence's south-west corner. The approach crossed the plaza,
+    re-identifying them through five losses, and stopped at the corner.
+  - It failed after the settle window, 16.2 m from the person (standoff 8.51 m). This is a real
+    fence limit, not a timeout.
+  - Claude reported it, called `rth` and `land`, and the drone landed at NED (0.41, 0.25),
+    disarmed.
+  - Only the touchdown contact was logged, with no intersection.
+
 Memory budget of a HORUS mission in GTA (C6), from the C5 session. A throwaway sampler
 (`koko:~/horus-gta/run12/memsample.py`, CSV `run12/mem.csv`) logged every 10 s from 01:48:44 to
 02:26:48:

@@ -73,7 +73,16 @@ def step_target(executor: HorusExecutor, task: SkillTask) -> bool:
             _turn_to(executor, facing_deg)
             return True
         progress = _range_velocity(executor, task, heading, distance - desired, yaw_deg=facing_deg)
-        if progress < _MIN_APPROACH_PROGRESS_M_S:
+        if progress >= _MIN_APPROACH_PROGRESS_M_S:
+            task._fence_blocked_since = None
+            return False
+        # Blocked at the fence. A monocular range jitters by more than the arrival tolerance from
+        # frame to frame, so one sample just outside it does not decide: keep checking arrival while
+        # the fence holds the vehicle, and give up only once that has lasted the settle time.
+        now = time.monotonic()
+        if task._fence_blocked_since is None:
+            task._fence_blocked_since = now
+        if now - task._fence_blocked_since >= _FENCE_BLOCKED_SETTLE_S:
             raise RuntimeError(
                 f"approach stopped at the geofence edge {distance:.1f} m from the target "
                 f"(standoff {desired:g} m): the target lies beyond the fence"
@@ -169,6 +178,8 @@ def _target_geometry(executor: HorusExecutor, task: SkillTask) -> TargetGeometry
     except TargetNotVisible as exc:
         if task.skill not in TARGET_SKILLS:
             raise
+        # Only ticks with the target in view count toward giving up at the fence.
+        task._fence_blocked_since = None
         if task._target_lost_at is None:
             task._target_lost_at = time.monotonic()
             task._target_lost_at_sim_s = executor._sim_time_s(executor._telemetry())
@@ -333,6 +344,8 @@ def _close_on_last_position(executor: HorusExecutor, task: SkillTask) -> None:
 
 # Below this speed toward the target (after the geofence limit) an approach makes no progress.
 _MIN_APPROACH_PROGRESS_M_S = 0.05
+# How long an approach may stay blocked at the geofence, still checking arrival, before failing.
+_FENCE_BLOCKED_SETTLE_S = 1.0
 
 
 def _send_velocity(

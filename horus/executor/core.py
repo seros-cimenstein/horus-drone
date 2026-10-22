@@ -83,6 +83,8 @@ class SkillTask:
     # horizontal distance from it at which the standoff is met, for closing on it while it is lost.
     _last_target_ned: tuple[float, float] | None = None
     _last_target_stop_m: float = 0.0
+    # Approach: when progress toward the target first stalled at the geofence (monotonic s).
+    _fence_blocked_since: float | None = None
     _range_note_warned: bool = False
     _finished_event_published: bool = False
     _search_frame_id: int | None = None
