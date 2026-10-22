@@ -79,6 +79,10 @@ class SkillTask:
     # World heading (deg) of the target at its last validated frame; a lost target is held facing it.
     _last_target_facing_deg: float | None = None
     _target_lost_at_sim_s: float | None = None
+    # Target skills: the target's last validated ground position (NED north, east) and the
+    # horizontal distance from it at which the standoff is met, for closing on it while it is lost.
+    _last_target_ned: tuple[float, float] | None = None
+    _last_target_stop_m: float = 0.0
     _range_note_warned: bool = False
     _finished_event_published: bool = False
     _search_frame_id: int | None = None

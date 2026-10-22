@@ -1585,6 +1585,119 @@ def test_ground_plane_range_holds_close_in_where_the_person_height_estimate_fail
     executor.close()
 
 
+class _StaticPerson(PerceptionStub):
+    """A standing person at a fixed NED spot, seen through a -45 deg 84 deg camera at 640x480.
+
+    Its box is projected from the flight's current pose each frame; outside the frame (or while
+    ``visible`` is False) it is not visible and not re-identified.
+    """
+
+    def __init__(self, flight, north_m):
+        self.flight, self.north_m, self.visible = flight, north_m, True
+
+    def _candidate(self, candidate_id):
+        pose = self.flight._telemetry.pose
+        box = _logged_approach_box(horizontal_m=self.north_m - pose.north_m, altitude_m=pose.up_m)
+        if not self.visible or box[1] < 0.0 or box[3] > 480.0:
+            return None
+        return {"id": candidate_id, "bbox": box, "frame_width": 640, "frame_height": 480,
+                "class_name": "person", "class_id": 0, "confidence": 0.8}
+
+    def validate_candidate(self, candidate_id):
+        return self._candidate(candidate_id)
+
+    def validate_candidate_failure(self, candidate_id):
+        return "not_visible"
+
+    def reidentify_candidate(self, reference_id):
+        candidate = self._candidate(reference_id)
+        if candidate is None:
+            return None
+        return {"reference_id": reference_id, "candidate": candidate, "similarity": 0.9,
+                "similarity_threshold": 0.72}
+
+
+def _outdoor_person_executor(flight, person, event_bus):
+    settings = _settings(
+        camera_horizontal_fov_deg=84.0, target_height_m=1.9, default_gimbal_pitch_deg=-45.0,
+        max_distance_m=20.0, geofence_radius_m=30.0, max_altitude_m=10.0, max_speed_m_s=2.0,
+    )
+    return HorusExecutor(flight, settings, perception=person, event_bus=event_bus, autostart=False)
+
+
+def _fly(flight, executor, ticks, dt=0.25):
+    """Tick the executor, moving the fake vehicle by each commanded horizontal velocity."""
+    for _ in range(ticks):
+        executor.tick()
+        command = flight.commands[-1] if flight.commands else None
+        pose = flight._telemetry.pose
+        if command is not None and command[0] == "velocity":
+            pose = Pose(pose.north_m + command[1] * dt, pose.east_m + command[2] * dt, pose.up_m)
+        flight._telemetry.pose = pose
+        flight._telemetry.pose_updated_monotonic = flight._telemetry.heading_updated_monotonic = time.monotonic()
+
+
+def test_approach_from_high_above_stops_where_the_target_stays_in_view():
+    # 6.15 m up with the camera at -45 deg, a 3 m standoff is unreachable: the person would leave
+    # the bottom of the frame long before. The standoff is raised to the closest range that keeps
+    # the person in view, reported as a clamp, and the approach arrives there without losing it.
+    flight = FakeFlight(Pose(0.0, 0.0, 6.15))
+    person = _StaticPerson(flight, north_m=9.0)
+    event_bus = EventBus()
+    executor = _outdoor_person_executor(flight, person, event_bus)
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 3.0}, ttl_s=60.0)["task_id"]
+
+    _fly(flight, executor, 120)
+
+    status = executor.get_task_status(task_id)
+    assert status["status"] == "succeeded"
+    assert status["requested_target"]["dist_m"] == 3.0
+    raised = status["executed_target"]["dist_m"]
+    assert 4.5 < raised < 7.0
+    assert "approach distance raised to" in status["clamp_reason"]
+    # It closed in (from 9 m) and stopped with the person's feet still inside the frame.
+    horizontal = person.north_m - flight._telemetry.pose.north_m
+    assert horizontal < 4.0
+    assert _logged_approach_box(horizontal_m=horizontal, altitude_m=6.15)[3] <= 480.0
+    events = asyncio.run(event_bus.wait(after_id=0, timeout_s=0.0))
+    assert not [event for event in events if event["kind"] == "target_lost"]
+    executor.close()
+
+
+def test_a_lost_target_is_closed_on_at_its_last_position_and_then_held():
+    # The person vanishes after the first validated frame. The vehicle flies toward where it was
+    # (not holding at 10 m, where a small far target may never be re-identified), stops at the
+    # standoff's horizontal distance from that spot, and resumes once it is re-identified there.
+    flight = FakeFlight(Pose(0.0, 0.0, 6.15))
+    person = _StaticPerson(flight, north_m=10.0)
+    executor = _outdoor_person_executor(flight, person, EventBus())
+    task_id = executor.submit_skill("approach", {"id": 7, "dist_m": 7.0}, ttl_s=60.0)["task_id"]
+    _fly(flight, executor, 4)  # guided/arm, then the first validated frames
+    seen_at = flight._telemetry.pose.north_m
+    person.visible = False
+
+    _fly(flight, executor, 80)
+
+    status = executor.get_task_status(task_id)
+    assert status["status"] == "running"
+    assert status["tracking"]["reacquired"] is False
+    stop_north = flight._telemetry.pose.north_m
+    assert stop_north > seen_at + 2.0  # it moved toward the last position instead of holding
+    # 7 m standoff from 6.15 m up at torso ~5.2 m below: about 4.7 m short of the person's spot.
+    assert 4.0 < person.north_m - stop_north < 5.5
+    assert status["tracking"]["closing_on_last_position_m"] <= 0.25
+    # Holding (no translation), facing the spot: the test box sits a few degrees left of centre.
+    assert flight.commands[-1][:4] == ("velocity", 0.0, 0.0, 0.0)
+    assert abs((flight.commands[-1][4] + 180.0) % 360.0 - 180.0) < 10.0
+
+    person.visible = True
+    _fly(flight, executor, 4)
+    status = executor.get_task_status(task_id)
+    assert status["tracking"]["reacquired"] is True
+    assert "closing_on_last_position_m" not in status["tracking"]
+    executor.close()
+
+
 def test_orbit_uses_the_ground_plane_range_at_the_logged_geometry():
     box = _logged_approach_box(horizontal_m=8.0, altitude_m=9.5)
     flight = FakeFlight(Pose(0.0, 0.0, 9.5))

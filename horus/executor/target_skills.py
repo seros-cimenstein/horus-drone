@@ -39,6 +39,9 @@ def step_target(executor: HorusExecutor, task: SkillTask) -> bool:
         task.skill, task.arguments["id"], math.degrees(bearing),
         "none" if distance is None else f"{distance:.2f}", geometry.range_source, facing_deg,
     )
+    if task.skill in ("approach", "follow"):
+        _raise_standoff_to_view_limit(executor, task, geometry)
+        _remember_target_position(task, geometry, telemetry, heading)
     if task.skill == "follow":
         desired = float(task.executed_target["dist_m"])
         if distance is None:
@@ -104,11 +107,59 @@ def _record_range(task: SkillTask, geometry: TargetGeometry) -> None:
         )
 
 
-def _target_geometry(executor: HorusExecutor, task: SkillTask) -> TargetGeometry | None:
-    """Geometry of the task's target, re-identifying it after a loss; None while held.
+def _raise_standoff_to_view_limit(
+    executor: HorusExecutor, task: SkillTask, geometry: TargetGeometry
+) -> None:
+    """Raise the standoff to the closest range that keeps the target inside the camera's view.
 
-    A missing or unvalidated frame holds (facing the last bearing) until the stored reference
-    re-identifies the target; the hold lasts at most the task TTL.
+    From high above (the GTA profile flies at 6 m or more), a standoff shorter than that range is
+    unreachable: closing on it would push the target out of the bottom of the frame and the skill
+    would lose it. The raised standoff is reported in ``clamp_reason`` like the other clamps.
+    """
+    limit = geometry.view_limit_m
+    desired = float(task.executed_target["dist_m"])
+    # Raise only past the arrival tolerance, so box jitter does not keep rewriting the standoff.
+    if limit is None or limit <= desired + executor.settings.arrival_tolerance_m:
+        return
+    raised = round(limit, 2)
+    task.executed_target["dist_m"] = raised
+    reason = (
+        f"{task.skill} distance raised to {raised:g} m: closer than that, the target leaves the "
+        f"camera's view from this height"
+    )
+    previous = [
+        part for part in (task.clamp_reason or "").split("; ")
+        if part and " distance raised to " not in part
+    ]
+    task.clamp_reason = "; ".join([*previous, reason])
+    logger.info("%s target=%s: %s", task.skill, task.arguments["id"], reason)
+
+
+def _remember_target_position(
+    task: SkillTask, geometry: TargetGeometry, telemetry: Any, heading: float
+) -> None:
+    """Store the target's ground position and the stop distance for closing on it if it is lost."""
+    pose = telemetry.pose
+    if geometry.horizontal_m is None or pose is None:
+        return
+    horizontal = float(geometry.horizontal_m)
+    task._last_target_ned = (
+        pose.north_m + horizontal * math.cos(heading),
+        pose.east_m + horizontal * math.sin(heading),
+    )
+    # The horizontal distance at which the (possibly raised) standoff is met: the range's vertical
+    # part is the same at any horizontal distance from this height.
+    desired = float(task.executed_target["dist_m"])
+    vertical_sq = max(0.0, float(geometry.range_m or 0.0) ** 2 - horizontal**2)
+    task._last_target_stop_m = math.sqrt(max(0.0, desired**2 - vertical_sq))
+
+
+def _target_geometry(executor: HorusExecutor, task: SkillTask) -> TargetGeometry | None:
+    """Geometry of the task's target, re-identifying it after a loss; None while it is lost.
+
+    While the target is not validated on the current frame (or not yet re-identified by the
+    stored reference), the vehicle closes on its last validated ground position and then holds
+    facing it (``_close_on_last_position``); this lasts at most the task TTL.
     """
     ranger = executor._ranger
     target_id = task.arguments["id"]
@@ -131,22 +182,24 @@ def _target_geometry(executor: HorusExecutor, task: SkillTask) -> TargetGeometry
         match = reidentify_target(executor.perception, task.tracking["reference_id"])
         if match is None:
             logger.debug(
-                "%s target %s not visible and not re-identified; holding", task.skill, target_id
+                "%s target %s not visible and not re-identified; closing on its last position",
+                task.skill,
+                target_id,
             )
-            _hold_facing_last_target(executor, task)
+            _close_on_last_position(executor, task)
             return None
         target_id, similarity, threshold, _ = match
         try:
             geometry = ranger.geometry(target_id, target_size_m, executor._telemetry())
         except TargetNotVisible:
-            _hold_facing_last_target(executor, task)
+            _close_on_last_position(executor, task)
             return None
     else:
         if task._target_lost_at is None:
             return geometry
         match = reidentify_target(executor.perception, task.tracking["reference_id"])
         if match is None:
-            _hold_facing_last_target(executor, task)
+            _close_on_last_position(executor, task)
             return None
         target_id, similarity, threshold, _ = match
         if target_id != task.arguments["id"]:
@@ -232,6 +285,7 @@ def _record_reacquisition(
     )
     task._target_lost_at = None
     task._target_lost_at_sim_s = None
+    task.tracking.pop("closing_on_last_position_m", None)
 
 
 def _turn_to(executor: HorusExecutor, yaw_deg: float | None) -> None:
@@ -246,6 +300,35 @@ def _hold_facing_last_target(executor: HorusExecutor, task: SkillTask) -> None:
     for as long as it stands there; finishing the turn brings that edge back into the frame.
     """
     _turn_to(executor, task._last_target_facing_deg)
+
+
+def _close_on_last_position(executor: HorusExecutor, task: SkillTask) -> None:
+    """While the target is lost, close on its last validated ground position, then hold there.
+
+    Holding in place leaves a target that dropped out of a small, distant view (a pedestrian near
+    the top of a downward-pitched frame) small and distant, so it may never be re-identified.
+    Closing at half speed toward where it was, facing that point, to the standoff's horizontal
+    distance, brings that spot into a larger, central part of the frame. Re-identification by the
+    stored reference still decides when the skill resumes; no other candidate is taken. Without a
+    ground-plane position (indoors, ranged by ToF or size) the vehicle holds as before.
+    """
+    last = task._last_target_ned
+    pose = executor._telemetry().pose
+    if last is None or pose is None:
+        _hold_facing_last_target(executor, task)
+        return
+    north, east = last[0] - pose.north_m, last[1] - pose.east_m
+    horizontal = math.hypot(north, east)
+    facing_deg = (
+        math.degrees(math.atan2(east, north)) % 360.0 if horizontal > 1e-6 else task._last_target_facing_deg
+    )
+    gap = horizontal - task._last_target_stop_m
+    task.tracking["closing_on_last_position_m"] = round(max(0.0, gap), 2)
+    if gap <= executor.settings.arrival_tolerance_m:
+        _turn_to(executor, facing_deg)
+        return
+    speed = min(executor.settings.max_speed_m_s * 0.5, gap * 0.5)
+    _send_velocity(executor, task, speed * north / horizontal, speed * east / horizontal, facing_deg)
 
 
 # Below this speed toward the target (after the geofence limit) an approach makes no progress.
