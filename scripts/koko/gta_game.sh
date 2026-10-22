@@ -7,12 +7,13 @@
 #
 # start refuses when Koko has less than GTA_MIN_AVAILABLE_MIB (default 9728: a HORUS mission in
 # GTA took available memory down by up to 8658 MiB, plus 1 GiB of headroom; gta/hook/README.md
-# "Memory"), while Gazebo runs (a HORUS campaign or simulation), or while the running Steam client is
-# not signed in (it would queue the launch and run it later, unguarded). On GTA's landing page it
-# presses Enter only after a pixel check shows the STORY tab selected and the ONLINE and GTA+ tabs
-# not: Enter on the ONLINE tab would start GTA Online. It sends no key while the hook's watchdog
-# reports the game thread stalled, and presses Enter again (up to 3 times) only if STORY is still
-# highlighted 30 s after the last press.
+# "Memory"; the refusal lists the largest processes), while Gazebo runs (a HORUS campaign or
+# simulation), while the running Steam client is not signed in (it would queue the launch and run it
+# later, unguarded), with no display output enabled, or while a screen lock covers the desktop.
+# On GTA's landing page it presses Enter only after a pixel check shows the STORY tab selected and
+# the ONLINE and GTA+ tabs not: Enter on the ONLINE tab would start GTA Online. It sends no key
+# while the hook's watchdog reports the game thread stalled, and presses Enter again (up to 3
+# times) only if STORY is still highlighted 30 s after the last press.
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -180,9 +181,22 @@ case "${action}" in
       echo "no display output is enabled on Koko (monitor off); GTA would run at 1 frame/s. Turn the screen on first." >&2
       exit 1
     fi
+    # A screen lock covers GTA's window: the STORY-tab check and the Enter press need it focused,
+    # and on 2026-10-22 the Rockstar launcher stalled at start-up under the lock until the 180 s
+    # timeout. dark-screenlock is the lock in use on Koko; Cinnamon's own screensaver is the other.
+    if xdotool search --onlyvisible --name '^dark-screenlock$' >/dev/null 2>&1 \
+      || XDG_RUNTIME_DIR="/run/user/$(id -u)" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
+        gdbus call --session --dest org.cinnamon.ScreenSaver --object-path /org/cinnamon/ScreenSaver \
+        --method org.cinnamon.ScreenSaver.GetActive 2>/dev/null | grep -q true; then
+      echo "Koko's screen is locked; GTA's window cannot be focused for the STORY tab. Unlock it first." >&2
+      exit 1
+    fi
     available="$(available_mib)"
     if (( available < min_available_mib )); then
-      echo "only ${available} MiB available, need ${min_available_mib} MiB; not starting GTA" >&2
+      echo "only ${available} MiB available, need ${min_available_mib} MiB; not starting GTA. Largest processes (RSS MiB):" >&2
+      # Steam's web helpers grow over a long session (2026-10-22: +550 MiB after one launch);
+      # restarting Steam frees them, but it then asks which account to sign in.
+      { ps -eo rss=,comm= --sort=-rss | head -6 | awk '{printf "  %6d %s\n", $1 / 1024, $2}' >&2; } || true
       exit 1
     fi
     [[ -f "${game}/ScriptHookV.dll" ]] || { echo "mods not installed; run scripts/koko/gta_mods.sh install" >&2; exit 1; }
