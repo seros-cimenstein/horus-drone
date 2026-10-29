@@ -16,14 +16,13 @@ from horus.tof_bridge import (
     sensor_ids,
 )
 from horus.tof_bridge.cli import (
-    PAYLOAD_SENSORS,
-    _PymavlinkSender,
     main,
     payload_ring_sensors,
     payload_sensors,
     payload_specs,
     payload_topic_root,
 )
+from horus.tof_bridge.mavlink_out import PAYLOAD_SENSORS, PymavlinkSender
 
 
 @dataclass
@@ -144,7 +143,7 @@ def test_multi_sensor_bridge_sends_all_topics_over_one_mavlink_link():
     link = _FakeLink()
     sensors = tuple(payload_sensors("horus_indoor", "horus_iris/horus_sensor_payload"))
     bridge = MultiSensorBridge(
-        _PymavlinkSender(link),
+        PymavlinkSender(link),
         sensors,
         rate_hz=20.0,
         monotonic=lambda: now[0],
@@ -361,7 +360,7 @@ def test_multi_sensor_bridge_fans_a_ring_scan_out_to_one_message_per_beam():
     ring, down = payload_ring_sensors(
         "horus_forest_p12648", "horus_iris/iris_with_gimbal/horus_sensor_payload")
     bridge = MultiSensorBridge(
-        _PymavlinkSender(link), (ring, down), rate_hz=20.0,
+        PymavlinkSender(link), (ring, down), rate_hz=20.0,
         monotonic=lambda: now[0], clock_ms=lambda: 1234)
     scan = _ring_scan((1.0,) * 8)
 
@@ -380,7 +379,7 @@ def test_cli_ring_layout_bridges_the_ring_and_the_down_topics(monkeypatch):
     from horus.tof_bridge import cli
 
     captured = {}
-    monkeypatch.setattr(cli, "_open_mavlink", lambda endpoint: object())
+    monkeypatch.setattr(cli, "open_mavlink", lambda endpoint: object())
     monkeypatch.setattr(
         cli, "_serve",
         lambda sensors, link, rate_hz, timeout: captured.setdefault("sensors", sensors))

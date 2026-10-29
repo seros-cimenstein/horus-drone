@@ -6,12 +6,6 @@ generated per-actor garment texture over each mesh's own clothing UVs, trouser t
 primitive accessories. This is simulation dressing, not a demographic model: labels such as
 ``skin_tone`` are rendering parameters for coverage reporting and are never given to the
 onboard runtime.
-
-``shirt_colour_attribute`` is the *design* expectation for HORUS's red/green/blue torso
-classifier: set only for solid, strongly saturated red/green/blue tops, otherwise None.
-``possible_shirt_colours`` lists every classifier colour that a garment could plausibly
-produce (e.g. orange may read as red, hi-vis lime as green), and is what uniqueness checks
-use. Neither is a camera measurement; campaigns record the measured attribute separately.
 """
 
 from __future__ import annotations
@@ -22,28 +16,26 @@ import random
 
 RGB = tuple[int, int, int]
 
-# name -> (rgb, classifier colours this fabric could plausibly read as)
-COLOURS: dict[str, tuple[RGB, tuple[str, ...]]] = {
-    "red": ((200, 28, 36), ("red",)), "crimson": ((165, 18, 34), ("red",)),
-    "scarlet": ((226, 52, 40), ("red",)), "orange": ((240, 108, 22), ("red",)),
-    "green": ((42, 150, 62), ("green",)), "kelly_green": ((70, 176, 50), ("green",)),
-    "lime": ((160, 214, 40), ("green",)), "blue": ((32, 74, 186), ("blue",)),
-    "royal_blue": ((44, 96, 210), ("blue",)), "sky_blue": ((110, 160, 214), ("blue",)),
-    "navy": ((26, 36, 72), ("blue",)), "teal": ((24, 120, 124), ("green", "blue")),
-    "maroon": ((110, 28, 40), ("red",)), "pink": ((222, 120, 150), ("red",)),
-    "purple": ((96, 52, 140), ("blue", "red")), "yellow": ((232, 204, 44), ()),
-    "mustard": ((196, 150, 40), ()), "olive": ((104, 108, 52), ("green",)),
-    "khaki": ((176, 160, 118), ()), "beige": ((210, 196, 168), ()),
-    "brown": ((104, 70, 44), ()), "white": ((236, 236, 232), ()),
-    "light_grey": ((184, 186, 186), ()), "grey": ((128, 130, 132), ()),
-    "charcoal": ((62, 64, 68), ()), "black": ((24, 24, 26), ()),
-    "hivis_lime": ((200, 238, 24), ("green",)), "hivis_orange": ((250, 110, 18), ("red",)),
-    "reflective_silver": ((200, 204, 206), ()), "woodland_green": ((74, 88, 50), ("green",)),
-    "woodland_brown": ((92, 70, 48), ()), "sand": ((196, 172, 128), ()),
-    "stone": ((150, 146, 132), ()),
+COLOURS: dict[str, RGB] = {
+    "red": (200, 28, 36), "crimson": (165, 18, 34),
+    "scarlet": (226, 52, 40), "orange": (240, 108, 22),
+    "green": (42, 150, 62), "kelly_green": (70, 176, 50),
+    "lime": (160, 214, 40), "blue": (32, 74, 186),
+    "royal_blue": (44, 96, 210), "sky_blue": (110, 160, 214),
+    "navy": (26, 36, 72), "teal": (24, 120, 124),
+    "maroon": (110, 28, 40), "pink": (222, 120, 150),
+    "purple": (96, 52, 140), "yellow": (232, 204, 44),
+    "mustard": (196, 150, 40), "olive": (104, 108, 52),
+    "khaki": (176, 160, 118), "beige": (210, 196, 168),
+    "brown": (104, 70, 44), "white": (236, 236, 232),
+    "light_grey": (184, 186, 186), "grey": (128, 130, 132),
+    "charcoal": (62, 64, 68), "black": (24, 24, 26),
+    "hivis_lime": (200, 238, 24), "hivis_orange": (250, 110, 18),
+    "reflective_silver": (200, 204, 206), "woodland_green": (74, 88, 50),
+    "woodland_brown": (92, 70, 48), "sand": (196, 172, 128),
+    "stone": (150, 146, 132),
 }
-PRIMARY = {"red": ("red", "crimson", "scarlet"), "green": ("green", "kelly_green"),
-           "blue": ("blue", "royal_blue")}
+SATURATED = ("red", "crimson", "scarlet", "green", "kelly_green", "blue", "royal_blue")
 NEUTRALS = ("white", "light_grey", "grey", "charcoal", "black", "beige", "khaki", "brown",
             "navy", "olive", "stone")
 ACCENTS = ("orange", "yellow", "mustard", "teal", "maroon", "pink", "purple", "sky_blue", "lime")
@@ -82,7 +74,7 @@ class Garment:
     scale_px: int = 12
 
     def rgb(self, index: int) -> RGB:
-        return COLOURS[self.colours[index % len(self.colours)]][0]
+        return COLOURS[self.colours[index % len(self.colours)]]
 
 
 @dataclass(frozen=True)
@@ -96,8 +88,6 @@ class Appearance:
     top: Garment
     trousers: str
     accessories: tuple[tuple[str, str], ...]
-    shirt_colour_attribute: str | None
-    possible_shirt_colours: tuple[str, ...]
 
     def envelope(self, posture: str) -> dict[str, float]:
         """Model-frame box that bounds the rendered body (x forward, z up) and its oracle points."""
@@ -135,57 +125,33 @@ class Appearance:
                          "scale_px": self.top.scale_px}
         record["accessories"] = [{"kind": kind, "colour": colour} for kind, colour in self.accessories]
         record["skin_multiplier"] = list(self.skin_multiplier)
-        record["possible_shirt_colours"] = list(self.possible_shirt_colours)
         record["body_source"] = BODIES[self.body]["source"]
         return record
 
 
-def _possible(colours: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(sorted({family for name in colours for family in COLOURS[name][1]}))
-
-
-def _hivis_pool(exclude: frozenset[str]) -> tuple[str, ...]:
-    """Hi-vis base colours that no classifier colour in ``exclude`` can absorb."""
-    pool = tuple(name for name in ("hivis_lime", "hivis_orange")
-                 if not set(COLOURS[name][1]) & exclude)
-    return pool or ("hivis_lime",)
-
-
-def sample_garment(rng: random.Random, *, nominal: str | None = None, outdoor: bool = False,
-                   exclude: frozenset[str] = frozenset(), style: str | None = None) -> Garment:
-    """A top garment; ``nominal`` forces a solid saturated primary; ``exclude`` bans colours
-    whose possible classifier readings intersect the given set."""
-    if nominal is not None:
-        return Garment("solid", (rng.choice(PRIMARY[nominal]),))
-
-    def pick(pool: tuple[str, ...]) -> str:
-        allowed = [name for name in pool if not set(COLOURS[name][1]) & exclude]
-        return rng.choice(allowed or list(NEUTRALS[:5]))
-
+def sample_garment(rng: random.Random, *, outdoor: bool = False, style: str | None = None) -> Garment:
+    """A top garment: a style and its colours."""
     style = style or rng.choices(TOP_STYLES, (5, 3, 3, 2, 2 if outdoor else 1, 2, 1, 2))[0]
-    everything = tuple(PRIMARY["red"] + PRIMARY["green"] + PRIMARY["blue"]) + NEUTRALS + ACCENTS
+    everything = SATURATED + NEUTRALS + ACCENTS
     if style in ("solid", "heather", "graphic"):
-        colours = (pick(everything if rng.random() < 0.5 else NEUTRALS),)
+        colours = (rng.choice(everything if rng.random() < 0.5 else NEUTRALS),)
         if style == "graphic":
-            colours += (pick(ACCENTS + NEUTRALS),)
+            colours += (rng.choice(ACCENTS + NEUTRALS),)
     elif style in ("stripes", "wide_band"):
-        colours = (pick(everything), pick(NEUTRALS))
+        colours = (rng.choice(everything), rng.choice(NEUTRALS))
     elif style == "plaid":
-        colours = (pick(("red", "navy", "green", "brown", "charcoal", "maroon", "blue")),
-                   pick(NEUTRALS), pick(("black", "white", "yellow", "navy")))
+        colours = (rng.choice(("red", "navy", "green", "brown", "charcoal", "maroon", "blue")),
+                   rng.choice(NEUTRALS), rng.choice(("black", "white", "yellow", "navy")))
     elif style == "camo":
-        palette = rng.choice((("woodland_green", "woodland_brown", "black", "olive"),
+        colours = rng.choice((("woodland_green", "woodland_brown", "black", "olive"),
                               ("sand", "khaki", "brown", "stone"), ("grey", "charcoal", "light_grey", "black")))
-        colours = tuple(name for name in palette if not set(COLOURS[name][1]) & exclude) or ("grey", "charcoal")
     else:  # hivis workwear: fluorescent base with retro-reflective bands
-        base = pick(("hivis_lime", "hivis_orange"))
-        colours = (base, "reflective_silver")
+        colours = (rng.choice(("hivis_lime", "hivis_orange")), "reflective_silver")
     return Garment(style, colours, rng.randint(6, 18))
 
 
-def sample_appearance(rng: random.Random, *, nominal: str | None = None, child: bool = False,
-                      outdoor: bool = False, hivis: bool = False,
-                      exclude: frozenset[str] = frozenset()) -> Appearance:
+def sample_appearance(rng: random.Random, *, child: bool = False, outdoor: bool = False,
+                      hivis: bool = False) -> Appearance:
     body = rng.choice(("male_a", "female_a"))
     if child:
         stature = rng.uniform(0.62, 0.74)
@@ -201,9 +167,9 @@ def sample_appearance(rng: random.Random, *, nominal: str | None = None, child: 
     bald = body == "male_a" and not child and rng.random() < 0.14
     hair_names = list(HAIR) if not child else ["black", "dark_brown", "brown", "blond", "auburn"]
     hair = None if bald else rng.choice(hair_names)
-    top = (Garment("hivis", (rng.choice(_hivis_pool(exclude)), "reflective_silver"),
+    top = (Garment("hivis", (rng.choice(("hivis_lime", "hivis_orange")), "reflective_silver"),
                    rng.randint(6, 18)) if hivis
-           else sample_garment(rng, nominal=nominal, outdoor=outdoor, exclude=exclude))
+           else sample_garment(rng, outdoor=outdoor))
     trousers = rng.choice(tuple(TROUSERS))
     accessories: list[tuple[str, str]] = []
     if rng.random() < (0.45 if outdoor else 0.25):
@@ -213,12 +179,8 @@ def sample_appearance(rng: random.Random, *, nominal: str | None = None, child: 
         accessories.append(("cap", rng.choice(NEUTRALS + ("orange", "yellow"))))
     elif head < (0.3 if outdoor else 0.16):
         accessories.append(("sun_hat", rng.choice(("khaki", "beige", "olive", "stone"))))
-    exclude_colours = [name for _kind, name in accessories if set(COLOURS[name][1]) & exclude]
-    if exclude_colours:
-        accessories = [(kind, "grey" if colour in exclude_colours else colour) for kind, colour in accessories]
-    nominal_colour = nominal if top.style == "solid" and nominal else None
     return Appearance(body, round(stature, 3), round(width, 3), tone, skin, hair, top, trousers,
-                      tuple(accessories), nominal_colour, _possible(top.colours))
+                      tuple(accessories))
 
 
 def _noise(ix: int, iy: int, seed: int) -> float:

@@ -33,75 +33,20 @@ BODY_SUBMESHES = {
                  ("casual_female-female_casualsuit02", "garment"),
                  ("casual_female-female_casualsuit01", "garment"), ("casual_female-shoes05", None)),
 }
-# shirt_colour_attribute records the classifier's measured result, not the
-# human-readable clothing label. None means the torso crop has no dominant
-# red/green/blue signal accepted by HORUS's shirt-colour heuristic.
-PERSON_ASSETS: dict[str, dict[str, str | None]] = {
-    "person_blue": {
-        "posture": "standing",
-        "clothing": "blue",
-        "shirt_colour_attribute": "blue",
-    },
-    "person_red": {
-        "posture": "standing",
-        "clothing": "red",
-        "shirt_colour_attribute": "red",
-    },
-    "person_green": {
-        "posture": "standing",
-        "clothing": "green",
-        "shirt_colour_attribute": "green",
-    },
-    "person_blue_kinematic": {
-        "posture": "standing",
-        "clothing": "blue",
-        "shirt_colour_attribute": "blue",
-    },
-    "person_red_kinematic": {
-        "posture": "standing",
-        "clothing": "red",
-        "shirt_colour_attribute": "red",
-    },
-    "person_green_kinematic": {
-        "posture": "standing",
-        "clothing": "green",
-        "shirt_colour_attribute": "green",
-    },
-    "person_orange": {
-        "posture": "standing",
-        "clothing": "orange",
-        "shirt_colour_attribute": "red",
-    },
-    "person_hivis": {
-        "posture": "standing",
-        "clothing": "hivis",
-        "shirt_colour_attribute": "green",
-    },
-    "person_dark": {
-        "posture": "standing",
-        "clothing": "dark",
-        "shirt_colour_attribute": "blue",
-    },
-    "person_sitting": {
-        "posture": "sitting",
-        "clothing": "blue",
-        "shirt_colour_attribute": "blue",
-    },
-    "person_laying_kinematic": {
-        "posture": "lying",
-        "clothing": "orange",
-        "shirt_colour_attribute": "red",
-    },
-    "person_collapsed_kinematic": {
-        "posture": "lying",
-        "clothing": "dark",
-        "shirt_colour_attribute": "blue",
-    },
-    "person_laying_dark_kinematic": {
-        "posture": "lying",
-        "clothing": "dark",
-        "shirt_colour_attribute": "red",
-    },
+PERSON_ASSETS: dict[str, dict[str, str]] = {
+    "person_blue": {"posture": "standing", "clothing": "blue"},
+    "person_red": {"posture": "standing", "clothing": "red"},
+    "person_green": {"posture": "standing", "clothing": "green"},
+    "person_blue_kinematic": {"posture": "standing", "clothing": "blue"},
+    "person_red_kinematic": {"posture": "standing", "clothing": "red"},
+    "person_green_kinematic": {"posture": "standing", "clothing": "green"},
+    "person_orange": {"posture": "standing", "clothing": "orange"},
+    "person_hivis": {"posture": "standing", "clothing": "hivis"},
+    "person_dark": {"posture": "standing", "clothing": "dark"},
+    "person_sitting": {"posture": "sitting", "clothing": "blue"},
+    "person_laying_kinematic": {"posture": "lying", "clothing": "orange"},
+    "person_collapsed_kinematic": {"posture": "lying", "clothing": "dark"},
+    "person_laying_dark_kinematic": {"posture": "lying", "clothing": "dark"},
 }
 
 # gz-common's ColladaLoader sets each SubMesh name from the COLLADA
@@ -127,12 +72,6 @@ SHARED_STANDING_MESH = "model://person_blue/meshes/standing.dae"
 SITTING_MESH = "model://horus_person_sitting_a/meshes/rescue_randy.dae"
 SITTING_MESH_SCALE = 1.6438
 SITTING_MESH_LIFT_M = -1.01533  # mesh base onto z=0 at scale 1
-# Measured with horus.perception.attributes.classify_shirt_colour on drone-view renders of
-# the generated seated actor (12 views, 3-5 m slant, -45/-70 deg pitch): the grey rescue
-# coverall torso is unsaturated, so the classifier reads None in 11/12 views; the hi-vis lime
-# trim read green once (0.96), so green stays a possible reading for uniqueness checks.
-SITTING_SHIRT_COLOUR: str | None = None
-SITTING_POSSIBLE_SHIRT_COLOURS = ("green",)
 SITTING_CLOTHING = "grey rescue coverall with hi-vis trim"
 
 # RGB values preserve the previous generator's shirt colors. Texture basenames
@@ -178,7 +117,7 @@ def _envelope_collision(envelope: dict[str, float]) -> str:
 def _person_model_sdf(
     model_name: str, shirt_rgb: tuple[int, int, int], texture_model: str, *, lying: bool = False
 ) -> str:
-    shirt_colour = rgba(shirt_rgb)
+    shirt_rgba = rgba(shirt_rgb)
     texture_uri = f"model://{texture_model}/materials/textures/tshirt_{texture_model}.png"
     # The mesh faces its -y axis; standing figures are turned to face +x (the driven heading).
     visual_pose = "0 0.963 0.252 1.5708 0 0" if lying else f"0 0 0.02 0.04 0 {FACING_YAW:.4f}"
@@ -187,8 +126,8 @@ def _person_model_sdf(
         material = ""
         if submesh == "v2_tshirt02":
             material = (
-                f"<material><ambient>{shirt_colour}</ambient>"
-                f"<diffuse>{shirt_colour}</diffuse><pbr><metal><metalness>0.0</metalness>"
+                f"<material><ambient>{shirt_rgba}</ambient>"
+                f"<diffuse>{shirt_rgba}</diffuse><pbr><metal><metalness>0.0</metalness>"
                 f"<albedo_map>{texture_uri}</albedo_map></metal></pbr></material>"
             )
         visuals.append(
@@ -292,7 +231,7 @@ def write_person_models(model_dir: Path) -> None:
     standing = [(name, rgb, label, False) for name, (rgb, label) in _PERSON_VARIANTS.items()]
     # Outdoor emergency figures share the lying mesh placement and contact geometry.
     lying = [
-        ("person_laying_kinematic", (250, 92, 14), "orange missing hiker", True),
+        ("person_laying_kinematic", (250, 92, 14), "orange lying person", True),
         ("person_collapsed_kinematic", (27, 38, 52), "dark-clothed collapsed person", True),
         ("person_laying_dark_kinematic", (27, 38, 52), "dark-clothed lying person", True),
     ]
@@ -350,7 +289,7 @@ def _accessories(appearance: Appearance, height: float, width: float, *, lying: 
     parts = []
     head_x = BODIES[appearance.body]["head_forward_m"] * width
     for index, (kind, colour_name) in enumerate(appearance.accessories):
-        rgb = COLOURS[colour_name][0]
+        rgb = COLOURS[colour_name]
         if kind == "backpack":
             x = BODIES[appearance.body]["forward_m"][0] * width - 0.09
             geometry = f"<box><size>{floats(0.18, 0.32 * width, 0.42 * height / 1.8)}</size></box>"

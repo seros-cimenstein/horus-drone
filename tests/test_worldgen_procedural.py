@@ -19,33 +19,23 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sim.campaign.civilian_spec import load_scenario
+from sim.scripts.civilian_spec import load_scenario
 from sim.scripts.civilian_life import MotionEngine
 from sim.worldgen import build_world
 from sim.worldgen.assets import ASSETS
 from sim.worldgen.geometry import CollisionWorld, load_collisions
 from sim.worldgen.layout import distance_to_paths
 from sim.worldgen.people import PERSON_ASSETS
-from sim.worldgen.plan import (
-    Camera,
-    Ground,
-    cruise_legs,
-    follow_mission,
-    legs_clearance,
-    person_point,
-    plan_follow,
-    plan_vantage,
-)
+from sim.worldgen.plan import Ground
 
 ROOT = Path(__file__).resolve().parents[1]
 SEEDS = range(1, int(os.environ.get("HORUS_WORLDGEN_SEEDS", "8")) + 1)
 WORLDS = [(kind, seed) for kind in ("forest", "urban") for seed in SEEDS]
 CANONICAL = [("forest", None), ("urban", None)]
-# Canonical worlds keep the 60 m actor inset and 60 m cruise legs they shipped with; generated
-# worlds carry their flight profile's limits in the manifest (actor_geofence_m / flight.*).
-GEOFENCE_INSET = 60.0
+# Canonical worlds keep the 60 m actor inset they shipped with; generated worlds carry their
+# flight profile's actor inset in the manifest (actor_geofence_m).
+ACTOR_INSET_M = 60.0
 RTL_ALT_M = 45.0  # config/ardupilot/outdoor.parm
-ROLES_OF_INTEREST = {"forest": ("missing_hiker", "injured"), "urban": ("red_shirt", "collapsed")}
 
 
 def _profile(kind: str) -> dict:
@@ -54,18 +44,15 @@ def _profile(kind: str) -> dict:
 
 
 PROFILES = {kind: _profile(kind) for kind in ("forest", "urban")}
-MAX_ALTITUDE = {kind: float(PROFILES[kind]["max_altitude_m"]) for kind in PROFILES}
+# The generators' transit-altitude ceilings (sim/worldgen/*: checked_transit_altitude), below
+# ArduPilot's outdoor FENCE_ALT_MAX 55 (config/ardupilot/outdoor.parm).
+MAX_ALTITUDE = {"forest": 36.0, "urban": 48.0}
 TRANSIT_MIN_M = {kind: float(PROFILES[kind]["cruise_min_altitude_m"]) for kind in PROFILES}
-TREE_TOP_LIMIT_M = 23.0  # config comment: forest trees stay below 23 m (profile caps 36 m)
-
-
-def _vantage_bounds(manifest: dict) -> float:
-    flight = manifest.get("flight") or {}
-    return float(flight.get("vantage_bounds_m", GEOFENCE_INSET))
+TREE_TOP_LIMIT_M = 23.0  # config comment: forest trees stay below 23 m (transit ceiling 36 m)
 
 
 def _actor_inset(manifest: dict) -> float:
-    return float(manifest.get("actor_geofence_m", GEOFENCE_INSET))
+    return float(manifest.get("actor_geofence_m", ACTOR_INSET_M))
 
 
 def _manifest_bounds_radius(manifest: dict) -> float:
@@ -146,7 +133,6 @@ def test_generation_is_deterministic_and_seed_sensitive(kind):
     again = build_world(kind, 11, procedural=True, textures=False)
     other = build_world(kind, 12, procedural=True, textures=False)
     assert (first.sdf, first.scenario_yaml, first.manifest) == (again.sdf, again.scenario_yaml, again.manifest)
-    assert first.manifest["follow"]["route"] != other.manifest["follow"]["route"]
     assert [p["position"] for p in first.manifest["people"]] != [p["position"] for p in other.manifest["people"]]
 
 
@@ -166,7 +152,6 @@ def test_sdf_models_scenario_and_manifest_agree(worlds, kind, seed):
     assert manifest_people == agents, f"{w.label}: manifest/scenario agent sets differ"
     for person in w.manifest["people"]:
         assert person["asset"] in PERSON_ASSETS, f"{w.label}: {person['model']} uses unknown asset"
-    assert w.manifest["follow"]["group"] in {agent.group for agent in w.scenario.agents}
 
 
 @_all(WORLDS + CANONICAL)
@@ -183,7 +168,7 @@ def test_home_pad_is_clear_and_transit_altitude_is_safe(worlds, kind, seed):
 
 
 @_all(WORLDS + CANONICAL)
-def test_people_and_vehicles_stay_inside_the_geofence_and_off_obstacles(worlds, kind, seed):
+def test_people_and_vehicles_stay_inside_the_actor_area_and_off_obstacles(worlds, kind, seed):
     w = worlds(kind, seed)
     engine = MotionEngine(w.scenario, groups=sorted({agent.group for agent in w.scenario.agents}))
     rng = random.Random(seed or 0)
@@ -202,154 +187,6 @@ def test_people_and_vehicles_stay_inside_the_geofence_and_off_obstacles(worlds, 
                 assert abs(z - w.ground.height(x, y)) <= 0.05, f"{w.label}: {model} floats at t={t:.1f}"
                 clearance, blocker = w.world.clearance((x, y, z + 1.0))
                 assert clearance >= 0.1, f"{w.label}: {model} walks through {blocker.name} at t={t:.1f}"
-
-
-@_all(WORLDS + CANONICAL)
-def test_every_person_of_interest_has_a_safe_line_of_sight_vantage(worlds, kind, seed):
-    w = worlds(kind, seed)
-    camera = Camera()
-    transit = w.manifest["transit_altitude_m"]
-    bounds = _vantage_bounds(w.manifest)
-    rng = random.Random(seed or 0)
-    for person in w.manifest["people"]:
-        if person["role"] not in ROLES_OF_INTEREST[kind]:
-            continue
-        posture = PERSON_ASSETS[person["asset"]]["posture"]
-        target = person_point(person, w.ground, posture)
-        vantage = plan_vantage(w.world, w.ground, camera, person["model"], target, rng,
-                               transit_alt=transit, bounds=bounds)
-        assert vantage is not None, f"{w.label}: no safe vantage sees {person['model']}"
-        legs = cruise_legs((0.0, 0.0, 0.0), vantage.eye, vantage.heading_deg, transit)
-        assert legs_clearance(w.world, (0.0, 0.0, 3.5), legs) >= 1.5, f"{w.label}: route to {person['model']}"
-        assert camera.in_frame(vantage.eye, vantage.yaw_rad, target)
-
-
-@_all([("forest", seed) for seed in [None] + list(SEEDS)])
-def test_forest_clearing_scan_rectangle_contains_a_person_of_interest(worlds, kind, seed):
-    # The campaign scan flies the largest clearing rectangle and scores detection coverage
-    # over the people inside it; a forest world whose meadow is empty can never score.
-    from sim.worldgen.validation import clearing_scan_rectangle
-
-    w = worlds(kind, seed)
-    rect = clearing_scan_rectangle(w.manifest["areas"])
-    assert rect is not None, f"{w.label}: no clearing scan rectangle"
-    x0, x1, y0, y1 = rect
-    inside = [person for person in w.manifest["people"]
-              if x0 <= person["position"][0] <= x1 and y0 <= person["position"][1] <= y1]
-    assert any(person["role"] in ROLES_OF_INTEREST["forest"] for person in inside), \
-        f"{w.label}: clearing {rect} holds {[person['model'] for person in inside]}"
-
-
-@_all(WORLDS)
-def test_follow_target_is_selectable_occluded_and_safe_to_follow(worlds, kind, seed):
-    w = worlds(kind, seed)
-    follow = w.manifest["follow"]
-    plan = plan_follow(w.world, w.ground, w.manifest)
-    assert plan.column_clearance_m >= 1.5, f"{w.label}: stage column clearance {plan.column_clearance_m:.2f}"
-    assert plan.lane_clearance_m >= 1.5, f"{w.label}: follow lane clearance {plan.lane_clearance_m:.2f}"
-    assert 2.0 <= plan.occluded_s <= 5.0, f"{w.label}: longest occlusion {plan.occluded_s} s"
-    assert max(abs(plan.stage[0]), abs(plan.stage[1])) <= _actor_inset(w.manifest)
-    camera = Camera()
-    people = {p["model"]: p for p in w.manifest["people"]}
-    target = people[follow["model"]]
-    target_point = person_point(target, w.ground, "standing")
-    assert camera.in_frame(plan.stage, plan.yaw_rad, target_point, margin_px=20.0)
-
-    def reported_colours(asset: str) -> set[str]:
-        """Every colour the detector could report for this person's top (orange reads red)."""
-        record = PERSON_ASSETS[asset]
-        if record.get("possible_shirt_colours"):
-            return set(record["possible_shirt_colours"])
-        return {record["shirt_colour_attribute"]} if record["shirt_colour_attribute"] else set()
-
-    target_reads = reported_colours(target["asset"])
-    assert follow["shirt_colour_attribute"] in target_reads
-    for other in people.values():
-        if other["model"] == target["model"]:
-            continue
-        posture = PERSON_ASSETS[other["asset"]]["posture"]
-        point = person_point(other, w.ground, posture)
-        if (reported_colours(other["asset"]) & target_reads
-                and camera.in_frame(plan.stage, plan.yaw_rad, point)
-                and w.world.blocking(plan.stage, point) is None):
-            pytest.fail(f"{w.label}: {other['model']} also reports {follow['shirt_colour_attribute']} at the stage")
-
-
-@_all(WORLDS + CANONICAL)
-def test_generated_follow_mission_is_runnable(worlds, kind, seed):
-    w = worlds(kind, seed)
-    plan = plan_follow(w.world, w.ground, w.manifest)
-    repo_root = ROOT if seed is None else w.manifest_path.parents[1]
-    mission_path = repo_root / "runs" / "campaign" / "check" / "follow.yaml"
-    mission = follow_mission(w.manifest, plan, manifest_path=w.manifest_path, mission_path=mission_path,
-                             repo_root=repo_root, trace_path="runs/trace.jsonl", output_dir=".")
-    loaded = yaml.safe_load(yaml.safe_dump(mission, sort_keys=False))
-    driver = (mission_path.parent / loaded["driver"]).resolve()
-    assert driver == (repo_root / "sim" / "scripts" / "civilian_life.py").resolve()
-    args = loaded["driver_args"]
-    assert (repo_root / args[args.index("--scenario") + 1]).resolve() == w.scenario_path.resolve()
-    assert any(agent.group == args[args.index("--group") + 1] for agent in w.scenario.agents)
-    tools = [step["tool"] for step in loaded["steps"] if "tool" in step]
-    assert set(tools) <= {"take_off", "goto", "follow"}
-    bounds = _vantage_bounds(w.manifest)
-    for step in loaded["steps"]:
-        if step.get("tool") == "goto":
-            pose = step["arguments"]["pose"]
-            assert max(abs(pose["north_m"]), abs(pose["east_m"])) <= bounds
-            assert pose["up_m"] <= MAX_ALTITUDE[kind]
-
-
-@_all([(k, s) for k, s in WORLDS if k == "urban"])
-def test_urban_red_shirt_is_unique_in_its_crowd(worlds, kind, seed):
-    w = worlds(kind, seed)
-    people = w.manifest["people"]
-    red = next(p for p in people if p["role"] == "red_shirt")
-
-    def reads_red(person: dict) -> bool:
-        """True when the detector could report this person's top as red (orange reads red)."""
-        record = PERSON_ASSETS[person["asset"]]
-        return "red" in (set(record["possible_shirt_colours"])
-                         if record.get("possible_shirt_colours")
-                         else {record["shirt_colour_attribute"]} if record["shirt_colour_attribute"] else set())
-
-    near = [p["model"] for p in people if reads_red(p)
-            and math.dist(p["position"], red["position"]) <= 15.0]
-    assert near == [red["model"]], f"{w.label}: red clothing near the target: {near}"
-
-
-@_all([("forest", seed) for seed in [None] + list(SEEDS)])
-def test_forest_posture_targets_are_observable(worlds, kind, seed):
-    """Every posture the campaign targets needs a person the detector can actually see.
-
-    The approach/orbit tests pick a lying or sitting person; the canopy-hidden missing hiker
-    stays for the search mission, so a second prone casualty must sit in the open with a
-    good-slant vantage (recall is poor beyond ~12 m).
-    """
-    import random as _random
-
-    from sim.worldgen.plan import Camera, column_clearance, person_point, plan_vantage
-
-    w = worlds(kind, seed)
-    camera = Camera()
-    transit = w.manifest["transit_altitude_m"]
-    bounds = _vantage_bounds(w.manifest)
-    for posture in ("lying", "sitting"):
-        people = [person for person in w.manifest["people"] if person["posture"] == posture]
-        assert people, f"{w.label}: no {posture} person"
-        observable = []
-        for person in people:
-            point = person_point(person, w.ground, posture)
-            if column_clearance(w.world, point[0], point[1], point[2] + 0.5, transit, 0.6) < 2.0:
-                continue
-            vantage = plan_vantage(w.world, w.ground, camera, person["model"], point,
-                                   _random.Random(seed or 0), transit_alt=transit, bounds=bounds)
-            if vantage is not None and vantage.slant_m <= 12.0:
-                observable.append(person["model"])
-        assert observable, f"{w.label}: no observable {posture} person (open sky + <= 12 m slant)"
-
-    # The search mission keeps its canopy-hidden hiker alongside the open casualty.
-    roles = {person["role"] for person in w.manifest["people"]}
-    assert {"missing_hiker", "casualty"} <= roles, f"{w.label}: {sorted(roles)}"
 
 
 def _scenery_tile_visuals(w: World) -> list[dict]:
@@ -407,18 +244,12 @@ def test_procedural_forest_scenery_matches_the_design(worlds, kind, seed):
     assert len(trails) >= 5 and len(clearings) >= 4, f"{w.label}: network {len(trails)}/{len(clearings)}"
     assert 1 <= len(w.manifest["areas"]["camps"]) <= 3, f"{w.label}: camps"
 
-    # Trees keep their tops under the 23 m cap and stay out of trails/clearings, except the
-    # two designated mission pieces: the missing hiker's canopy and the follow occluder.
-    missing = next(person for person in w.manifest["people"] if person["role"] == "missing_hiker")
-    occluder = w.manifest["follow"]["occluder_xy"]
+    # Trees keep their tops under the 23 m cap and stay out of trails/clearings.
     trees = _tree_instances(w)
     assert len(trees) >= 1500, f"{w.label}: {len(trees)} tree visuals"
     for tree in trees:
         top = tree["z"] + ASSETS[tree["asset"]].native_height_m * tree["instance_scale"]
         assert top <= TREE_TOP_LIMIT_M, f"{w.label}: {tree['name']} top {top:.2f} m"
-        if (math.hypot(tree["x"] - missing["position"][0], tree["y"] - missing["position"][1]) < 9.0
-                or math.hypot(tree["x"] - occluder[0], tree["y"] - occluder[1]) < 8.0):
-            continue
         sapling = tree["instance_scale"] < 0.5
         limit = 2.5 if sapling else 6.0
         distance = distance_to_paths((tree["x"], tree["y"]), trails)
@@ -438,24 +269,8 @@ def test_procedural_forest_scenery_matches_the_design(worlds, kind, seed):
 
 
 @_all([("forest", seed) for seed in SEEDS])
-def test_procedural_forest_mission_content_is_spread(worlds, kind, seed):
-    """Mission targets live across the map, not next to home."""
+def test_procedural_forest_hikers_are_spread_across_quadrants(worlds, kind, seed):
     w = worlds(kind, seed)
-    people = {person["role"]: person for person in w.manifest["people"]}
-    missing = people["missing_hiker"]
-    trails = w.manifest["areas"]["trails"]
-    distance_home = math.hypot(*missing["position"])
-    assert distance_home >= 150.0, f"{w.label}: missing hiker {distance_home:.1f} m from home"
-    off_trail = distance_to_paths(missing["position"], trails)
-    assert 6.0 <= off_trail <= 15.0, f"{w.label}: missing hiker {off_trail:.2f} m from a trail"
-
-    clearing = w.manifest["areas"]["clearing"]
-    assert math.hypot(*clearing["center"]) >= 120.0, f"{w.label}: mission clearing too close to home"
-    for role in ("injured", "casualty"):
-        assert math.hypot(*people[role]["position"]) >= 120.0, f"{w.label}: {role} near home"
-
-    follow_start = w.manifest["follow"]["route"][0]
-    assert math.hypot(*follow_start) >= 100.0, f"{w.label}: follow route starts {math.hypot(*follow_start):.1f} m out"
     quadrants = set()
     for person in w.manifest["people"]:
         if person["role"] == "hiker" and person.get("route"):
@@ -527,34 +342,19 @@ def test_procedural_urban_building_tops_stay_within_the_cap(worlds, kind, seed):
 
 
 @_all([("urban", seed) for seed in SEEDS])
-def test_procedural_urban_mission_content_is_spread_across_the_map(worlds, kind, seed):
-    """Red shirt, casualty and follow route sit far from home; sites cover the map."""
+def test_procedural_urban_open_spaces_host_their_people(worlds, kind, seed):
+    """Plazas and parks exist, and the standing crowd stays inside its plaza."""
     w = worlds(kind, seed)
-    people = {person["role"]: person for person in w.manifest["people"]}
-    for role, minimum in (("red_shirt", 150.0), ("collapsed", 120.0)):
-        distance = math.hypot(*people[role]["position"])
-        assert distance >= minimum, f"{w.label}: {role} {distance:.1f} m from home"
-    follow_start = w.manifest["follow"]["route"][0]
-    assert math.hypot(*follow_start) >= 100.0, \
-        f"{w.label}: follow route starts {math.hypot(*follow_start):.1f} m out"
-
-    sites = {site["name"]: site for site in w.manifest["sites"]}
-    assert {"home_plaza", "mission_plaza", "mission_park", "downtown", "bus_stop", "collapse",
-            "follow_occluder"} <= set(sites), f"{w.label}: sites {sorted(sites)}"
-    assert math.hypot(*sites["mission_plaza"]["center"]) >= 150.0
-    quadrants = {(site["center"][0] >= 0, site["center"][1] >= 0) for site in w.manifest["sites"]}
-    assert len(quadrants) >= 3, f"{w.label}: mission sites only in {quadrants}"
-
     areas = w.manifest["areas"]
     assert len(areas["plazas"]) >= 2, f"{w.label}: {len(areas['plazas'])} plazas"
     assert 3 <= len(areas["parks"]) <= 6, f"{w.label}: {len(areas['parks'])} parks"
-    mission_plaza = next(plaza for plaza in areas["plazas"] if plaza["mission"])
+    crowd_plaza = next(plaza for plaza in areas["plazas"] if plaza["crowd"])
     for person in w.manifest["people"]:
-        if person["role"] in ("plaza_crowd", "red_shirt"):
-            dx = abs(person["position"][0] - mission_plaza["center"][0])
-            dy = abs(person["position"][1] - mission_plaza["center"][1])
-            assert dx <= mission_plaza["half_size"] and dy <= mission_plaza["half_size"], \
-                f"{w.label}: {person['model']} outside the mission plaza"
+        if person["role"] == "plaza_crowd":
+            dx = abs(person["position"][0] - crowd_plaza["center"][0])
+            dy = abs(person["position"][1] - crowd_plaza["center"][1])
+            assert dx <= crowd_plaza["half_size"] and dy <= crowd_plaza["half_size"], \
+                f"{w.label}: {person['model']} outside the crowd plaza"
 
 
 @_all([("urban", seed) for seed in SEEDS])
@@ -572,7 +372,6 @@ def test_procedural_urban_traffic_is_mesh_vehicles_only(worlds, kind, seed):
     assert any(vehicle_type(name).heavy for name in types), f"{w.label}: no bus/truck loop"
     areas = w.manifest["areas"]
     assert areas["roads"]["x"] and areas["roads"]["y"]
-    assert w.manifest["follow"]["occluder_models_or_collisions"], f"{w.label}: no occluder models"
 
 
 @_all([("urban", seed) for seed in SEEDS])
@@ -591,7 +390,6 @@ def test_procedural_urban_scenery_matches_the_design(worlds, kind, seed):
     benches = [name for name in names if name.startswith("bench_a")]
     assert len(benches) >= 4, f"{w.label}: {len(benches)} benches"
     assert any(name.startswith("bus_stop_shelter") for name in names), f"{w.label}: no bus shelter"
-    assert any(name.startswith("follow_shelter") for name in names), f"{w.label}: no follow shelter"
 
 
 @_all([(kind, seed) for kind in ("forest", "urban") for seed in SEEDS])

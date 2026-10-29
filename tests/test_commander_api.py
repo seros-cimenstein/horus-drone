@@ -15,7 +15,7 @@ from horus.config import CommanderSettings
 
 _MCP_TOOLS = [
     SimpleNamespace(name=name, description=f"{name} tool", inputSchema={"type": "object"})
-    for name in ("get_state", "wait_events", "hold")
+    for name in ("get_state", "wait_events", "wait_for_event", "hold")
 ]
 
 
@@ -158,7 +158,7 @@ def test_api_backend_offers_only_the_tools_claude_code_allows(monkeypatch, provi
     tools = requests[0]["tools"]
     names = [tool["function"]["name"] if provider == "openai" else tool["name"] for tool in tools]
     assert "wait_events" in MODEL_DISALLOWED_TOOLS
-    assert names == ["get_state", "hold"]
+    assert names == ["get_state", "wait_for_event", "hold"]
 
 
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])

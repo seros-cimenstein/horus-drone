@@ -4,7 +4,7 @@ import math
 from pathlib import Path
 from xml.etree import ElementTree
 
-from horus.tof_bridge.cli import PAYLOAD_SENSORS
+from horus.tof_bridge.mavlink_out import PAYLOAD_SENSORS
 from sim.scripts.derive_procedural_airframe import SENSOR_RATE_HZ
 
 ROOT = Path(__file__).parents[1]

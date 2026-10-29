@@ -24,56 +24,77 @@ class FlightSettings:
     global_origin_latitude_deg: float = -35.363262
     global_origin_longitude_deg: float = 149.165237
     global_origin_altitude_m: float = 584.0
-    # ArduPilot servo mounts (MNTx_TYPE 1, the shipped sim airframe) report their servo demand in
-    # GIMBAL_DEVICE_ATTITUDE_STATUS: body-frame roll/pitch that cancel the vehicle lean, although
-    # the message flags claim horizon-locked roll/pitch (AP_Mount_Servo::get_attitude_quaternion,
-    # Copter-4.7.1). HORUS then composes the vehicle attitude back in. Set False for a gimbal
-    # whose reported roll/pitch are horizon-relative as the flags state.
-    gimbal_status_body_frame: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class GimbalSettings:
+    """The camera gimbal, driven directly by HORUS over the MAVLink gimbal-device protocol
+    (Gimbal Protocol v2 device messages); the autopilot takes no part in it.
+
+    ``connection`` is the gimbal device's MAVLink endpoint (pymavlink form, e.g. ``udpin:...`` or
+    ``/dev/ttyS1``); None means a fixed camera, so ``look`` is refused and geometry uses
+    ``executor.default_gimbal_pitch_deg``. HORUS speaks as the gimbal manager
+    (``source_system``/``source_component``) to the device ``device_system``/``device_component``
+    and accepts status only from it.
+    """
+
+    connection: str | None = None
+    baud: int = 115200
+    source_system: int = 1
+    # MAV_COMP_ID_ONBOARD_COMPUTER: the drone board is the gimbal manager.
+    source_component: int = 191
+    device_system: int = 1
+    # MAV_COMP_ID_GIMBAL.
+    device_component: int = 154
+    # Earth-frame pitch (negative down) and nose-relative yaw the device accepts.
+    pitch_min_deg: float = -90.0
+    pitch_max_deg: float = 45.0
+    yaw_limit_deg: float = 160.0
+    # GIMBAL_DEVICE_ATTITUDE_STATUS rate requested from the device.
+    status_rate_hz: float = 20.0
+    # True for a device whose reported roll/pitch are relative to the vehicle body although its
+    # flags claim horizon lock; HORUS then composes the vehicle lean back in.
+    status_body_frame: bool = False
+
+    def __post_init__(self) -> None:
+        if self.connection is not None and (not isinstance(self.connection, str) or not self.connection.strip()):
+            raise ValueError("gimbal connection must be a non-empty string or null")
+        for name in ("source_system", "source_component", "device_system", "device_component"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 255:
+                raise ValueError(f"gimbal {name} must be an integer from 1 to 255")
+        for name in ("pitch_min_deg", "pitch_max_deg", "yaw_limit_deg", "status_rate_hz"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"gimbal {name} must be a finite number")
+        if not -90.0 <= self.pitch_min_deg < self.pitch_max_deg <= 90.0:
+            raise ValueError("gimbal pitch limits must satisfy -90 <= pitch_min_deg < pitch_max_deg <= 90")
+        if not 0.0 <= self.yaw_limit_deg <= 180.0:
+            raise ValueError("gimbal yaw_limit_deg must be between 0 and 180")
+        if self.status_rate_hz <= 0.0:
+            raise ValueError("gimbal status_rate_hz must be positive")
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutorSettings:
     control_hz: float = 15.0
     command_ttl_s: float = 30.0
-    max_speed_m_s: float = 1.0
-    # Altitude-gated cruise speed for open transit legs: the horizontal speed limit is
+    # Go-to controller speeds. GUIDED velocity setpoints bypass ArduPilot's waypoint speed
+    # parameters, so the controller flies its legs at these speeds; they are not safety limits.
+    speed_m_s: float = 1.0
+    # Altitude-gated cruise speed for open transit legs: the horizontal speed is
     # ``cruise_speed_m_s`` while both the current altitude above home and the commanded target
-    # altitude are at/above ``cruise_min_altitude_m``, and ``max_speed_m_s`` anywhere below it.
-    # None (or 0) disables the gate and keeps every leg at ``max_speed_m_s``.
+    # altitude are at/above ``cruise_min_altitude_m``, and ``speed_m_s`` anywhere below it.
+    # None (or 0) disables the gate and keeps every leg at ``speed_m_s``.
     cruise_speed_m_s: float | None = None
     cruise_min_altitude_m: float | None = None
-    max_vertical_speed_m_s: float = 0.5
-    max_distance_m: float = 8.0
-    min_altitude_m: float = 0.5
-    max_altitude_m: float = 5.0
-    # Circular fence around home, used only without a polygon: setting both is rejected.
-    geofence_radius_m: float = 8.0
-    # Vertices are [north_m, east_m] = [Gazebo y, Gazebo x].
-    geofence_polygon_ned: tuple[tuple[float, float], ...] | None = None
-    geofence_margin_m: float = 0.0
+    vertical_speed_m_s: float = 0.5
+    # Default rate of the ``turn`` skill's turn in place (deg/s, autopilot time) when the
+    # commander gives none; ArduPilot's yaw-rate limits bound any rate.
+    turn_rate_deg_s: float = 30.0
     arrival_tolerance_m: float = 0.25
-    follow_distance_m: float = 2.0
-    target_width_m: float | None = None
-    # Known person height (m) for monocular range from the detection box height; applied only to
-    # person targets (person label, shirt-colour attribute, or remembered person label). Real
-    # deployments should use the expected person height (~1.7 m); the simulated people (MakeHuman
-    # mesh) are 1.90 m tall, so the shipped sim profiles set 1.9.
-    target_height_m: float | None = None
-    target_match_threshold: float = 0.72
     camera_horizontal_fov_deg: float = 114.59155902616465
     default_gimbal_pitch_deg: float = 0.0
-    # Ground-plane monocular range: the ray through the box's ground-contact row is intersected
-    # with the ground plane. Below this ray depression a small camera-pitch error dominates the
-    # intersection, so the estimate is refused instead of returned (10 deg keeps it bounded).
-    min_ground_range_depression_deg: float = 10.0
-    # The payload's forward lidars (sim/models/horus_sensor_payload/model.sdf) are single-ray
-    # beams mounted level with the airframe: zero vertical field of view, so they only measure
-    # what sits on the vehicle's horizontal plane at flight altitude. A target whose ray leaves
-    # that plane by more than this half-angle (0 deg plus a margin for attitude jitter) must not
-    # use the forward ToF: outdoors at -45 deg gimbal pitch the beam flies over the person and
-    # returns whatever is behind it.
-    forward_tof_vertical_half_fov_deg: float = 5.0
     link_loss_rth_delay_s: float = 30.0
     # Wall-clock freshness limit for pose, heading, forward-ToF and camera-frame samples driving
     # motion. Real flight keeps the default; the flight link requests the control messages at
@@ -92,8 +113,8 @@ class ExecutorSettings:
         _number(self, "control_hz", 10.0, 20.0)
         for name in (
             "command_ttl_s",
-            "max_speed_m_s",
-            "max_vertical_speed_m_s",
+            "speed_m_s",
+            "vertical_speed_m_s",
             "arrival_tolerance_m",
             "link_loss_rth_delay_s",
             "precision_landing_stall_s",
@@ -102,17 +123,9 @@ class ExecutorSettings:
             "telemetry_max_age_s",
         ):
             _number(self, name, 0.0, low_open=True)
-        _number(self, "target_width_m", 0.0, low_open=True, optional=True)
-        _number(self, "geofence_radius_m", 0.5)
-        _number(self, "max_distance_m", 0.5)
-        _number(self, "min_altitude_m", 0.0)
-        _number(self, "max_altitude_m", self.min_altitude_m)
         _number(self, "camera_horizontal_fov_deg", 1.0, 179.0)
-        _number(self, "target_match_threshold", 0.0, 1.0)
-        margin = _number(self, "geofence_margin_m", 0.0)
         _number(self, "default_gimbal_pitch_deg", -90.0, 45.0)
-        _number(self, "min_ground_range_depression_deg", 0.0, 90.0, low_open=True, high_open=True)
-        _number(self, "forward_tof_vertical_half_fov_deg", 0.0, 45.0)
+        _number(self, "turn_rate_deg_s", 0.0, low_open=True)
 
         # 0 or None disables the altitude-gated cruise speed.
         if not _number(self, "cruise_speed_m_s", 0.0, optional=True):
@@ -120,41 +133,11 @@ class ExecutorSettings:
             if self.cruise_min_altitude_m is not None:
                 raise ValueError("cruise_min_altitude_m requires cruise_speed_m_s")
         else:
-            if self.cruise_speed_m_s <= self.max_speed_m_s:
-                raise ValueError("cruise_speed_m_s must exceed max_speed_m_s")
+            if self.cruise_speed_m_s <= self.speed_m_s:
+                raise ValueError("cruise_speed_m_s must exceed speed_m_s")
             if self.cruise_min_altitude_m is None:
                 raise ValueError("cruise_speed_m_s requires cruise_min_altitude_m")
-            _number(self, "cruise_min_altitude_m", self.min_altitude_m, self.max_altitude_m)
-
-        polygon = self.geofence_polygon_ned
-        if polygon is None:
-            if margin != 0.0:
-                raise ValueError("geofence_margin_m requires geofence_polygon_ned")
-            return
-        if self.geofence_radius_m != ExecutorSettings.__dataclass_fields__["geofence_radius_m"].default:
-            raise ValueError(
-                "geofence_radius_m applies only without geofence_polygon_ned; set one or the other"
-            )
-        if not isinstance(polygon, Sequence) or isinstance(polygon, (str, bytes)):
-            raise ValueError("geofence_polygon_ned must be a sequence of NED vertex pairs")
-        vertices: list[tuple[float, float]] = []
-        for vertex in polygon:
-            if not isinstance(vertex, Sequence) or isinstance(vertex, (str, bytes)) or len(vertex) != 2:
-                raise ValueError("each geofence_polygon_ned vertex must contain north_m and east_m")
-            if any(isinstance(coordinate, bool) for coordinate in vertex):
-                raise ValueError("geofence_polygon_ned coordinates must be finite numbers")
-            try:
-                north_m, east_m = (float(coordinate) for coordinate in vertex)
-            except (TypeError, ValueError, OverflowError) as exc:
-                raise ValueError("geofence_polygon_ned coordinates must be finite numbers") from exc
-            if not math.isfinite(north_m) or not math.isfinite(east_m):
-                raise ValueError("geofence_polygon_ned coordinates must be finite numbers")
-            vertices.append((north_m, east_m))
-        if len(vertices) > 1 and vertices[0] == vertices[-1]:
-            vertices.pop()
-        if len(vertices) < 3:
-            raise ValueError("geofence_polygon_ned needs at least three distinct vertices")
-        object.__setattr__(self, "geofence_polygon_ned", tuple(vertices))
+            _number(self, "cruise_min_altitude_m", 0.0)
 
 
 def _number(
@@ -223,40 +206,28 @@ class PerceptionSettings:
     ring_buffer_s: float = 5.0
     render_width_px: int = 640
     # Tracker identity tuning, passed through to horus.perception.tracks.TrackerConfig (which
-    # documents each field). 0 disables revalidation_grace_s / reacquisition_confirm_s.
-    revalidation_grace_s: float = 1.0
+    # documents each field).
     reference_views: int = 4
-    # Crops below this size are never stored as reference views and never re-acquire a lost ID.
+    # Crops below this size are never stored as reference views.
     reference_view_min_width_px: int = 12
     reference_view_min_height_px: int = 30
     reference_view_dedupe_cos: float = 0.98
-    reacquisition_confirm_s: float = 1.0
-    shirt_colour_window: int = 5
-    shirt_colour_min_votes: int = 3
     ignore_regions: tuple[tuple[float, float, float, float], ...] = ()
 
     def __post_init__(self) -> None:
         section = "perception."
         for name in ("max_fps", "open_vocab_hz", "ring_buffer_s"):
             _number(self, name, 0.0, low_open=True, section=section)
-        for name in ("revalidation_grace_s", "reacquisition_confirm_s"):
-            _number(self, name, 0.0, section=section)
         _number(self, "reference_view_dedupe_cos", 0.0, 1.0, section=section)
         _count(self, "render_width_px", 640, section=section)
         for name in (
             "reference_views",
             "reference_view_min_width_px",
             "reference_view_min_height_px",
-            "shirt_colour_window",
-            "shirt_colour_min_votes",
             "onnx_intra_op_num_threads",
             "onnx_inter_op_num_threads",
         ):
             _count(self, name, section=section)
-        if self.shirt_colour_min_votes > self.shirt_colour_window:
-            raise ValueError(
-                "perception.shirt_colour_min_votes must not exceed perception.shirt_colour_window"
-            )
         if not isinstance(self.vocabulary, Sequence) or isinstance(self.vocabulary, (str, bytes)):
             raise ValueError("perception.vocabulary must be a list of terms")
         object.__setattr__(self, "vocabulary", list(self.vocabulary))
@@ -332,12 +303,39 @@ class CommanderSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class MapSettings:
+    # none (no third-party map), gta (common-schema JSON at data_path) or osm (an Overpass JSON
+    # extract at data_path, converted at start-up); see horus/maps.
+    provider: str = "none"
+    data_path: str | None = None
+    # osm: the latitude/longitude of local NED (0, 0), which must be the vehicle's EKF origin.
+    # None takes flight.global_origin_latitude_deg/longitude_deg (SITL's home).
+    origin_latitude_deg: float | None = None
+    origin_longitude_deg: float | None = None
+    # Optional common-schema JSON whose walkable layer is added to data_path's (GTA's ped navmesh,
+    # scripts/maps/fetch_gta_walkable.py).
+    walkable_path: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.provider not in {"none", "gta", "osm"}:
+            raise ValueError("map provider must be 'none', 'gta' or 'osm'")
+        if (self.origin_latitude_deg is None) != (self.origin_longitude_deg is None):
+            raise ValueError("map origin_latitude_deg and origin_longitude_deg go together")
+        if self.provider != "none" and (not isinstance(self.data_path, str) or not self.data_path.strip()):
+            raise ValueError(f"map provider {self.provider!r} needs a data_path")
+        if self.walkable_path is not None and self.provider == "none":
+            raise ValueError("map walkable_path needs a provider")
+
+
+@dataclass(frozen=True, slots=True)
 class HorusConfig:
     flight: FlightSettings = FlightSettings()
+    gimbal: GimbalSettings = GimbalSettings()
     executor: ExecutorSettings = ExecutorSettings()
     perception: PerceptionSettings = PerceptionSettings()
     server: ServerSettings = ServerSettings()
     commander: CommanderSettings = CommanderSettings()
+    map: MapSettings = MapSettings()
 
 
 def _section(data: Mapping[str, Any], name: str, kind: type) -> Any:
@@ -363,14 +361,16 @@ def load_config(path: str | Path | None = None) -> HorusConfig:
         data = yaml.safe_load(stream) or {}
     if not isinstance(data, Mapping):
         raise ValueError("HORUS configuration root must be a mapping")
-    allowed = {"flight", "executor", "perception", "server", "commander"}
+    allowed = {"flight", "gimbal", "executor", "perception", "server", "commander", "map"}
     unknown = set(data) - allowed
     if unknown:
         raise ValueError(f"unknown configuration section(s): {', '.join(sorted(unknown))}")
     return HorusConfig(
         flight=_section(data, "flight", FlightSettings),
+        gimbal=_section(data, "gimbal", GimbalSettings),
         executor=_section(data, "executor", ExecutorSettings),
         perception=_section(data, "perception", PerceptionSettings),
         server=_section(data, "server", ServerSettings),
         commander=_section(data, "commander", CommanderSettings),
+        map=_section(data, "map", MapSettings),
     )

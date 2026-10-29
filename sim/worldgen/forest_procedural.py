@@ -17,12 +17,6 @@ from :mod:`sim.worldgen.forest_network`):
 All static scenery is handed to :func:`sim.worldgen.scenery.emit_scenery` (instanced visuals +
 per-tile trimesh proxies + sidecar), so the physics budget stays at one trimesh per 100 m tile;
 ``build_forest_procedural`` emits the world from a sampled layout.
-
-Mission content is spread across the map: the missing hiker lies off-trail under its own
-canopy at least 150 m from home, the injured person and the casualty rest in the mission
-clearing at least 120 m from home, the follow route starts at least 100 m from home and is
-occluded by a shrub whose narrow base keeps walkers clear while its crown spans the camera
-ray (2.6-3.9 s target, measured on the real proxies before the world is accepted).
 """
 
 from __future__ import annotations
@@ -35,13 +29,10 @@ import random
 
 from sim.worldgen.assembly import assemble_world
 from sim.worldgen.assets import ASSETS
-from sim.worldgen.dressing import (
-    Dressing, camp_scenery, clutter_scenery, deadfall_mesh, sample_dressing, shrub_mesh,
-)
+from sim.worldgen.dressing import Dressing, camp_scenery, clutter_scenery, deadfall_mesh
 from sim.worldgen.forest import forest_areas
 from sim.worldgen.forest_network import (
-    TERRAIN_HALF_M, MissionPeople, path_length, point_at_distance, sample_follow_route,
-    sample_hikers, sample_mission_people, sample_network,
+    TERRAIN_HALF_M, path_length, point_at_distance, sample_hikers, sample_network, sample_ranger,
 )
 from sim.worldgen.geometry import CollisionWorld, Primitive
 from sim.worldgen.layout import (
@@ -49,13 +40,10 @@ from sim.worldgen.layout import (
     person_placement, resample_path,
 )
 from sim.worldgen.materials import lattice_grid, lattice_noise, scene_textures
-from sim.worldgen.plan import (
-    PROCEDURAL_VANTAGE_BOUNDS_M, Camera, Ground, checked_transit_altitude, plan_follow,
-    plan_vantage,
-)
+from sim.worldgen.plan import Ground, checked_transit_altitude
 from sim.worldgen.png import solid_png
 from sim.worldgen.proxy import ProxyShape
-from sim.worldgen.scenario import follow_manifest, procedural_manifest_fields
+from sim.worldgen.scenario import procedural_manifest_fields
 from sim.worldgen.scenery import DEFAULT_TILE_M, SceneryInstance, SceneryMesh, emit_scenery
 from sim.worldgen.sdf import include
 from sim.worldgen.surface import PROCEDURAL_MAP
@@ -68,18 +56,14 @@ PROCEDURAL_ACTOR_INSET_M = 580.0
 # Flight profile: forest trees must keep their tops below 23 m above the home datum.
 TREE_TOP_LIMIT_M = 23.0
 TREE_LIMIT = 9000                     # tree + sapling instance budget
-# Full stand density within FOCUS_RADIUS_M of home and every mission site; elsewhere only
-# FAR_TREE_DENSITY of it and no saplings. Every tree instance costs each drone render sensor a
-# fixed per-item overhead regardless of distance (a 400 m camera far clip changed nothing):
-# halving the instance count raised live RTF on Koko from 0.23 to 0.49.
+# Full stand density within FOCUS_RADIUS_M of home; elsewhere only FAR_TREE_DENSITY of it and
+# no saplings. Every tree instance costs each drone render sensor a fixed per-item overhead
+# regardless of distance, so the far field stays sparse.
 FOCUS_RADIUS_M = 120.0
 FAR_TREE_DENSITY = 0.3
 TRAIL_HALF_WIDTH_M = 1.2              # materials.dirt_trail_texture spans 2.4 m
 CREEK_HALF_WIDTH_M = 1.3              # materials.creek_texture spans 2.6 m
 STRIP_LIFT_M = 0.03                   # strips ride on the terrain to avoid z-fighting
-OCCLUSION_BAND_S = (2.6, 3.9)         # sampler target inside the 2.5-4.0 s validation band
-FOLLOWER_ALTITUDE_M = 8.0
-FOLLOWER_HORIZONTAL_M = 7.0
 TREE_HALF_M = 570.0                   # tree field half extent
 GRID_CELL_M = 4.0                     # exclusion raster cell
 
@@ -197,13 +181,11 @@ def _terrain_fields(rng: random.Random) -> dict:
 
 
 def _tree_field(rng: random.Random, surface, tree_grid: _BlockGrid, sapling_grid: _BlockGrid,
-                half: float = TREE_HALF_M,
-                focus: Sequence[tuple[float, float]] = ((0.0, 0.0),),
-                ) -> tuple[list[SceneryInstance], int, int, float]:
+                half: float = TREE_HALF_M) -> tuple[list[SceneryInstance], int, int, float]:
     """Instanced trees and saplings with local density variation; no primitive vegetation.
 
-    Stands keep their full density within ``FOCUS_RADIUS_M`` of a ``focus`` point (home and the
-    mission sites); farther away only ``FAR_TREE_DENSITY`` of the trees and no saplings remain.
+    Stands keep their full density within ``FOCUS_RADIUS_M`` of home; farther away only
+    ``FAR_TREE_DENSITY`` of the trees and no saplings remain.
     """
     noise = lattice_grid(rng, 12)
     cell = 10.0
@@ -236,7 +218,7 @@ def _tree_field(rng: random.Random, surface, tree_grid: _BlockGrid, sapling_grid
             v = (y + half) / (2.0 * half)
             density = lattice_noise(noise, u, v)
             probability = 0.16 if density < 0.40 else (0.55 if density < 0.62 else 0.92)
-            near = any(math.hypot(x - fx, y - fy) <= FOCUS_RADIUS_M for fx, fy in focus)
+            near = math.hypot(x, y) <= FOCUS_RADIUS_M
             if not near:
                 probability *= FAR_TREE_DENSITY
             if rng.random() > probability:
@@ -379,102 +361,6 @@ class _FlatSurface:
         return min(float(a[2]), float(b[2]))
 
 
-def _follow_probe(route: Sequence[tuple[float, float]], speed: float, shrub: SceneryMesh,
-                  surface, body_box: tuple[float, float, float, float, float, float],
-                  torso_z: float, altitude: float, horizontal: float
-                  ) -> tuple[float, float, float, float]:
-    """(occlusion_s, lane_clearance, column_clearance, worst_body_clearance)."""
-    world = _probe_world(shrub.proxies)
-    ground = Ground.from_surface(surface)
-    manifest = {
-        "transit_altitude_m": 30.0,
-        "follow": {
-            "route": [[float(p[0]), float(p[1])] for p in route],
-            "follower_altitude_m": altitude,
-            "follower_horizontal_m": horizontal,
-            "speed_m_s": speed,
-            "model": "civ_hiker_04",
-        },
-        "people": [{"model": "civ_hiker_04", "position": [float(route[0][0]), float(route[0][1])],
-                    "posture": "standing", "envelope": {"torso_z_m": torso_z}}],
-    }
-    plan = plan_follow(world, ground, manifest)
-    worst = math.inf
-    heading = 0.0
-    samples = resample_path(route, 0.5)
-    for index, (x, y) in enumerate(samples):
-        if index + 1 < len(samples):
-            heading = math.atan2(samples[index + 1][1] - y, samples[index + 1][0] - x)
-        clearance, _ = box_clearance(world, ground, x, y, heading, body_box)
-        worst = min(worst, clearance)
-    return plan.occluded_s, plan.lane_clearance_m, plan.column_clearance_m, worst
-
-
-# Narrow base + wide crown: walkers pass the base while the camera ray hits the crown.
-# Heights >= 5 m keep the crown's lower proxy (z + 0.42 * height) above a walker's head.
-_OCCLUDER_SHAPES = ((5.4, 1.9, 0.5), (5.8, 2.1, 0.55), (6.2, 2.4, 0.6))
-# (follower horizontal, follower altitude above the shrub top): shallower/higher rays shorten
-# the occlusion window, and the slant stays inside the 12 m framing limit.
-_OCCLUDER_VIEWS = ((4.5, 3.8), (4.5, 4.8), (3.5, 4.8), (3.5, 3.8), (4.0, 3.2), (5.0, 4.4))
-_OCCLUDER_PROBE_LIMIT = 24  # bound the search cost per attempt
-
-
-def _search_occluder(rng: random.Random, route: Sequence[tuple[float, float]], speed: float,
-                     surface, seed: int, torso_z: float,
-                     body_box: tuple[float, float, float, float, float, float]):
-    """Place a shrub beside the route until the real proxies occlude the camera 2.6-3.9 s.
-
-    The probe runs the same ``plan_follow`` the validator uses, on the shrub's real proxies,
-    and also sweeps the walked body box along the whole route. Returns ``(mesh, xy,
-    occlusion_s, altitude, horizontal, crown_radius)``.
-    """
-    total = path_length(route)
-    combos = []
-    for along in (0.46, 0.40, 0.52, 0.58):
-        for lateral in (1.3, 1.1):
-            for side in (1.0, -1.0):
-                combos.append((along, lateral * side))
-    rng.shuffle(combos)
-    probes = 0
-    for index, (along, lateral) in enumerate(combos):
-        point, direction = point_at_distance(route, along * total)
-        normal = (-direction[1], direction[0])
-        x = point[0] + normal[0] * lateral
-        y = point[1] + normal[1] * lateral
-        z = surface.height(x, y)
-        for height, crown, base_radius in _OCCLUDER_SHAPES:
-            shrub = shrub_mesh("follow_occluder", x, y, z, height=height,
-                               crown_radius=crown, base_radius=base_radius, seed=seed + index)
-            top = max(proxy.pose[2] + proxy.size[-1] / 2.0 for proxy in shrub.proxies)
-            for horizontal, rise in _OCCLUDER_VIEWS:
-                probes += 1
-                altitude = top + rise
-                occluded, lane, column, body = _follow_probe(
-                    route, speed, shrub, surface, body_box, torso_z, altitude, horizontal)
-                if (OCCLUSION_BAND_S[0] <= occluded <= OCCLUSION_BAND_S[1]
-                        and lane >= 2.4 and column >= 1.8 and body >= 0.15):
-                    return shrub, (x, y), occluded, altitude, horizontal, crown
-            if probes >= _OCCLUDER_PROBE_LIMIT:
-                return None
-    return None
-
-
-def _vantage_probe(surface, target_proxies: Sequence[ProxyShape],
-                   targets: Sequence[tuple[str, tuple[float, float, float], int]], transit: float,
-                   seed: int) -> bool:
-    """The validator's vantage search must succeed for every mission role."""
-    world = _probe_world(target_proxies)
-    ground = Ground.from_surface(surface)
-    camera = Camera()
-    for model, point, index in targets:
-        rng = random.Random(seed * 17 + index)
-        vantage = plan_vantage(world, ground, camera, model, point, rng, transit_alt=transit,
-                               bounds=PROCEDURAL_VANTAGE_BOUNDS_M, attempts=200)
-        if vantage is None:
-            return False
-    return True
-
-
 # ---------------------------------------------------------------- sampler
 
 
@@ -487,7 +373,7 @@ def _required_transit(top: float) -> float:
 
 
 def transit_altitude(layout: ForestLayout) -> float:
-    """The manifest transit altitude, refused above the profile's 36 m max_altitude."""
+    """The manifest transit altitude, refused above the 36 m transit ceiling."""
     return checked_transit_altitude(_required_transit(layout.scenery_max_top_m), 36.0,
                                     procedural=True)
 
@@ -531,9 +417,7 @@ def _camp_scenery_and_family(camps, surface, seed: int, rng: random.Random
     return camp_instances, camp_meshes, family
 
 
-def _exclusion_grids(trails, creeks, clearings, camps, mission_centre: tuple[float, float],
-                     canopy_xy: tuple[float, float], occluder_xy: tuple[float, float]
-                     ) -> tuple[_BlockGrid, _BlockGrid, _BlockGrid]:
+def _exclusion_grids(trails, creeks, clearings, camps) -> tuple[_BlockGrid, _BlockGrid, _BlockGrid]:
     """No-place rasters for trees, saplings and creek-bank rocks."""
     tree_grid = _BlockGrid(600.0)
     sapling_grid = _BlockGrid(600.0)
@@ -546,16 +430,11 @@ def _exclusion_grids(trails, creeks, clearings, camps, mission_centre: tuple[flo
         tree_grid.mark_path(creek, 4.5 + GRID_CELL_M)
         sapling_grid.mark_path(creek, 2.5 + GRID_CELL_M)
     for cx, cy, radius in clearings:
-        clearance = 11.0 if (cx, cy) == mission_centre else 4.0
-        tree_grid.mark_disc(cx, cy, radius + clearance + GRID_CELL_M)
+        tree_grid.mark_disc(cx, cy, radius + 4.0 + GRID_CELL_M)
         sapling_grid.mark_disc(cx, cy, radius + 2.0 + GRID_CELL_M)
     for cx, cy in camps:
         tree_grid.mark_disc(cx, cy, 16.0 + GRID_CELL_M)
         sapling_grid.mark_disc(cx, cy, 8.0 + GRID_CELL_M)
-    tree_grid.mark_disc(canopy_xy[0], canopy_xy[1], 12.0 + GRID_CELL_M)
-    sapling_grid.mark_disc(canopy_xy[0], canopy_xy[1], 12.0 + GRID_CELL_M)
-    tree_grid.mark_disc(occluder_xy[0], occluder_xy[1], 8.0 + GRID_CELL_M)
-    sapling_grid.mark_disc(occluder_xy[0], occluder_xy[1], 8.0 + GRID_CELL_M)
 
     rock_grid = _BlockGrid(600.0)
     rock_grid.mark_disc(0.0, 0.0, 10.0)
@@ -568,98 +447,40 @@ def _exclusion_grids(trails, creeks, clearings, camps, mission_centre: tuple[flo
     return tree_grid, sapling_grid, rock_grid
 
 
-def _probe_vantages(surface, mission: MissionPeople, torso: dict[str, float],
-                    blockers: Sequence[ProxyShape], scattered: Sequence[SceneryInstance],
-                    max_top: float, seed: int) -> bool:
-    """The vantage probe for the three mission roles, against the proxies that can actually
-    block them: every ``blockers`` proxy plus ``scattered`` instances within 45 m."""
-    people = ((mission.missing, 0), (mission.injured, 1), (mission.casualty, 2))
-    probe_proxies = list(blockers)
-    for instance in scattered:
-        if any(math.hypot(instance.x - person.position[0], instance.y - person.position[1]) < 45.0
-               for person, _index in people):
-            probe_proxies.extend(_instance_proxies(instance))
-    targets = [(person.model, (person.position[0], person.position[1],
-                               surface.height(*person.position) + torso[person.model]), index)
-               for person, index in people]
-    return _vantage_probe(surface, probe_proxies, targets, _required_transit(max_top), seed)
-
-
 def _sample_attempt(seed: int, rng: random.Random, attempt: int) -> ForestLayout:
     inset = PROCEDURAL_ACTOR_INSET_M
     fields = _terrain_fields(rng)
     trails, creeks, clearings, camps = sample_network(rng)
-    follow_route, follow_speed = sample_follow_route(rng, trails, inset)
     hikers = sample_hikers(rng, trails, inset)
-    mission = sample_mission_people(rng, trails, creeks, clearings, camps, follow_route, inset)
-    mission_centre = mission.clearing[:2]
+    ranger = sample_ranger(rng, trails, inset)
     base = ForestLayout(
-        seed=seed, canonical=False, trail=trails[0], creek=creeks[0], clearing=mission_centre,
-        clearing_radius=mission.clearing[2], camp=camps[0], missing_hiker=mission.missing,
-        missing_canopy_tree=mission.canopy_xy, injured_person=mission.injured,
-        hiker_routes=hikers, ranger_routes=(mission.ranger,),
+        seed=seed, canonical=False, trail=trails[0], creek=creeks[0], clearing=clearings[0][:2],
+        clearing_radius=clearings[0][2], camp=camps[0],
+        hiker_routes=hikers, ranger_routes=(ranger,),
         family_positions=(),  # placed once the camp scenery is known
-        follow_hiker=person_placement("civ_hiker_04", "hiker", "person_green_kinematic",
-                                      follow_route[0], 0.0, "route", "follow_hiker", follow_route,
-                                      follow_speed, "once"),
-        follow_occluder_xy=(0.0, 0.0), follow_speed=follow_speed,
-        follower_altitude_m=FOLLOWER_ALTITUDE_M, follower_horizontal_m=FOLLOWER_HORIZONTAL_M,
-        expected_occlusion_s=0.0,
         # Trees are instanced scenery, not the canonical primitive field.
         tree_count=0, tree_height_range=(10.0, 20.0), fallen_logs=(),
-        **fields, attempts=attempt, casualty=mission.casualty, map=PROCEDURAL_MAP,
+        **fields, attempts=attempt, map=PROCEDURAL_MAP,
         trails=trails, creeks=creeks, clearings=clearings, camps=camps, home_pad_radius_m=6.0,
         creek_terrain_path=resample_path(creeks[0], 30.0), actor_inset_m=inset,
     )
     surface = forest_surface(base)
     strips = _network_strips(trails, creeks, surface)
-    dressing = sample_dressing("forest", base)
-    torso = {person.model: dressing.appearances[person.model].envelope(posture)["torso_z_m"]
-             for person, posture in ((base.follow_hiker, "standing"), (mission.missing, "lying"),
-                                     (mission.injured, "sitting"), (mission.casualty, "lying"))}
-    body_box = _envelope_box(dressing.appearances["civ_hiker_04"].envelope("standing"))
     camp_instances, camp_meshes, family = _camp_scenery_and_family(camps, surface, seed, rng)
-    base = replace(base, family_positions=family,
-                   sites=_sites(clearings, camps, follow_route, mission.missing.position,
-                                mission.injured.position, mission.casualty.position))
+    base = replace(base, family_positions=family)
 
-    # Follow occluder: search placements until the real proxies give the occlusion band.
-    found = _search_occluder(rng, follow_route, follow_speed, surface, seed, torso["civ_hiker_04"],
-                             body_box)
-    if found is None:
-        raise SampleRejected("follow occlusion probe")
-    shrub, occluder_xy, occluded, follower_altitude, follower_horizontal, occluder_radius = found
-
-    tree_grid, sapling_grid, rock_grid = _exclusion_grids(
-        trails, creeks, clearings, camps, mission_centre, mission.canopy_xy, occluder_xy)
-    focus = ((0.0, 0.0), *((x, y) for _name, _kind, x, y, _radius in base.sites))
-    tree_instances, trees, saplings, tree_top = _tree_field(rng, surface, tree_grid, sapling_grid,
-                                                            focus=focus)
+    tree_grid, sapling_grid, rock_grid = _exclusion_grids(trails, creeks, clearings, camps)
+    tree_instances, trees, saplings, tree_top = _tree_field(rng, surface, tree_grid, sapling_grid)
     if trees + saplings > TREE_LIMIT:
         raise SampleRejected("tree budget")
     bank_rocks, rock_top = _bank_rocks(rng, creeks, surface, rock_grid)
     logs = _fallen_logs(rng, surface, trails, creeks, clearings, camps)
 
-    canopy_xy = mission.canopy_xy
-    canopy = SceneryInstance("tree_pine", canopy_xy[0], canopy_xy[1], surface.height(*canopy_xy),
-                             rng.uniform(-math.pi, math.pi), mission.canopy_scale)
-    instances = tuple([*tree_instances, canopy, *bank_rocks, *camp_instances])
-    meshes = tuple([*strips, *camp_meshes, shrub, *logs])
-    canopy_top = (surface.height(*canopy_xy)
-                  + ASSETS["tree_pine"].native_height_m * mission.canopy_scale)
-    max_top = max(tree_top, rock_top, canopy_top,
-                  max((_mesh_top(mesh) for mesh in meshes), default=0.0))
+    instances = tuple([*tree_instances, *bank_rocks, *camp_instances])
+    meshes = tuple([*strips, *camp_meshes, *logs])
+    max_top = max(tree_top, rock_top, max((_mesh_top(mesh) for mesh in meshes), default=0.0))
     if max_top > TREE_TOP_LIMIT_M:
         raise SampleRejected("scenery above the 23 m cap")
-
-    blockers = [*_instance_proxies(canopy), *shrub.proxies]
-    for instance in camp_instances:
-        blockers.extend(_instance_proxies(instance))
-    for mesh in [*camp_meshes, *logs]:
-        blockers.extend(mesh.proxies)
-    if not _probe_vantages(surface, mission, torso, blockers, [*tree_instances, *bank_rocks],
-                           max_top, seed):
-        raise SampleRejected("mission vantage probe")
 
     counts = (
         ("instances", len(instances)), ("meshes", len(meshes)), ("trees", trees),
@@ -668,12 +489,7 @@ def _sample_attempt(seed: int, rng: random.Random, attempt: int) -> ForestLayout
         ("trail_length_m", int(round(sum(path_length(trail) for trail in trails)))),
     )
     return replace(base, scenery_instances=instances, scenery_meshes=meshes,
-                   scenery_max_top_m=max_top, scenery_counts=counts,
-                   expected_occlusion_s=round(occluded, 2),
-                   follow_occluder_xy=occluder_xy,
-                   follow_occluder_radius_m=occluder_radius,
-                   follower_altitude_m=follower_altitude,
-                   follower_horizontal_m=follower_horizontal)
+                   scenery_max_top_m=max_top, scenery_counts=counts)
 
 
 def _lift_mesh(mesh: SceneryMesh, dz: float, *, prefix: str = "") -> SceneryMesh:
@@ -700,26 +516,8 @@ def _mesh_top(mesh: SceneryMesh) -> float:
     return top
 
 
-def _envelope_box(envelope: dict) -> tuple[float, float, float, float, float, float]:
-    return (envelope["x_min_m"], envelope["x_max_m"], envelope["y_min_m"], envelope["y_max_m"],
-            max(0.05, envelope.get("z_min_m", 0.0)), envelope["top_z_m"])
-
-
-def _sites(clearings, camps, follow_route, missing_xy, injured_xy,
-           casualty_xy) -> tuple[tuple[str, str, float, float, float], ...]:
-    sites = [("clearing_%02d" % (index + 1), "clearing", cx, cy, cr)
-             for index, (cx, cy, cr) in enumerate(clearings)]
-    sites.extend(("camp_%02d" % (index + 1), "camp", cx, cy, 12.0)
-                 for index, (cx, cy) in enumerate(camps))
-    sites.append(("follow_route", "follow", follow_route[0][0], follow_route[0][1], 8.0))
-    sites.append(("missing_hiker", "person", missing_xy[0], missing_xy[1], 3.0))
-    sites.append(("injured", "person", injured_xy[0], injured_xy[1], 3.0))
-    sites.append(("casualty", "person", casualty_xy[0], casualty_xy[1], 3.0))
-    return tuple(sites)
-
-
 def sample_forest_layout(seed: int, *,
-                         validate: Callable[[ForestLayout], tuple[float, list[str]]]
+                         validate: Callable[[ForestLayout], list[str]]
                          ) -> ForestLayout:
     """Sample a validated 1.2 km procedural forest layout for ``seed``."""
     rng = random.Random(seed)
@@ -768,23 +566,15 @@ def build_forest_procedural(layout: ForestLayout, world_dir: Path, terrain_model
     return world, agents, rows, files
 
 
-def manifest_extras(layout: ForestLayout, people: dict[str, dict]) -> tuple[dict, dict, dict]:
-    """The generated forest's ``(follow, areas, extra manifest fields)``."""
-    follow = follow_manifest(layout, layout.follow_hiker, people, {
-        # The occluder is a foliage SceneryMesh; its collision proxies live in the scenery
-        # sidecar under this mesh name.
-        "occluder_models_or_collisions": ["follow_occluder"],
-        "occluder_xy": [layout.follow_occluder_xy[0], layout.follow_occluder_xy[1]],
-        "occluder_radius_m": layout.follow_occluder_radius_m,
-    })
+def manifest_extras(layout: ForestLayout) -> tuple[dict, dict]:
+    """The generated forest's ``(areas, extra manifest fields)``."""
     areas = forest_areas(layout)
     areas["trails"] = [[[x, y] for x, y in trail] for trail in layout.trails]
     areas["creeks"] = [[[x, y] for x, y in creek] for creek in layout.creeks]
     areas["clearings"] = [{"center": [cx, cy], "radius": radius}
                           for cx, cy, radius in layout.clearings]
     areas["camps"] = [[x, y] for x, y in layout.camps]
-    return follow, areas, {**procedural_manifest_fields(layout),
-                           "scenery": dict(layout.scenery_counts)}
+    return areas, {**procedural_manifest_fields(layout), "scenery": dict(layout.scenery_counts)}
 
 
 __all__ = ["PROCEDURAL_ACTOR_INSET_M", "TREE_LIMIT", "TREE_TOP_LIMIT_M", "build_forest_procedural",

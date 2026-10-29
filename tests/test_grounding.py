@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
+from horus.perception import Detection, PerceptionSystem, PersistentTracker
 from horus.perception.frame_buffer import FrameBuffer
+from horus.perception.geometry import iou
 from horus.perception.grounding import GroundingPointer
 from horus.perception.types import (
     Candidate,
@@ -13,6 +16,8 @@ from horus.perception.types import (
     NoGroundingMatch,
     StaleFrameError,
 )
+
+from tests.fakes import feed_frame
 
 
 def _candidate(
@@ -29,7 +34,6 @@ def _candidate(
         confidence=0.9,
         frame_id=frame_id,
         timestamp=timestamp,
-        attributes={"shirt_colour": "blue"},
     )
 
 
@@ -102,3 +106,50 @@ def test_box_rejects_malformed_and_expired_references_clearly():
         expired.append(frame)
     with pytest.raises(StaleFrameError, match="frame 1 is no longer"):
         GroundingPointer(expired, tracker, state_lock=threading.RLock()).point(1, box=[0, 0, 10, 10])
+
+
+class _PatchImage:
+    """Frame stand-in: each ``(bbox, vector)`` patch is a person whose crop embeds to ``vector``."""
+
+    shape = (480, 640)
+
+    def __init__(self, patches, *, detected: bool = True) -> None:
+        self.patches = patches
+        self.detected = detected
+
+
+class _PatchDetector:
+    def detect(self, image):
+        if not image.detected:
+            return []
+        return [Detection(bbox, class_name="person") for bbox, _ in image.patches]
+
+
+class _PatchEmbedder:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def embed(self, image, bbox):
+        self.calls += 1
+        return max(image.patches, key=lambda patch: iou(patch[0], bbox))[1]
+
+
+def test_point_follows_appearance_when_geometry_points_at_a_crossing_lookalike() -> None:
+    embedder = _PatchEmbedder()
+    system = PerceptionSystem(_PatchDetector(), PersistentTracker(embedder=embedder))
+    red_then, red_now, blue_now = (100, 100, 140, 200), (220, 100, 260, 200), (110, 100, 150, 200)
+    old = feed_frame(system, _PatchImage([(red_then, (1.0, 0.0))], detected=False), time.monotonic())
+    crossed = [(red_now, (1.0, 0.0)), (blue_now, (0.0, 1.0))]
+    for _ in range(2):
+        feed_frame(system, _PatchImage(crossed), time.monotonic())
+    ids = {tuple(row["bbox"]): row["id"] for row in system.list_candidates()}
+    calls_before = embedder.calls
+
+    # The pointed box from the earlier frame now overlaps the blue look-alike; the red
+    # person's appearance must win.
+    result = system.point(old.frame_id, box=list(red_then))
+
+    assert result.candidate.id == ids[tuple(float(v) for v in red_now)]
+    assert result.candidate.source != "point"
+    # Reference plus at most one current-appearance encode per latest candidate.
+    assert embedder.calls - calls_before <= 3

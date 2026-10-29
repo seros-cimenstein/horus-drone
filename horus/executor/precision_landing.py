@@ -337,7 +337,9 @@ class PrecisionLanding:
             self._hold_or_coast("no fresh frame")
             return
         if self.gimbal_requested_at is None:
-            executor._command(executor.flight.set_gimbal_pitch_yaw, -90.0, 0.0)
+            # A fixed camera cannot turn nadir; the tag search then runs on its view as it is.
+            if executor.gimbal is not None:
+                executor._command(executor.gimbal.point, executor._gimbal_pitch(-90.0), 0.0)
             with executor._lock:
                 executor._require_current_tick()
                 self.gimbal_requested_at = time.monotonic()
@@ -373,7 +375,7 @@ class PrecisionLanding:
         self._target_monotonic = time.monotonic()
         self._target_velocity = (float(velocity[0]), float(velocity[1]), float(velocity[2]))
         executor._command(executor.flight.set_velocity_ned, *self._target_velocity)
-        self._log_control(telemetry, current, detection, self._target_velocity)
+        self._log_control(current, detection, self._target_velocity)
 
     def _frame(self) -> Any | None:
         perception = self._executor.perception
@@ -404,14 +406,14 @@ class PrecisionLanding:
         if self._stall_started_monotonic is None:
             self._stall_started_monotonic = now
             self._stall_start_altitude_m = current.up_m
-            self._stall_start_sim_s = self._fresh_sim_time_s(telemetry)
+            self._stall_start_sim_s = self._executor._fresh_sim_time_s(telemetry)
             return
         elapsed = now - self._stall_started_monotonic
         settings = self._executor.settings
         if elapsed < settings.precision_landing_stall_s:
             return
         descended_m = self._stall_start_altitude_m - current.up_m
-        now_sim = self._fresh_sim_time_s(telemetry)
+        now_sim = self._executor._fresh_sim_time_s(telemetry)
         if (
             now_sim is not None
             and self._stall_start_sim_s is not None
@@ -451,15 +453,8 @@ class PrecisionLanding:
             progress_basis=progress_basis,
         )
 
-    def _fresh_sim_time_s(self, telemetry: Telemetry) -> float | None:
-        """Autopilot time in seconds, or ``None`` when the SYSTEM_TIME sample is stale/absent."""
-        if not self._executor._fresh(telemetry.time_boot_updated_monotonic):
-            return None
-        return self._executor._sim_time_s(telemetry)
-
     def _log_control(
         self,
-        telemetry: Telemetry,
         current: Pose,
         detection: AprilTagDetection,
         velocity: tuple[float, float, float],
@@ -469,7 +464,8 @@ class PrecisionLanding:
         if now - self._last_log_monotonic < 1.0:
             return
         self._last_log_monotonic = now
-        mount = telemetry.mount_status
+        gimbal = self._executor.gimbal
+        attitude = None if gimbal is None else gimbal.attitude()
         logger.info(
             "precision landing: tag_px=(%.1f,%.1f) error_px=(%.1f,%.1f) gimbal_pitch_deg=%s "
             "commanded_ned=(%.2f,%.2f,%.2f) altitude_m=%.2f",
@@ -477,7 +473,7 @@ class PrecisionLanding:
             detection.center_y,
             detection.center_x - detection.image_width * 0.5,
             detection.center_y - detection.image_height * 0.5,
-            None if mount is None else mount.pitch_deg,
+            None if attitude is None else attitude.pitch_deg,
             velocity[0],
             velocity[1],
             velocity[2],
@@ -517,7 +513,7 @@ class PrecisionLanding:
     def _complete(self) -> None:
         executor = self._executor
         if self.gimbal_requested_at is not None:
-            executor._command(executor._set_default_gimbal_pitch)
+            executor._command(executor._aim_camera)
         with executor._lock:
             executor._require_current_tick()
             self.reset(unavailable=False)

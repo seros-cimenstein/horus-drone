@@ -264,7 +264,7 @@ class AssetVisual:
     metalness: float = 0.0
     roughness: float = 0.8
     # Thousands of shadow-casting trees made every ToF ray sensor render redraw the forest's
-    # shadow maps once the drone camera enabled shadows (live RTF 0.10 vs 0.86 without).
+    # shadow maps once the drone camera enabled shadows, collapsing the real-time factor.
     cast_shadows: bool = True
 
 
@@ -407,7 +407,7 @@ ASSETS: dict[str, Asset] = {
         key="tree_pine", kind="tree", model_dir="horus_tree_pine",
         # One material-free visual: the importer embeds the branch (alpha) and bark textures in
         # the COLLADA effects, so every instance shares the mesh materials. Per-visual SDF
-        # materials on ~15k branch/bark visuals exhausted Koko's iGPU (RTF 0.008 -> 0.44).
+        # materials on ~15k branch/bark visuals exhaust an integrated GPU.
         visuals=(AssetVisual("tree", _mesh("horus_tree_pine", "pine_tree.dae"), scale=2.3632,
                              cast_shadows=False),),
         native_height_m=11.9999, footprint_radius_m=3.7499,

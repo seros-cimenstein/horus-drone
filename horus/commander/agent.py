@@ -14,8 +14,8 @@ from horus.commander.backends import (
 )
 from horus.commander.intents import is_reset_command
 from horus.config import CommanderSettings
-from horus.event_log import JsonlEventLog, _safe_value, event_log_path_from_environment
-from horus.events import EVENT_KINDS, MODEL_WAKE_EVENT_KINDS, REGION_TRANSITION_KINDS
+from horus.event_log import JsonlEventLog, _safe_value, event_log_from_environment
+from horus.events import EVENT_KINDS, REGION_TRANSITION_KINDS
 from horus.mcp_client import call_json, open_session, raise_for_error, tool_text
 
 
@@ -27,11 +27,11 @@ class CommanderEvent:
     generation: int = 0
 
 
-# Kinds that can repeat in bursts (flaky link, occlusions): wake the commander at most once per
-# cooldown and report the suppressed count with the next forwarded batch.
-_REPEAT_LIMITED_KINDS = frozenset({"link_lost", "link_restored", "target_lost", "target_reacquired"})
+# Kinds that can repeat in bursts (flaky link): wake the commander at most once per cooldown and
+# report the suppressed count with the next forwarded batch.
+_REPEAT_LIMITED_KINDS = frozenset({"link_lost", "link_restored"})
 # Emergency events whose requester already informs the model; mirrored to the log/GUI only.
-_ECHOED_EMERGENCY_SOURCES = frozenset({"mcp", "plan"})
+_ECHOED_EMERGENCY_SOURCES = frozenset({"mcp"})
 
 
 def _event_source(event: Mapping[str, Any]) -> Any:
@@ -121,7 +121,7 @@ class HorusCommander:
             raise RuntimeError(
                 f"API commander provider {settings.provider!r} requires {settings.api_key_env}"
             )
-        self.event_log = event_log or _event_log_from_environment()
+        self.event_log = event_log or event_log_from_environment()
         self.event_callback = event_callback
         self._events: asyncio.Queue[CommanderEvent | None] = asyncio.Queue()
         self._failure: Exception | None = None
@@ -360,12 +360,10 @@ class HorusCommander:
                         "data": event.get("data", {}),
                     }
                     self._append_event(mirrored)
-                    if kind not in MODEL_WAKE_EVENT_KINDS:
-                        continue
                     if kind == "emergency" and _event_source(event) in _ECHOED_EMERGENCY_SOURCES:
                         # An MCP-requested emergency was sent by this commander (which already
-                        # sends its own notice) or by the model itself; a plan reports through
-                        # plan_finished. Waking the model again would cost a second turn.
+                        # sends its own notice) or by the model itself. Waking the model again
+                        # would cost a second turn.
                         continue
                     if self._wake_policy.admit(event, loop.time()):
                         pending.append(event)
@@ -432,14 +430,6 @@ class HorusCommander:
                 self.event_callback(_safe_value(record))
             except Exception as exc:
                 print(f"warning: commander event callback failed: {exc}", file=sys.stderr)
-
-
-def _event_log_from_environment() -> JsonlEventLog | None:
-    try:
-        path = event_log_path_from_environment()
-    except RuntimeError:
-        return None
-    return JsonlEventLog(path)
 
 
 def _mcp_prompt_text(result: Any) -> str:

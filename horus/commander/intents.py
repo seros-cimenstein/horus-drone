@@ -11,6 +11,8 @@ _EMERGENCY_WORDS = {
     "land": "land",
     "rth": "rth",
     "return home": "rth",
+    "home": "rth",
+    "go home": "rth",
 }
 
 

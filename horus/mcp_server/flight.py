@@ -1,4 +1,4 @@
-"""Vehicle state, bounded flight skills and emergency MCP tools."""
+"""Vehicle state, base flight moves and emergency MCP tools."""
 
 from __future__ import annotations
 
@@ -33,10 +33,8 @@ def get_state(ctx: ToolContext, passive: bool = False) -> str:
 
 
 def get_map(ctx: ToolContext) -> str:
-    """Return local pose, flight envelope, observation age, proximity and tracked candidates.
+    """Return local pose, observation age, proximity and tracked candidates.
 
-    ``flight_envelope`` is the enforced limit set: the inset geofence polygon as NED
-    ``[north_m, east_m]`` vertices (or a radius), altitude range, speeds and leg length.
     Candidate IDs are identities; labels remain quoted untrusted detector strings.
     Check observation age before acting on this snapshot.
     """
@@ -53,7 +51,6 @@ def get_map(ctx: ToolContext) -> str:
         "observed_at": timestamp or state.get("observed_at"),
         "observation_age_s": age,
         "vehicle_pose": vehicle_pose,
-        "flight_envelope": ctx.executor.envelope.as_dict(),
         "proximity": vehicle.get("proximity", []) if isinstance(vehicle, Mapping) else [],
         "candidates": [candidate_result(candidate) for candidate in candidates],
     })
@@ -73,12 +70,12 @@ def get_link_status(ctx: ToolContext) -> str:
 def take_off(
     ctx: ToolContext, altitude_m: float = 2.0, heading_deg: float | None = None, ttl_s: float | None = None
 ) -> str:
-    """Queue a bounded takeoff and return its asynchronous task ID.
+    """Queue a take-off to ``altitude_m`` above home and return its asynchronous task ID.
 
-    ``altitude_m`` is clamped by executor limits. Optional ``heading_deg`` (0 = north,
-    clockwise) turns the vehicle in place after reaching altitude, before the task succeeds.
-    ``ttl_s`` is the optional task lifetime in seconds; inspect get_task_status for
-    completion, expiry, and clamps.
+    The altitude is flown as given; at or below 0 it is rejected. ArduPilot's fence and failsafes
+    hold the flight limits. Optional ``heading_deg`` (0 = north, clockwise) turns the vehicle in
+    place after reaching altitude, before the task succeeds. ``ttl_s`` is the optional task
+    lifetime in seconds; inspect get_task_status for completion and expiry.
     """
     arguments: dict[str, float] = {"altitude_m": altitude_m}
     if heading_deg is not None:
@@ -89,12 +86,12 @@ def take_off(
 def goto(
     ctx: ToolContext, pose: dict[str, float], heading_deg: float | None = None, ttl_s: float | None = None
 ) -> str:
-    """Queue bounded closed-loop motion to a local N/E/altitude pose.
+    """Queue closed-loop motion to a local N/E/altitude pose, flown as given.
 
-    Coordinates, speed, distance, and altitude are subject to executor clamps. Optional
-    ``heading_deg`` (0 = north, clockwise) turns the vehicle in place after arrival.
-    ``ttl_s`` optionally limits task lifetime in seconds; use its task ID with
-    get_task_status to observe completion, expiry, and requested versus clamped targets.
+    A target at or below home altitude (``up_m`` <= 0) is rejected; ArduPilot's fence, altitude
+    limits and proximity avoidance hold the flight limits. Optional ``heading_deg`` (0 = north,
+    clockwise) turns the vehicle in place after arrival. ``ttl_s`` optionally limits task lifetime
+    in seconds; use its task ID with get_task_status to observe completion and expiry.
     """
     arguments: dict[str, Any] = {"pose": pose}
     if heading_deg is not None:
@@ -102,117 +99,62 @@ def goto(
     return ctx.submit("goto", arguments, ttl_s)
 
 
-def approach(
+def move(
     ctx: ToolContext,
-    id: int,
-    dist_m: float = 2.0,
-    target_size_m: float | None = None,
+    forward_m: float = 0.0,
+    right_m: float = 0.0,
+    up_m: float = 0.0,
     ttl_s: float | None = None,
 ) -> str:
-    """Approach a currently visible tracker ID; ``id`` is not a pixel box.
+    """Queue a move relative to the vehicle: metres forward along its heading, to its right, and
+    up (negative for back, left, down).
 
-    ``target_size_m`` is a known object height in metres for calibrated monocular range.
-    The configured ``executor.target_height_m`` covers person targets: the person label, or
-    track-level person evidence (a shirt-colour attribute or a remembered person label), so a
-    frame that mislabels a person as another class does not remove the range. A target with a
-    non-person label and no person evidence needs ``target_size_m``; the refusal names the
-    label. A missing or unvalidated candidate holds and re-identifies instead of failing.
-    Stale/missing observations are rejected; motion remains bounded by executor limits.
+    The target is fixed from the pose and heading when the move starts (after any queued task),
+    then flown like goto (rejected if it would end at or below home altitude); the heading does
+    not change. ``requested_target`` holds the offsets, ``from_heading_deg`` and the NED ``pose``
+    they give; ``executed_target`` the ``pose`` flown.
     """
-    ctx.require_perception()
-    arguments: dict[str, Any] = {"id": id, "dist_m": dist_m}
-    if target_size_m is not None:
-        arguments["target_size_m"] = target_size_m
-    return ctx.submit("approach", arguments, ttl_s)
+    return ctx.submit("move", {"forward_m": forward_m, "right_m": right_m, "up_m": up_m}, ttl_s)
 
 
-def follow(
+def turn(
     ctx: ToolContext,
-    id: int,
-    dist_m: float | None = None,
-    target_size_m: float | None = None,
+    heading_deg: float | None = None,
+    by_deg: float | None = None,
+    rate_deg_s: float | None = None,
     ttl_s: float | None = None,
 ) -> str:
-    """Follow a current tracker ID using bounded motion and fail-safe target revalidation.
+    """Queue a turn in place: give exactly one of ``heading_deg`` (absolute, 0 = north,
+    clockwise; turns the shorter way) or ``by_deg`` (relative, positive = clockwise/right,
+    up to ±360 for a full look around).
 
-    ``target_size_m`` is a known object height in metres for calibrated monocular range.
+    The vehicle hovers while turning at ``rate_deg_s`` (default ``executor.turn_rate_deg_s``;
+    ArduPilot's yaw-rate limits bound how fast it actually turns). A slow sweep gives
+    perception time to see each direction; set ``ttl_s`` to cover sweep / rate plus margin.
     """
-    ctx.require_perception()
-    arguments: dict[str, Any] = {"id": id}
-    if dist_m is not None:
-        arguments["dist_m"] = dist_m
-    if target_size_m is not None:
-        arguments["target_size_m"] = target_size_m
-    return ctx.submit("follow", arguments, ttl_s)
-
-
-def orbit(
-    ctx: ToolContext,
-    id: int,
-    radius_m: float = 2.0,
-    target_size_m: float | None = None,
-    ttl_s: float | None = None,
-) -> str:
-    """Orbit a tracked target; ``target_size_m`` is a known object height in metres.
-
-    The configured ``executor.target_height_m`` covers person targets (label or track-level
-    person evidence); a non-person-labeled target without that evidence needs ``target_size_m``
-    and the refusal names the label. A missing candidate holds and re-identifies instead of
-    failing.
-    """
-    ctx.require_perception()
-    arguments: dict[str, Any] = {"id": id, "radius_m": radius_m}
-    if target_size_m is not None:
-        arguments["target_size_m"] = target_size_m
-    return ctx.submit("orbit", arguments, ttl_s)
-
-
-def scan(ctx: ToolContext, area: dict[str, float], ttl_s: float | None = None) -> str:
-    """Queue a bounded raster scan of a local N/E area.
-
-    The executor clamps area, altitude, speed, and distance to configured limits.
-    ``ttl_s`` optionally sets the task lifetime in seconds; inspect get_task_status
-    for asynchronous completion, expiry, and requested versus executed bounds.
-    """
-    return ctx.submit("scan", {"area": area}, ttl_s)
-
-
-def search(
-    ctx: ToolContext,
-    area: dict[str, float],
-    class_name: str | None = None,
-    attribute: str | None = None,
-    equals: str | None = None,
-    reference_id: int | None = None,
-    ttl_s: float | None = None,
-) -> str:
-    """Fly the same bounded raster as scan and stop on a frame showing a validated cue match.
-
-    Give exactly one of ``class_name`` (a label the configured detector or open-vocabulary
-    grounder emits, matched case-insensitively; the default detector emits COCO labels) with
-    an optional ``attribute``/``equals`` pair from the candidate ``attributes`` (e.g.
-    shirt_colour = red), or ``reference_id`` (a lost tracker ID, re-identified by its stored
-    appearance). Candidates matching only part of the cue never stop the search. Each new
-    processed frame is checked once; a match must also pass fresh appearance validation.
-    On a match the vehicle holds and the task succeeds with ``tracking.matching_ids`` (every
-    validated match visible in that frame); ``tracking.found_id`` is set only when exactly
-    one is visible, otherwise ``tracking.ambiguous`` is true — do not pick one yourself.
-    A ``target_found`` event is published; covering the whole area without a match fails the
-    task. Confirm the ID on get_frame before acting. Clamps, TTL and emergencies apply as for
-    scan.
-    """
-    ctx.require_perception()
-    arguments: dict[str, Any] = {"area": area}
-    for key, value in (
-        ("class_name", class_name), ("attribute", attribute), ("equals", equals), ("reference_id", reference_id)
-    ):
+    arguments: dict[str, Any] = {}
+    for name, value in (("heading_deg", heading_deg), ("by_deg", by_deg), ("rate_deg_s", rate_deg_s)):
         if value is not None:
-            arguments[key] = value
-    return ctx.submit("search", arguments, ttl_s)
+            arguments[name] = value
+    return ctx.submit("turn", arguments, ttl_s)
+
+
+def look(ctx: ToolContext, pitch_deg: float) -> str:
+    """Tilt the gimbal camera: earth-frame ``pitch_deg``, 0 = level, negative = down,
+    -90 = straight down (allowed -90..45).
+
+    Takes effect at once and holds through later skills and take-off until changed;
+    get_state reports ``camera_pitch_deg``. Tilt down to inspect the ground or a landing
+    spot below, toward level to see far ahead; ranges and ground positions use the
+    measured gimbal pitch. The camera always faces the nose: turn the vehicle to look
+    sideways. Refused on a fixed camera (no gimbal attitude reported) and while RTH/LAND
+    point it down for precision landing.
+    """
+    return to_json(ctx.executor.look(pitch_deg))
 
 
 def hold(ctx: ToolContext) -> str:
-    """Preempt queued work and command a bounded emergency hold in GUIDED mode."""
+    """Preempt queued work and hold position in GUIDED mode (an emergency stop)."""
     return to_json(ctx.executor.hold(source="mcp"))  # the executor publishes the event
 
 
@@ -229,7 +171,7 @@ def land(ctx: ToolContext) -> str:
 
 def register(mcp: Any, ctx: ToolContext) -> None:
     for function in (
-        get_state, get_map, get_link_status, take_off, goto, approach, follow, orbit, scan, search,
+        get_state, get_map, get_link_status, take_off, goto, move, turn, look,
         hold, rth, land,
     ):
         ctx.tool(function)

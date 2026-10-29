@@ -17,8 +17,9 @@ from horus.config import HorusConfig
 from horus.event_log import JsonlEventLog
 from horus.events import EventBus
 from horus.executor import HorusExecutor
-from horus.executor.plan import PlanRunner
 from horus.flight import FlightLink
+from horus.maps import create_map_provider
+from horus.own_map import Marks
 
 _LOG = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ def candidate_result(candidate: Any) -> dict[str, Any]:
     if not isinstance(data, dict):
         data = {"candidate": data}
     labels = []
-    for key in ("class_name", "label", "recognized_class"):
+    for key in ("class_name", "label"):
         if key in data:
             labels.append(json.dumps(str(data.pop(key)), ensure_ascii=False))
     if labels:
@@ -124,7 +125,11 @@ class ToolContext:
         self.event_log = event_log
         self.image_publisher = image_publisher
         self.event_bus = event_bus
-        self.plans = PlanRunner(executor, require_perception=self.require_perception)
+        # The drone's own marks persist next to the run's event log (horus.own_map).
+        self.marks = Marks(event_log.path.parent / "marks.json" if event_log is not None else None)
+        self.maps = create_map_provider(
+            config.map, (config.flight.global_origin_latitude_deg, config.flight.global_origin_longitude_deg)
+        )
 
     def tool(self, function: Callable[..., Any], **options: Any) -> None:
         """Register ``function(ctx, **arguments)`` as an event-logged MCP tool.
@@ -231,7 +236,8 @@ class ToolContext:
                 "last_frame_age_s": None,
                 "reason": self.perception_unavailable_reason or "perception is disabled",
             }
-        return dict(self.perception.camera_status())
+        # The configured frame source tells a commander (and an operator) which world it watches.
+        return {**self.perception.camera_status(), "source": self.config.perception.source}
 
     def perception_system(self) -> Any:
         """Return perception even when its camera is not streaming (scene tools report staleness)."""
@@ -250,6 +256,5 @@ class ToolContext:
         return system
 
     def submit(self, skill: str, arguments: dict[str, Any], ttl_s: float | None) -> str:
-        """Queue a direct skill; a running plan owns the queue until it ends or is cancelled."""
-        self.plans.require_idle()
+        """Queue a direct skill; the executor runs queued skills one at a time."""
         return to_json(self.executor.submit_skill(skill, arguments, ttl_s))

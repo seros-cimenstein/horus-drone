@@ -1,20 +1,12 @@
 # Outdoor 150 m forest map. The outdoor profiles (horus_urban, horus_procedural_*) share the
 # perception settings explained here.
+gimbal:
+  # Simulated gimbal device; see config/horus.yaml.
+  connection: udpin:127.0.0.1:14600
 executor:
-  max_speed_m_s: 3.0
-  max_vertical_speed_m_s: 1.5
-  max_distance_m: 70.0
-  min_altitude_m: 1.0
-  max_altitude_m: 36.0
-  # Keeps the drone inside the 150 m map.
-  geofence_polygon_ned:
-    - [-65.0, -65.0]
-    - [-65.0, 65.0]
-    - [65.0, 65.0]
-    - [65.0, -65.0]
+  speed_m_s: 3.0
+  vertical_speed_m_s: 1.5
   arrival_tolerance_m: 0.4
-  follow_distance_m: 3.0
-  target_height_m: 1.9
   camera_horizontal_fov_deg: 84.0
   default_gimbal_pitch_deg: -45.0
 perception:

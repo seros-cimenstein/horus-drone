@@ -274,6 +274,8 @@ def test_emergency_grammar_accepts_only_short_imperatives():
         ("land immediately.", "land"),
         ("rth", "rth"),
         ("return home now!", "rth"),
+        ("home", "rth"),
+        ("go home!", "rth"),
     ):
         assert emergency_action(command) == expected
     for command in (
@@ -283,6 +285,8 @@ def test_emergency_grammar_accepts_only_short_imperatives():
         "stop after reaching the doorway",
         "return home when safe",
         "land now because the battery is low",
+        "go home after the scan",
+        "home is to the north",
     ):
         assert emergency_action(command) is None
 
@@ -507,17 +511,17 @@ def test_task_grammar_bypasses_model_only_for_exact_emergency_text():
 def test_event_pump_coalesces_relevant_events_and_skips_without_active_mission():
     events = [
         {"id": 1, "time": "t1", "kind": "task_finished", "summary": "done", "data": {}},
-        {"id": 2, "time": "t2", "kind": "target_lost", "summary": "track 4", "data": {}},
+        {"id": 2, "time": "t2", "kind": "pilot_override", "summary": "pilot took control", "data": {}},
     ]
 
     active_messages, active_events = _pump_one_batch(events)
     assert len(active_messages) == 1  # one coalesced wake-up carrying both events
-    assert "done" in active_messages[0] and "track 4" in active_messages[0]
-    assert [event["kind"] for event in active_events] == ["task_finished", "target_lost"]
+    assert "done" in active_messages[0] and "pilot took control" in active_messages[0]
+    assert [event["kind"] for event in active_events] == ["task_finished", "pilot_override"]
 
     inactive_messages, inactive_events = _pump_one_batch(events, mission_active=False)
     assert inactive_messages == []
-    assert [event["kind"] for event in inactive_events] == ["task_finished", "target_lost"]
+    assert [event["kind"] for event in inactive_events] == ["task_finished", "pilot_override"]
 
 
 def test_reset_endpoint_and_operator_reset_discard_the_active_mission():
@@ -599,15 +603,14 @@ def test_region_events_wake_the_mission_once_per_watch_and_kind_and_count_repeat
     assert "region_enter[watch-1] x2" in lines[-1]
 
 
-def test_plan_log_is_mirrored_to_the_gui_without_waking_the_mission():
+def test_wait_only_events_are_neither_mirrored_nor_wake_the_mission():
     messages, mirrored = _pump_one_batch([
-        {"id": 1, "time": "t", "kind": "plan_log", "summary": "goto 1", "data": {"plan_id": "p"}},
-        {"id": 2, "time": "t", "kind": "vocabulary_changed", "summary": "terms", "data": {}},
-        {"id": 3, "time": "t", "kind": "plan_finished", "summary": "plan p succeeded", "data": {}},
+        {"id": 1, "time": "t", "kind": "vocabulary_changed", "summary": "terms", "data": {}},
+        {"id": 2, "time": "t", "kind": "task_finished", "summary": "goto succeeded", "data": {}},
     ])
 
-    assert [event["kind"] for event in mirrored] == ["plan_log", "plan_finished"]
-    assert len(messages) == 1 and "plan p succeeded" in messages[0] and "goto 1" not in messages[0]
+    assert [event["kind"] for event in mirrored] == ["task_finished"]
+    assert len(messages) == 1 and "goto succeeded" in messages[0] and "terms" not in messages[0]
 
 
 def test_commander_service_reads_the_mcp_token_from_the_configured_auth_token_env(

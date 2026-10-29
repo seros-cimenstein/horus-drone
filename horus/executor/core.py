@@ -14,15 +14,19 @@ from enum import Enum
 from typing import Any, Callable, Mapping
 
 from horus.config import ExecutorSettings
-from horus.executor.area import step_area
-from horus.executor.geofence import Envelope
 from horus.executor.perception_port import PerceptionPort
 from horus.executor.precision_landing import PrecisionLanding
-from horus.executor.skills import TRACKING_SKILLS, SkillContext, parse_pose, prepare, tracking_record
-from horus.executor.target_range import TargetRanger
-from horus.executor.target_skills import step_target
+from horus.executor.skills import (
+    SkillContext,
+    move_target,
+    outcome_reason,
+    parse_pose,
+    prepare,
+    require_above_home,
+)
 from horus.events import TERMINAL_TASK_STATUSES, EventBus
 from horus.flight import FlightLink, Pose, Telemetry
+from horus.gimbal import Gimbal
 
 
 logger = logging.getLogger(__name__)
@@ -68,51 +72,40 @@ class SkillTask:
     status: str = "queued"
     result: dict[str, Any] | None = None
     error: str | None = None
+    # Short outcome code once terminal (skills.outcome_reason), reported as the task's ``reason``.
+    reason: str | None = None
     cancel_requested: bool = False
     _phase: str = "start"
-    _waypoints: list[Pose] = field(default_factory=list)
-    _waypoint_index: int = 0
     _target_pose: Pose | None = None
     _arm_requested_monotonic: float = 0.0
-    tracking: dict[str, Any] = field(default_factory=dict)
-    _target_lost_at: float | None = None
-    # World heading (deg) of the target at its last validated frame; a lost target is held facing it.
-    _last_target_facing_deg: float | None = None
-    _target_lost_at_sim_s: float | None = None
-    # Target skills: the target's last validated ground position (NED north, east) and the
-    # horizontal distance from it at which the standoff is met, for closing on it while it is lost.
-    _last_target_ned: tuple[float, float] | None = None
-    _last_target_stop_m: float = 0.0
-    # Approach: when progress toward the target first stalled at the geofence (monotonic s).
-    _fence_blocked_since: float | None = None
-    # Approach: start (monotonic s) and horizontal position (north, east) of the current window in
-    # which the vehicle, commanded toward the target, has not moved; see target_skills._check_stall.
-    _stall_since: float | None = None
-    _stall_position: tuple[float, float] | None = None
-    _range_note_warned: bool = False
+    # Turn: the heading at the start, the signed sweep to turn through (deg, + = clockwise), how
+    # much of it the yaw setpoint has covered, and the (monotonic, autopilot) clock of the last tick.
+    _turn_from_deg: float = 0.0
+    _turn_sweep_deg: float = 0.0
+    _turn_progress_deg: float = 0.0
+    _turn_clock: tuple[float, float | None] | None = None
     _finished_event_published: bool = False
-    _search_frame_id: int | None = None
 
     def terminate(self, status: str, error: str | None) -> None:
         """Enter a terminal status and freeze the caller-visible result."""
         self.status = status
         self.error = error
+        self.reason = outcome_reason(status, self.clamp_reason is not None)
         self.result = {
             "success": status == "succeeded",
             "status": status,
+            "reason": self.reason,
             "requested_target": self.requested_target,
             "executed_target": self.executed_target,
             "clamp_reason": self.clamp_reason,
             "error": error,
         }
-        if self.skill in TRACKING_SKILLS:
-            self.result["tracking"] = dict(self.tracking)
 
 
 class HorusExecutor:
-    """Serialize skills and continuously command bounded velocity from current telemetry."""
+    """Serialize skills and continuously command velocity setpoints from current telemetry."""
 
-    SKILLS = {"take_off", "goto", "approach", "follow", "orbit", "scan", "search"}
+    SKILLS = {"take_off", "goto", "move", "turn"}
     ARM_RETRY_INTERVAL_S = 2.0
     HEADING_TOLERANCE_DEG = 5.0
     LINK_EVENT_DEBOUNCE_S = 5.0
@@ -128,15 +121,16 @@ class HorusExecutor:
         perception: PerceptionPort | None = None,
         *,
         event_bus: EventBus | None = None,
+        gimbal: Gimbal | None = None,
         autostart: bool = True,
     ):
-        self.envelope = Envelope(settings)
         self.flight = flight
         self.settings = settings
         self.perception = perception
         self.event_bus = event_bus
-        self._ranger = TargetRanger(settings, perception)
-        self._skill_context = SkillContext(settings, self.envelope, self._current_pose, perception is not None)
+        # The camera gimbal HORUS drives directly; None is a fixed camera.
+        self.gimbal = gimbal
+        self._skill_context = SkillContext(settings)
         self._lock = threading.RLock()
         # Lock order: _command_lock, then _lock. _command_lock covers only autopilot command
         # operations, never perception or model work, so an emergency waits at most for one
@@ -163,6 +157,8 @@ class HorusExecutor:
         self._observed_mode: str | None = None
         self._pending_mode: tuple[str, float] | None = None
         self._pilot_override: str | None = None
+        # Earth-frame camera pitch HORUS keeps the gimbal at outside precision landing (look).
+        self._look_pitch_deg = float(settings.default_gimbal_pitch_deg)
         self._precision = PrecisionLanding(self)
         self._worker: threading.Thread | None = None
         if autostart:
@@ -172,12 +168,6 @@ class HorusExecutor:
     def state(self) -> ExecutorState:
         with self._lock:
             return self._state
-
-    @property
-    def emergency_epoch(self) -> int:
-        """Bumped by every emergency and pilot override; a plan stops when it changes."""
-        with self._lock:
-            return self._emergency_epoch
 
     def start(self) -> None:
         with self._lock:
@@ -212,7 +202,10 @@ class HorusExecutor:
         Pose, heading, range and frame samples older than ``telemetry_max_age_s`` never drive
         translation; None (never received) is never fresh.
         """
-        return self._ranger.fresh(updated_monotonic)
+        if updated_monotonic is None:
+            return False
+        age = time.monotonic() - float(updated_monotonic)
+        return math.isfinite(age) and age <= self.settings.telemetry_max_age_s
 
     def get_state(self) -> dict[str, Any]:
         telemetry = self._telemetry()
@@ -225,7 +218,10 @@ class HorusExecutor:
                 "observed_at": telemetry.observed_at,
                 "precision_landing": {"active": self._precision.active, **self._precision.stats},
                 "pilot_override": self._pilot_override,
+                "camera_pitch_deg": self._look_pitch_deg,
             }
+        attitude = None if self.gimbal is None else self.gimbal.attitude()
+        snapshot["gimbal"] = None if attitude is None else attitude.as_dict()
         snapshot["vehicle"] = telemetry.as_dict()
         return snapshot
 
@@ -263,7 +259,6 @@ class HorusExecutor:
             created_at=datetime.now(timezone.utc).isoformat(),
             created_monotonic=now,
             expires_monotonic=now + ttl,
-            tracking=tracking_record(skill, args),
         )
         with self._lock:
             if self._pilot_override is not None:
@@ -468,7 +463,7 @@ class HorusExecutor:
             self._tick_context.epoch = epoch
         try:
             if restore_default_pitch:
-                self._command(self._set_default_gimbal_pitch)
+                self._command(self._aim_camera)
             if task is None:
                 if precision_mode is not None:
                     self._precision.step(precision_mode)
@@ -526,8 +521,8 @@ class HorusExecutor:
         if task._phase == "start":
             self._command_mode("GUIDED")
             if task.skill == "take_off":
-                # Set the configured search angle after any prior precision landing.
-                self._command(self._set_default_gimbal_pitch)
+                # Aim the camera at the commanded pitch again after any prior precision landing.
+                self._command(self._aim_camera)
                 altitude = float(task.executed_target["altitude_m"])
                 pose = self._current_pose()
                 task._target_pose = Pose(
@@ -539,8 +534,10 @@ class HorusExecutor:
                 return False
             elif task.skill == "goto":
                 task._target_pose = parse_pose(task.executed_target)
-            elif task.skill in ("scan", "search"):
-                task._waypoints = [parse_pose(point) for point in task.executed_target]
+            elif task.skill == "move":
+                self._start_move(task)
+            elif task.skill == "turn":
+                self._start_turn(task)
             task._phase = "control"
         if task.skill == "take_off" and task._phase == "guiding":
             if self._telemetry().mode.upper() != "GUIDED":
@@ -568,7 +565,7 @@ class HorusExecutor:
             if current.up_m < task._target_pose.up_m - self.settings.arrival_tolerance_m:
                 return False
             task._phase = "control"
-        if task.skill in ("take_off", "goto"):
+        if task.skill in ("take_off", "goto", "move"):
             arrived = self._goto_step(task._target_pose)
             heading = task.executed_target.get("heading_deg")
             if arrived and heading is not None:
@@ -579,27 +576,96 @@ class HorusExecutor:
                     self._command(self.flight.set_velocity_ned, 0.0, 0.0, 0.0, yaw_deg=heading)
                     return False
             return arrived
-        if task.skill in ("scan", "search"):
-            return step_area(self, task)
-        return step_target(self, task)
+        if task.skill == "turn":
+            return self._turn_step(task)
+        raise RuntimeError(f"unsupported skill {task.skill}")
 
-    def _horizontal_speed_limit(self, target_altitude_m: float | None = None) -> float:
-        """Horizontal speed limit for the current leg: gated cruise speed or ``max_speed_m_s``.
+    def _fresh_heading_deg(self, telemetry: Telemetry) -> float:
+        self._require_fresh(telemetry.heading_updated_monotonic, "heading")
+        return float(telemetry.heading_deg or 0.0)
 
-        The cruise speed is allowed only while the vehicle's current altitude above home is
+    def _start_move(self, task: SkillTask) -> None:
+        """Resolve a body-frame move against the pose and heading at its start."""
+        telemetry = self._telemetry()
+        current = telemetry.pose
+        if current is None:
+            raise RuntimeError("local vehicle pose unavailable; refusing open-loop movement")
+        self._require_fresh(telemetry.pose_updated_monotonic, "pose")
+        heading = self._fresh_heading_deg(telemetry)
+        offsets = dict(task.requested_target)
+        target = move_target(current, heading, offsets)
+        require_above_home(target, "move")
+        task._target_pose = target
+        task.requested_target = {**offsets, "from_heading_deg": heading, "pose": target.as_dict()}
+        task.executed_target = {"from_heading_deg": heading, "pose": target.as_dict()}
+
+    def _start_turn(self, task: SkillTask) -> None:
+        """Fix the sweep from the heading at the start: ``by_deg`` as given, else the shortest way."""
+        telemetry = self._telemetry()
+        heading = self._fresh_heading_deg(telemetry)
+        target = task.executed_target
+        if "by_deg" in target:
+            sweep = float(target["by_deg"])
+        else:
+            sweep = (float(target["heading_deg"]) - heading + 180.0) % 360.0 - 180.0
+        task._turn_from_deg = heading
+        task._turn_sweep_deg = sweep
+        task._turn_clock = (time.monotonic(), self._fresh_sim_time_s(telemetry))
+        task.executed_target = {
+            **target, "heading_deg": (heading + sweep) % 360.0, "from_heading_deg": heading, "sweep_deg": sweep,
+        }
+
+    def _turn_step(self, task: SkillTask) -> bool:
+        """Hover while the yaw setpoint sweeps at the task's rate; done once the final heading holds.
+
+        The setpoint advances by autopilot time when both ticks have a fresh SYSTEM_TIME (so the
+        rate holds at any sim real-time factor), else by wall time; one tick advances it at most 0.5 s.
+        """
+        telemetry = self._telemetry()
+        heading = self._fresh_heading_deg(telemetry)
+        now = (time.monotonic(), self._fresh_sim_time_s(telemetry))
+        previous = task._turn_clock or now
+        if now[1] is not None and previous[1] is not None:
+            elapsed = now[1] - previous[1]
+        else:
+            elapsed = now[0] - previous[0]
+        task._turn_clock = now
+        sweep = task._turn_sweep_deg
+        rate = float(task.executed_target["rate_deg_s"])
+        task._turn_progress_deg = min(abs(sweep), task._turn_progress_deg + rate * max(0.0, min(elapsed, 0.5)))
+        if task._turn_progress_deg >= abs(sweep):
+            final = task._turn_from_deg + sweep
+            if abs((final - heading + 180.0) % 360.0 - 180.0) <= self.HEADING_TOLERANCE_DEG:
+                return True
+        setpoint = task._turn_from_deg + math.copysign(task._turn_progress_deg, sweep)
+        self._command(self.flight.set_velocity_ned, 0.0, 0.0, 0.0, yaw_deg=setpoint % 360.0)
+        return False
+
+    def _fresh_sim_time_s(self, telemetry: Telemetry) -> float | None:
+        """Autopilot time in seconds, or ``None`` when the SYSTEM_TIME sample is stale/absent."""
+        if not self._fresh(telemetry.time_boot_updated_monotonic):
+            return None
+        return self._sim_time_s(telemetry)
+
+    def _horizontal_speed(self, target_altitude_m: float | None = None) -> float:
+        """Horizontal speed for the current leg: the gated cruise speed or ``speed_m_s``.
+
+        The cruise speed applies only while the vehicle's current altitude above home is
         at/above ``cruise_min_altitude_m`` AND the commanded target altitude is too, so the
-        whole leg stays above the obstacle band; anywhere below it the proven ``max_speed_m_s``
-        applies. A disabled cruise (None) always returns ``max_speed_m_s``.
+        whole leg stays above the obstacle band; anywhere below it ``speed_m_s`` applies.
+        A disabled cruise (None) always returns ``speed_m_s``.
         """
         cruise = self.settings.cruise_speed_m_s
-        if cruise is None:
-            return self.settings.max_speed_m_s
         gate = self.settings.cruise_min_altitude_m
         current = self._current_pose()
-        if current is None or gate is None or current.up_m < gate:
-            return self.settings.max_speed_m_s
-        if target_altitude_m is not None and target_altitude_m < gate:
-            return self.settings.max_speed_m_s
+        if (
+            cruise is None
+            or current is None
+            or gate is None
+            or current.up_m < gate
+            or (target_altitude_m is not None and target_altitude_m < gate)
+        ):
+            return self.settings.speed_m_s
         return cruise
 
     def _goto_step(self, target: Pose) -> bool:
@@ -613,11 +679,11 @@ class HorusExecutor:
         if horizontal <= self.settings.arrival_tolerance_m and vertical <= self.settings.arrival_tolerance_m:
             self._command_zero_velocity()
             return True
-        speed_limit = self._horizontal_speed_limit(target.up_m)
-        scale = min(1.0, speed_limit / horizontal) if horizontal > 1e-6 else 0.0
+        speed = self._horizontal_speed(target.up_m)
+        scale = min(1.0, speed / horizontal) if horizontal > 1e-6 else 0.0
         vn = north * scale
         ve = east * scale
-        vu = max(-self.settings.max_vertical_speed_m_s, min(self.settings.max_vertical_speed_m_s, up))
+        vu = max(-self.settings.vertical_speed_m_s, min(self.settings.vertical_speed_m_s, up))
         # Velocity-only SET_POSITION_TARGET_LOCAL_NED is the only translation command.
         self._command(self.flight.set_velocity_ned, vn, ve, -vu)
         return False
@@ -638,11 +704,58 @@ class HorusExecutor:
     def _command_zero_velocity(self) -> None:
         self._command(self.flight.set_velocity_ned, 0.0, 0.0, 0.0)
 
-    def _set_default_gimbal_pitch(self) -> None:
+    def _gimbal_pitch(self, requested: float) -> float:
+        """``requested`` clamped to the gimbal's pitch range (call only with a gimbal)."""
+        settings = self.gimbal.settings
+        return max(settings.pitch_min_deg, min(settings.pitch_max_deg, requested))
+
+    def _aim_camera(self) -> None:
+        """Point the gimbal at the commanded pitch (``look``, else the configured default), nose-aligned."""
+        if self.gimbal is None:
+            return
+        with self._lock:
+            pitch = self._gimbal_pitch(self._look_pitch_deg)
         try:
-            self.flight.set_gimbal_pitch_yaw(self.settings.default_gimbal_pitch_deg, 0.0)
+            self.gimbal.point(pitch, 0.0)
         except Exception as exc:  # camera aiming must never block flight
             logger.warning("could not set gimbal pitch: %s", exc)
+
+    def look(self, pitch_deg: float) -> dict[str, Any]:
+        """Tilt the gimbal to an earth-frame ``pitch_deg`` (negative down, -90 straight down).
+
+        The pitch holds through later skills, take-off and a preempted precision landing until
+        changed. Refused without a gimbal (a fixed camera) or while it reports no attitude, under a
+        pilot override, and while RTH/LAND own the camera for precision landing.
+        """
+        requested = float(pitch_deg)
+        if not math.isfinite(requested):
+            raise ValueError("pitch_deg must be a finite number")
+        if self.gimbal is None:
+            raise RuntimeError(
+                "no gimbal is configured, so the camera is fixed; turn the vehicle to look around"
+            )
+        if self.gimbal.attitude() is None:
+            raise RuntimeError(
+                "the gimbal reports no attitude (GIMBAL_DEVICE_ATTITUDE_STATUS), so the camera is "
+                "treated as fixed; turn the vehicle to look around"
+            )
+        pitch = self._gimbal_pitch(requested)
+        with self._command_lock:
+            with self._lock:
+                if self._pilot_override is not None:
+                    raise RuntimeError(self._pilot_override_message())
+                if self._precision.fallback_mode is not None or self._precision.gimbal_requested_at is not None:
+                    raise RuntimeError("RTH/LAND owns the camera for precision landing; look after it ends")
+                self._look_pitch_deg = pitch
+            self.gimbal.point(pitch, 0.0)
+        settings = self.gimbal.settings
+        return {
+            "requested_pitch_deg": requested,
+            "pitch_deg": pitch,
+            "clamp_reason": None if pitch == requested else (
+                f"gimbal pitch limited to {settings.pitch_min_deg:g}..{settings.pitch_max_deg:g} deg"
+            ),
+        }
 
     def _safe_hold(self) -> None:
         self._command(self._flight_hold)
@@ -673,10 +786,6 @@ class HorusExecutor:
         )
 
     def _finish(self, task: SkillTask, status: str, error: str | None) -> None:
-        if task.skill in ("scan", "search") and task._waypoints:
-            # A started scan reports the waypoints as re-clamped in flight; one that never
-            # started keeps the clamped plan computed at submission.
-            task.executed_target = [point.as_dict() for point in task._waypoints]
         task.terminate(status, error)
         if self._active_id == task.task_id:
             self._active_id = None
@@ -699,9 +808,8 @@ class HorusExecutor:
             "clamp_reason": task.clamp_reason,
             "result": task.result,
             "error": task.error,
+            "reason": task.reason,
         }
-        if task.skill in TRACKING_SKILLS:
-            result["tracking"] = dict(task.tracking)
         return result
 
     def get_task_status(self, task_id: str) -> dict[str, Any]:
@@ -763,7 +871,7 @@ class HorusExecutor:
             if action == "hold":
                 self._flight_hold()
                 if restore_default_pitch:
-                    self._set_default_gimbal_pitch()
+                    self._aim_camera()
             elif action in _ACTION_MODES:
                 self._send_mode(_ACTION_MODES[action])
         for task in preempted:

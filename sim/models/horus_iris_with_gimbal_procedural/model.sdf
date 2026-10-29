@@ -1,6 +1,7 @@
 <?xml version='1.0'?>
 <sdf version="1.9">
-  <!-- Vendored from ardupilot_gazebo iris_with_gimbal; only the gimbal model URI is localized. -->
+  <!-- Vendored from ardupilot_gazebo iris_with_gimbal: the gimbal model URI is localized and the
+       ArduPilotPlugin drives no gimbal channels; horus-gz-gimbal (horus/gimbal/gazebo.py) does. -->
   <model name="horus_iris_with_gimbal_outdoor">
     <include>
       <uri>model://horus_iris_standoffs_procedural</uri>
@@ -10,6 +11,13 @@
       <uri>model://horus_gimbal_small_3d_procedural</uri>
       <name>gimbal</name>
       <pose degrees="true">0 -0.01 -0.124923 90 0 90</pose>    
+      <!-- Gimbal joint positions for horus-gz-gimbal; a publisher on the airframe model would only
+           see the airframe's own joints, not the nested gimbal's. -->
+      <plugin filename="gz-sim-joint-state-publisher-system"
+        name="gz::sim::systems::JointStatePublisher">
+        <topic>/gimbal/joint_state</topic>
+        <update_rate>50</update_rate>
+      </plugin>
     </include>
 
     <joint name="gimbal_joint" type="revolute">
@@ -294,44 +302,9 @@
         <controlVelocitySlowdownSim>1</controlVelocitySlowdownSim>
       </control>
 
-      <!-- roll range is -30 to +30 deg -->
-      <control channel="8">
-        <jointName>gimbal::roll_joint</jointName>
-        <multiplier>1.047197551196</multiplier>
-        <offset>-0.5</offset>
-        <servo_min>1100</servo_min>
-        <servo_max>1900</servo_max>
-        <type>COMMAND</type>
-        <cmd_topic>/gimbal/cmd_roll</cmd_topic>
-        <p_gain>2</p_gain>
-      </control>
-
-      <!-- pitch range is -135 to +45 deg -->
-      <control channel="9">
-        <jointName>gimbal::pitch_joint</jointName>
-        <multiplier>-3.14159265</multiplier>
-        <offset>-0.75</offset>
-        <servo_min>1100</servo_min>
-        <servo_max>1900</servo_max>
-        <type>COMMAND</type>
-        <cmd_topic>/gimbal/cmd_pitch</cmd_topic>
-        <p_gain>2</p_gain>
-      </control>
-
-      <!-- yaw range is -160 to +160 deg -->
-      <control channel="10">
-        <jointName>gimbal::yaw_joint</jointName>
-        <multiplier>-5.5850536</multiplier>
-        <offset>-0.5</offset>
-        <servo_min>1100</servo_min>
-        <servo_max>1900</servo_max>
-        <type>COMMAND</type>
-        <cmd_topic>/gimbal/cmd_yaw</cmd_topic>
-        <p_gain>2</p_gain>
-      </control>
-
     </plugin>
 
+    <!-- Gimbal joints, commanded by horus-gz-gimbal on /gimbal/cmd_roll|pitch|yaw. -->
     <plugin
       filename="gz-sim-joint-position-controller-system"
       name="gz::sim::systems::JointPositionController">

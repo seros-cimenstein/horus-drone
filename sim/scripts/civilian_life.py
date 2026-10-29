@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from scripts.gz_sim import _SimClock, load_gz_bindings
-from sim.campaign.civilian_spec import (
+from sim.scripts.civilian_spec import (
     AgentSpec,
     LoopPolyline,
     Scenario,

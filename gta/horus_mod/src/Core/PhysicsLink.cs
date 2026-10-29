@@ -3,7 +3,7 @@ using System;
 namespace HorusGta
 {
     /// <summary>
-    /// Gimbal angles from a servo-driven mount (ArduPilot MNTx_TYPE 1, config/ardupilot/common.parm):
+    /// Gimbal angles from a servo-driven mount (ArduPilot MNTx_TYPE 1, the physics-mode stand-in in sim/scripts/start_gta_sitl.sh):
     /// SERVO9 roll (function 8), SERVO10 tilt (7), SERVO11 pan (6). The servos sit on the body and
     /// ArduPilot already subtracts the vehicle's lean from the roll and tilt outputs, so these are
     /// angles relative to the body, not to the horizon.
@@ -12,7 +12,7 @@ namespace HorusGta
     {
         /// <summary>1-based servo output channels driving mount roll, pitch and yaw.</summary>
         public int RollChannel = 9, PitchChannel = 10, YawChannel = 11;
-        /// <summary>MNT1_ROLL_MIN/MAX (ArduPilot defaults), MNT1_PITCH_MIN/MAX and MNT1_YAW_MIN/MAX of common.parm.</summary>
+        /// <summary>MNT1_ROLL_MIN/MAX (ArduPilot defaults), MNT1_PITCH_MIN/MAX and MNT1_YAW_MIN/MAX of start_gta_sitl.sh's physics mode.</summary>
         public double RollMinDeg = -30, RollMaxDeg = 30, PitchMinDeg = -135, PitchMaxDeg = 45, YawMinDeg = -160, YawMaxDeg = 160;
         public int ServoMinUs = 1100, ServoMaxUs = 1900;
 
