@@ -1,4 +1,4 @@
-# ArduPilot Copter-4.7.1 GPS-denied SITL profile (S4): loaded after common.parm and indoor.parm.
+# ArduPilot Copter-4.7.1 GPS-denied SITL profile: loaded after common.parm and indoor.parm.
 # SITL parameter groups are prefixed SIM_; GPSParms exposes ENABLE as SIM_GPS1_ENABLE.
 SIM_GPS1_ENABLE 0
 
@@ -17,7 +17,3 @@ EK3_SRC1_POSXY 0
 EK3_SRC1_VELXY 5
 EK3_SRC1_POSZ 1
 EK3_SRC1_VELZ 0
-
-# Optical-flow measurement noise (rad/s). SITL flow is otherwise ideal, which hides drift; ArduPilot's
-# own optical-flow autotest uses 0.02. 0.05 represents a noisier indoor sensor for the S4 experiment.
-SIM_FLOW_RND 0.05

@@ -2,38 +2,26 @@
 # explained here; the outdoor perception settings are explained in config/horus_forest.yaml.
 flight:
   # Startup connect only: SITL's first heartbeat on a 1.2 km world waits for Gazebo to load and
-  # render its first sensor frames, which takes well over 30 s at Koko's real-time factor.
+  # render its first sensor frames, which takes well over 30 s at a slow host's real-time factor.
   heartbeat_timeout_s: 180.0
+gimbal:
+  # Simulated gimbal device; see config/horus.yaml.
+  connection: udpin:127.0.0.1:14600
 executor:
-  # A single goto is clamped to max_distance_m = 850 m; at the 8 m/s cruise that is
-  # 850 / 8 = 106 s of flight. Command TTLs are wall-clock and Koko sustains RTF ~0.35-0.45
-  # on the 1.2 km worlds, so the flight alone can cost 106 / 0.35 ~= 304 s of wall time;
-  # 360 s covers that plus ~3 s of acceleration at ArduPilot's default WP_ACC (2.5 m/s^2),
-  # yaw alignment and the arrival slowdown. Slower hosts scale further with the campaign's
-  # --ttl-scale.
+  # Command TTLs are wall-clock: an 850 m goto at the 8 m/s cruise is 850 / 8 = 106 s of
+  # flight, and a host at RTF ~0.35 on the 1.2 km worlds makes that ~304 s of wall time;
+  # 360 s covers it plus ~3 s of acceleration at ArduPilot's default WP_ACC (2.5 m/s^2),
+  # yaw alignment and the arrival slowdown. A longer leg passes a larger ttl_s.
   command_ttl_s: 360.0
-  max_speed_m_s: 3.0
-  # Above the 23 m tree cap + 3 m margin the horizontal limit rises to 8 m/s; below it (or on
-  # a leg whose commanded target altitude is lower) the proven 3 m/s limit applies.
+  speed_m_s: 3.0
+  # Above the 23 m tree cap + 3 m margin the horizontal speed rises to 8 m/s; below it (or on
+  # a leg whose commanded target altitude is lower) the controller flies at 3 m/s.
   cruise_speed_m_s: 8.0
   cruise_min_altitude_m: 26.0
-  max_vertical_speed_m_s: 1.5
-  # Scan areas and gotos may lie anywhere in the 1.2 km map (the executor clamps each
-  # single goto to this distance from the vehicle).
-  max_distance_m: 850.0
-  min_altitude_m: 1.0
-  max_altitude_m: 36.0
-  # The boundary keeps the drone inside the generated map (map half extent 600 m minus a 15 m
-  # edge margin), so mission targets may be placed anywhere on the map, not only near home. The
-  # generator's transit altitude stays >= cruise_min_altitude_m and <= max_altitude_m.
-  geofence_polygon_ned:
-    - [-585.0, -585.0]
-    - [-585.0, 585.0]
-    - [585.0, 585.0]
-    - [585.0, -585.0]
+  vertical_speed_m_s: 1.5
+  # The generator's transit altitude stays >= cruise_min_altitude_m. ArduPilot's fence
+  # (config/ardupilot/outdoor.parm, procedural_fence.parm) bounds the map and altitude.
   arrival_tolerance_m: 0.4
-  follow_distance_m: 3.0
-  target_height_m: 1.9
   camera_horizontal_fov_deg: 84.0
   default_gimbal_pitch_deg: -45.0
 perception:

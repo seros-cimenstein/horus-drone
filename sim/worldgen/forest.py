@@ -10,11 +10,9 @@ from sim.worldgen.assembly import assemble_world
 from sim.worldgen.dressing import Dressing
 from sim.worldgen.environment import Environment
 from sim.worldgen.layout import (
-    CLEARING_SCAN_MARGIN_M, FOREST_VANTAGE_ROLES, ForestLayout, clears_actor_columns,
-    clears_actor_routes, clears_clearing_scan, distance_to_path, forest_ground_rows, forest_surface,
+    ForestLayout, clears_actor_routes, distance_to_path, forest_ground_rows, forest_surface,
 )
 from sim.worldgen.plan import checked_transit_altitude
-from sim.worldgen.scenario import follow_manifest
 from sim.worldgen.sdf import (
     TREE_BARK, TREE_CONIFER, TREE_DECIDUOUS, box_geometry, collision, collision_at, cone_geometry,
     cylinder_geometry, f, include, material, sphere_geometry, static_model, visual,
@@ -28,9 +26,6 @@ def forest_height(x: float, y: float, layout: ForestLayout) -> float:
 
 
 BODY_CLEARANCE_M = 0.6  # walker body radius plus the route-clearance margin
-# Canonical follow occluder: (height above the bush base, sphere radius) tiers of a dense
-# bush / tree crown. The lower tiers keep walkers clear; the upper tiers span the camera ray.
-CANONICAL_OCCLUDER_TIERS = ((0.65, 0.65), (1.55, 0.85), (3.10, 1.25))
 
 
 def tree_visuals(layout: ForestLayout, rng: random.Random, env: Environment) -> str:
@@ -38,16 +33,11 @@ def tree_visuals(layout: ForestLayout, rng: random.Random, env: Environment) -> 
     parts: list[str] = []
     occupied: list[tuple[float, float]] = []
     target = layout.tree_count
-    missing_tree_x, missing_tree_y = layout.missing_canopy_tree
     low, high = layout.tree_height_range
     trail_clearance = 5.8
     # The tallest canopy (0.40 * high) must keep the 2.6 m home-column clearance; the extra
     # 0.6 m covers terrain differences between the tree base and the column.
     home_clearance = 9.0
-    surface = forest_surface(layout)
-    vantage_columns = [(person.position[0], person.position[1],
-                        surface.height(*person.position) + 0.25)
-                       for person in layout.people if person.role in FOREST_VANTAGE_ROLES]
     for _ in range(24000):
         if len(occupied) >= target:
             break
@@ -60,27 +50,10 @@ def tree_visuals(layout: ForestLayout, rng: random.Random, env: Environment) -> 
         if (distance_to_path((x, y), layout.trail) < trail_clearance
                 or distance_to_path((x, y), layout.creek) < 6.5):
             continue
-        if math.hypot(x - layout.missing_hiker.position[0], y - layout.missing_hiker.position[1]) < 2.7:
-            continue
-        if math.hypot(x - missing_tree_x, y - missing_tree_y) < 5.2:
-            continue
         base = forest_height(x, y, layout)
         height = rng.uniform(low, high)
-        # The trunk-distance clearing check above is not enough: conifer canopies reach
-        # 0.40 * height horizontally, so a tree just outside the clearing can still hang
-        # over the scan raster flown at 10 m. Reject its whole conservative canopy
-        # envelope when it would come within the scan margin of that corridor.
-        if not clears_clearing_scan(x, y, base + 0.26 * height, base + 1.18 * height,
-                                    0.40 * height, layout.clearing, layout.clearing_radius):
-            continue
-        canopy_low, canopy_high = base + 0.26 * height, base + 1.18 * height
-        canopy_radius = 0.40 * height
-        # No canopy may cover a person-of-interest's descent column (it would leave the
-        # planner no vantage), and every route/body point keeps physical clearance.
-        if not clears_actor_columns(x, y, canopy_low, canopy_high, canopy_radius,
-                                    vantage_columns, CLEARING_SCAN_MARGIN_M):
-            continue
-        if not clears_actor_routes(x, y, canopy_radius, layout.people, BODY_CLEARANCE_M):
+        # Every route/body point keeps physical clearance from the canopy envelope.
+        if not clears_actor_routes(x, y, 0.40 * height, layout.people, BODY_CLEARANCE_M):
             continue
         occupied.append((x, y))
         tree_number = len(occupied)
@@ -126,56 +99,7 @@ def tree_visuals(layout: ForestLayout, rng: random.Random, env: Environment) -> 
                 f"tree_canopy_collision_{tree_number:03d}", x, y,
                 base + height * 0.71, 0, sphere_geometry(crown_radius * 1.18),
             ))
-    return "".join([*parts, *_missing_hiker_tree(layout, env), *_follow_occlusion_bush(layout, env)])
-
-
-def _missing_hiker_tree(layout: ForestLayout, env: Environment) -> list[str]:
-    """The broad canopy that hides the missing hiker from the transit altitude."""
-    missing_tree_x, missing_tree_y = layout.missing_canopy_tree
-    parts: list[str] = []
-    missing_base = forest_height(missing_tree_x, missing_tree_y, layout)
-    parts.append(visual(
-        "tree_missing_hiker_trunk", missing_tree_x, missing_tree_y, missing_base + 3.0,
-        0, cylinder_geometry(0.30, 6.0), TREE_BARK[1],
-    ))
-    parts.append(collision(
-        "tree_missing_hiker_trunk_collision", missing_tree_x, missing_tree_y,
-        missing_base + 3.0, 0, cylinder_geometry(0.30, 6.0),
-    ))
-    for leaf_index, (dx, dy, radius) in enumerate(((0.0, 0.0, 4.6), (2.3, -0.4, 3.5), (-2.0, 0.8, 3.2))):
-        parts.append(visual(
-            f"tree_missing_hiker_canopy_{leaf_index:02d}",
-            missing_tree_x + dx, missing_tree_y + dy, missing_base + 9.0, 0,
-            sphere_geometry(radius), env.tint(TREE_DECIDUOUS[1], "foliage"),
-        ))
-    parts.append(collision(
-        "tree_missing_hiker_canopy_collision", missing_tree_x, missing_tree_y,
-        missing_base + 9.0, 0, sphere_geometry(4.8),
-    ))
-    return parts
-
-
-def _follow_occlusion_bush(layout: ForestLayout, env: Environment) -> list[str]:
-    """The tiered bush on the follow route that occludes the pursuit camera."""
-    parts: list[str] = []
-    bush_x, bush_y = layout.follow_occluder_xy
-    bush_base = forest_height(bush_x, bush_y, layout)
-    for level, (z_offset, radius), colour in zip(
-        ("lower", "middle", "upper"),
-        CANONICAL_OCCLUDER_TIERS,
-        (env.tint(TREE_DECIDUOUS[1], "foliage"), env.tint(TREE_DECIDUOUS[0], "foliage"),
-         env.tint(TREE_CONIFER[0], "foliage")),
-    ):
-        foliage = sphere_geometry(radius)
-        parts.append(visual(
-            f"follow_occlusion_bush_{level}", bush_x, bush_y,
-            bush_base + z_offset, 0, foliage, colour,
-        ))
-        parts.append(collision(
-            f"follow_occlusion_bush_{level}_collision", bush_x, bush_y,
-            bush_base + z_offset, 0, foliage,
-        ))
-    return parts
+    return "".join(parts)
 
 
 def forest_static_models(layout: ForestLayout, rng: random.Random,
@@ -304,12 +228,6 @@ def forest_areas(layout: ForestLayout) -> dict:
     }
 
 
-def manifest_extras(layout: ForestLayout, people: dict[str, dict]) -> tuple[dict, dict, dict]:
-    """The canonical forest's ``(follow, areas, extra manifest fields)``."""
-    follow = follow_manifest(layout, layout.follow_hiker, people, {
-        "occluder_models_or_collisions": [f"follow_occlusion_bush_{level}_collision"
-                                          for level in ("lower", "middle", "upper")],
-        "occluder_xy": [layout.follow_occluder_xy[0], layout.follow_occluder_xy[1]],
-        "occluder_radius_m": None,
-    }, stage_xy=[-12.1006, -15.7487])
-    return follow, forest_areas(layout), {}
+def manifest_extras(layout: ForestLayout) -> tuple[dict, dict]:
+    """The canonical forest's ``(areas, extra manifest fields)``."""
+    return forest_areas(layout), {}

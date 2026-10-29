@@ -10,9 +10,9 @@ are drawn by one ``static`` visual-only model per 100 m tile. Each tile model ca
 
 Every :class:`~sim.worldgen.proxy.ProxyShape` of the world is triangulated into a single
 ``<collision name="scenery_collision">`` OBJ trimesh in one static ``scenery_collision`` model.
-One merged mesh rather than one per tile: on Koko, 144 overlapping per-tile collision meshes
-stalled the world at RTF ~0 as soon as rendering sensors ran (9 tiles: 0.44, 72: 0.27), while
-the single merged mesh measured RTF 0.41, the same as no scenery collision at all.
+One merged mesh rather than one per tile: many overlapping per-tile collision meshes stall the
+world as soon as rendering sensors run, while a single merged mesh costs about as much as no
+scenery collision at all.
 
 Collision OBJs carry per-vertex normals (``vn`` + ``f a//a``) because dartsim silently drops
 normal-less submeshes and then segfaults. The same proxies are written to
@@ -380,7 +380,7 @@ def emit_scenery(world_name: str, instances: Sequence[SceneryInstance],
         for mesh in tile_meshes.get(tile, ()):
             parts.append(_mesh_visual(mesh, world_name, ox, oy))
         # The proxy label (asset key or mesh name) stays in the oracle name so obstacle
-        # classification (campaign hazard tokens: tree/canopy/...) keeps working.
+        # classification by name token (tree/canopy/...) keeps working.
         for label, proxy in tile_proxies.get(tile, ()):
             proxies.append(Primitive(name=f"{collision_model}/scenery_collision/{label}_{len(proxies)}",
                                      model=f"{collision_model}/scenery_collision",

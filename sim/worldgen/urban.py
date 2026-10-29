@@ -11,7 +11,6 @@ from sim.worldgen.dressing import Dressing
 from sim.worldgen.environment import Environment
 from sim.worldgen.layout import SIDEWALK_OFFSET_M, UrbanLayout, VehiclePlacement
 from sim.worldgen.plan import checked_transit_altitude
-from sim.worldgen.scenario import follow_manifest
 from sim.worldgen.sdf import (
     SURFACE_COLOURS, TREE_BARK, TREE_DECIDUOUS, box_geometry, collision, collision_at,
     cylinder_geometry, f, material, pose, sphere_geometry, static_model, visual,
@@ -41,8 +40,7 @@ def urban_static_models(layout: UrbanLayout, rng: random.Random, env: Environmen
             static_model("urban_streets", _streets(layout, surface)),
             *_buildings(layout, rng),
             static_model("urban_park", _park(layout, env, surface)),
-            static_model("urban_street_furniture",
-                         "".join([*_street_furniture(layout), *_jogger_shelter(layout)])),
+            static_model("urban_street_furniture", "".join(_street_furniture(layout))),
             *_parked_cars(layout)]
 
 
@@ -243,48 +241,6 @@ def _street_furniture(layout: UrbanLayout) -> list[str]:
     return street_furniture
 
 
-def _jogger_shelter(layout: UrbanLayout) -> list[str]:
-    """The follow jogger's shelter: roof (the occluder), back wall, bench and posts."""
-    street_furniture: list[str] = []
-    shelter_x, shelter_y = layout.jogger_shelter_center
-    shelter_w, shelter_l = layout.jogger_shelter_size
-    shelter_yaw = layout.follow_occluder_yaw
-    cos_yaw, sin_yaw = math.cos(shelter_yaw), math.sin(shelter_yaw)
-
-    def shelter_point(dx: float, dy: float) -> tuple[float, float]:
-        return (shelter_x + dx * cos_yaw - dy * sin_yaw,
-                shelter_y + dx * sin_yaw + dy * cos_yaw)
-
-    canopy = box_geometry(shelter_w, shelter_l, 0.18)
-    street_furniture.append(collision("jogger_shelter_roof_collision",
-                                      shelter_x, shelter_y, 3.65, shelter_yaw, canopy))
-    street_furniture.append(visual("jogger_shelter_roof",
-                                   shelter_x, shelter_y, 3.65, shelter_yaw, canopy, (0.23, 0.28, 0.30)))
-    back = box_geometry(0.08, max(1.0, shelter_l - 0.4), 2.3)
-    back_x, back_y = shelter_point(1.65, 0.0)
-    street_furniture.append(collision("jogger_shelter_back_collision",
-                                      back_x, back_y, 1.65, shelter_yaw, back))
-    street_furniture.append(visual("jogger_shelter_back",
-                                   back_x, back_y, 1.65, shelter_yaw, back, (0.35, 0.52, 0.57), 0.45))
-    bench = box_geometry(0.42, min(4.8, shelter_l * 0.75), 0.13)
-    bench_x, bench_y = shelter_point(1.0, 0.0)
-    street_furniture.append(collision("jogger_shelter_bench_collision",
-                                      bench_x, bench_y, 0.56, shelter_yaw, bench))
-    street_furniture.append(visual("jogger_shelter_bench",
-                                   bench_x, bench_y, 0.56, shelter_yaw, bench, (0.24, 0.20, 0.16)))
-    post_y = shelter_l / 2 - 0.5
-    for index, (dx, dy) in enumerate(((-1.65, -post_y), (1.65, -post_y),
-                                      (-1.65, 0.0), (1.65, 0.0),
-                                      (-1.65, post_y), (1.65, post_y))):
-        post_x, post_y = shelter_point(dx, dy)
-        post = cylinder_geometry(0.07, 3.6)
-        street_furniture.append(collision(
-            f"jogger_shelter_post_collision_{index}", post_x, post_y, 1.8, shelter_yaw, post))
-        street_furniture.append(visual(
-            f"jogger_shelter_post_{index}", post_x, post_y, 1.8, shelter_yaw, post, (0.18, 0.20, 0.21)))
-    return street_furniture
-
-
 def _parked_cars(layout: UrbanLayout) -> list[str]:
     return [vehicle_model(f"veh_car_{index + 10:02d}", car.type, car.x, car.y, 0.0, car.yaw, static=True,
                           variant=car.variant, paint=car.colour if car.type == "car" else None)
@@ -318,11 +274,6 @@ def urban_areas(layout: UrbanLayout) -> dict:
     }
 
 
-def manifest_extras(layout: UrbanLayout, people: dict[str, dict]) -> tuple[dict, dict, dict]:
-    """The canonical city's ``(follow, areas, extra manifest fields)``."""
-    follow = follow_manifest(layout, layout.follow_jogger, people, {
-        "occluder_models_or_collisions": ["jogger_shelter_roof_collision"],
-        "occluder_type": layout.follow_occluder_kind,
-        "occluder_xy": [layout.jogger_shelter_center[0], layout.jogger_shelter_center[1]],
-    }, stage_xy=[17.32, -40.5])
-    return follow, urban_areas(layout), {}
+def manifest_extras(layout: UrbanLayout) -> tuple[dict, dict]:
+    """The canonical city's ``(areas, extra manifest fields)``."""
+    return urban_areas(layout), {}

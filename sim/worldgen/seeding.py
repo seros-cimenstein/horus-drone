@@ -2,7 +2,7 @@
 
 The layout sampler keeps ``random.Random(seed)``; every other category (appearance, fauna,
 environment, clutter, events, tasks) draws from its own hashed stream so adding or changing
-one category never shifts the layout, routes or occluders of an existing seed.
+one category never shifts the layout or routes of an existing seed.
 """
 
 from __future__ import annotations

@@ -1,6 +1,5 @@
-"""People of the procedural city: the follow-jogger route with its bus-shelter occluder, bus
-stops, the plaza crowd, park sitters, commuters, zebra crossers, joggers and the collapsed
-sidewalk person.
+"""People of the procedural city: bus stops, the plaza crowd, park sitters, commuters, zebra
+crossers and joggers.
 """
 
 from __future__ import annotations
@@ -12,14 +11,12 @@ from sim.worldgen.layout import (
     URBAN_SIDEWALK_WIDTH_M, Bench, BusStopSpec, ParkSpec, PersonPlacement, PlazaSpec,
     person_placement, road_half_width,
 )
-from sim.worldgen.urban_grid import (
-    ACTOR_INSET_M, Block, Point, inside_roads, segment_clear_of, sidewalk_interval,
-)
+from sim.worldgen.urban_grid import ACTOR_INSET_M, Block, Point, inside_roads, sidewalk_interval
 from sim.worldgen.validation import SampleRejected
 
 
-def mission_crossings(rng: random.Random, arms: list[dict], sites: list[Point]) -> list[dict]:
-    """Two to four crossing arms near mission sites (the zebra the crossing people use)."""
+def crossing_arms_near(rng: random.Random, arms: list[dict], sites: list[Point]) -> list[dict]:
+    """Two to four crossing arms near the populated sites (the zebra the crossing people use)."""
     def inside(arm: dict) -> bool:
         cx, cy = arm["center"]
         reach = arm["half"] + 0.9 + 1.0
@@ -45,34 +42,6 @@ def mission_crossings(rng: random.Random, arms: list[dict], sites: list[Point]) 
     return chosen
 
 
-def sample_follow(rng: random.Random, roads_x: tuple[float, ...], roads_y: tuple[float, ...],
-                  arterials_x: tuple[float, ...], arterials_y: tuple[float, ...]) -> dict:
-    """A sidewalk follow route >= 100 m from home with a bus-shelter occluder on it."""
-    for _ in range(400):
-        vertical = rng.random() < 0.5
-        arterials = arterials_x if vertical else arterials_y
-        perpendicular = roads_y if vertical else roads_x
-        roads = inside_roads(roads_x if vertical else roads_y, arterials)
-        road = rng.choice(roads)
-        half = road_half_width(road, arterials)
-        lane = road + rng.choice((-1.0, 1.0)) * (half + 0.9)
-        interval = sidewalk_interval(rng, perpendicular, min_length=64.0)
-        if interval is None:
-            continue
-        low, high = interval
-        route = ((lane, low), (lane, high)) if vertical else ((low, lane), (high, lane))
-        if min(math.hypot(*route[0]), math.hypot(*route[1])) < 100.0:
-            continue
-        fraction = rng.uniform(0.45, 0.60)
-        sx = route[0][0] + (route[1][0] - route[0][0]) * fraction
-        sy = route[0][1] + (route[1][1] - route[0][1]) * fraction
-        side = 1.0 if lane > road else -1.0
-        back = (side, 0.0) if vertical else (0.0, side)
-        return {"route": route, "start": route[0], "shelter": (sx, sy),
-                "shelter_yaw": math.atan2(back[1], back[0])}
-    raise SampleRejected("no follow route")
-
-
 def sample_crowd(rng: random.Random, plaza: PlazaSpec,
                  count: int) -> tuple[PersonPlacement, ...]:
     assets = ("person_blue_kinematic", "person_green_kinematic", "person_dark",
@@ -90,12 +59,8 @@ def sample_crowd(rng: random.Random, plaza: PlazaSpec,
 
 def bus_stop_at(rng: random.Random, block: Block, roads_x: tuple[float, ...],
                 arterials_x: tuple[float, ...], roads_y: tuple[float, ...],
-                arterials_y: tuple[float, ...], avoid: list[Point]) -> BusStopSpec:
-    """A shelter on the block's outer sidewalk platform: back wall away from the road.
-
-    ``avoid`` points (the collapsed casualty, the follow occluder) keep 14 m: a shelter's
-    glass end walls and roof must never crowd a mission target's vantage column.
-    """
+                arterials_y: tuple[float, ...]) -> BusStopSpec:
+    """A shelter on the block's outer sidewalk platform: back wall away from the road."""
     candidates = []
     for vertical, road, arterials in ((True, block.rx0, arterials_x), (True, block.rx1, arterials_x),
                                       (False, block.ry0, arterials_y), (False, block.ry1, arterials_y)):
@@ -110,12 +75,8 @@ def bus_stop_at(rng: random.Random, block: Block, roads_x: tuple[float, ...],
                 x = (block.x0 + block.x1) / 2 + rng.uniform(-6.0, 6.0)
                 y = road + side * center_offset
                 back = (0.0, side)
-            if any(math.hypot(x - px, y - py) < 14.0 for px, py in avoid):
-                continue
             candidates.append(BusStopSpec(round(x, 3), round(y, 3),
                                           round(math.atan2(back[1], back[0]), 4)))
-    if not candidates:
-        raise SampleRejected("no bus stop clear of mission targets")
     return rng.choice(candidates)
 
 
@@ -137,27 +98,28 @@ def sample_bus_waiting(rng: random.Random, stop: BusStopSpec) -> tuple[PersonPla
     return tuple(people)
 
 
-def sample_sitters(rng: random.Random, mission_park: ParkSpec,
+def sample_sitters(rng: random.Random, park: ParkSpec,
                    parks: tuple[ParkSpec, ...]) -> tuple[tuple[PersonPlacement, ...], list[Bench]]:
-    """Sitting people beside the mission park's paths, each on its own bench."""
+    """Sitting people beside ``park``'s paths, each on its own bench; the other parks get
+    empty benches."""
     count = rng.randint(2, 4)
     sitters: list[PersonPlacement] = []
     benches: list[Bench] = []
     slots: list[Point] = []
-    edge = mission_park.half_size - 1.5
+    edge = park.half_size - 1.5
     for index in range(count):
         for _ in range(200):
             side = rng.choice((-1.0, 1.0))
             if rng.random() < 0.5:
-                x = mission_park.x + side * rng.uniform(2.0, edge)
-                y = mission_park.y + rng.uniform(-edge, edge)
+                x = park.x + side * rng.uniform(2.0, edge)
+                y = park.y + rng.uniform(-edge, edge)
             else:
-                x = mission_park.x + rng.uniform(-edge, edge)
-                y = mission_park.y + side * rng.uniform(2.0, edge)
+                x = park.x + rng.uniform(-edge, edge)
+                y = park.y + side * rng.uniform(2.0, edge)
             if any(math.hypot(x - px, y - py) < 4.0 for px, py in slots):
                 continue
             slots.append((x, y))
-            dx, dy = mission_park.x - x, mission_park.y - y
+            dx, dy = park.x - x, park.y - y
             norm = math.hypot(dx, dy) or 1.0
             facing = math.atan2(dy / norm, dx / norm)
             sitters.append(person_placement(f"civ_park_sitting_{index + 1:02d}", "park_sitting",
@@ -167,12 +129,12 @@ def sample_sitters(rng: random.Random, mission_park: ParkSpec,
             break
     if len(sitters) < 2:
         raise SampleRejected("no park sitter slots")
-    for park in parks[1:]:
+    for other in parks[1:]:
         for _ in range(rng.randint(1, 2)):
             for _ in range(50):
-                bx = park.x + rng.uniform(-park.half_size + 2.0, park.half_size - 2.0)
-                by = park.y + rng.uniform(-park.half_size + 2.0, park.half_size - 2.0)
-                if abs(bx - park.x) < 2.5 or abs(by - park.y) < 2.5:
+                bx = other.x + rng.uniform(-other.half_size + 2.0, other.half_size - 2.0)
+                by = other.y + rng.uniform(-other.half_size + 2.0, other.half_size - 2.0)
+                if abs(bx - other.x) < 2.5 or abs(by - other.y) < 2.5:
                     continue
                 benches.append(Bench(round(bx, 3), round(by, 3), round(rng.uniform(-math.pi, math.pi), 4)))
                 break
@@ -266,28 +228,3 @@ def sample_joggers(rng: random.Random, roads_x: tuple[float, ...], roads_y: tupl
     if len(people) < 2:
         raise SampleRejected("too few joggers")
     return tuple(people)
-
-
-def sample_collapsed(rng: random.Random, roads_x: tuple[float, ...], roads_y: tuple[float, ...],
-                     arterials_x: tuple[float, ...], arterials_y: tuple[float, ...],
-                     follow_route: tuple[Point, Point]) -> PersonPlacement:
-    for _ in range(400):
-        vertical = rng.random() < 0.5
-        arterials = arterials_x if vertical else arterials_y
-        perpendicular = roads_y if vertical else roads_x
-        roads = inside_roads(roads_x if vertical else roads_y, arterials)
-        road = rng.choice(roads)
-        half = road_half_width(road, arterials)
-        lane = road + rng.choice((-1.0, 1.0)) * (half + 0.9)
-        interval = sidewalk_interval(rng, perpendicular, min_length=4.0, margin=14.0)
-        if interval is None:
-            continue
-        along = rng.uniform(*interval)
-        point = (lane, along) if vertical else (along, lane)
-        if math.hypot(*point) < 120.0:
-            continue
-        if not segment_clear_of(point, [follow_route], 30.0):
-            continue
-        return person_placement("civ_collapsed_01", "collapsed", "person_collapsed_kinematic", point,
-                       rng.uniform(-math.pi, math.pi))
-    raise SampleRejected("no collapsed location")

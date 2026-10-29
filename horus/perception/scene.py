@@ -39,11 +39,12 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
-import json
 import math
 import threading
 import time
 from typing import Any
+
+from horus.untrusted import MAX_TEXT_LENGTH, quote_label
 
 from .camera_state import (
     CAMERA_HFOV_TOLERANCE_DEG,
@@ -84,15 +85,9 @@ EVENT_REFILL_PER_S = 2.0
 MAX_ABSENCE_S = 30.0
 MAX_DWELL_S = 3600.0
 MAX_TTL_S = 86400.0
-MAX_TEXT_LENGTH = 64
 
 EventSink = Callable[..., Any]
 _Entry = tuple[int, str, str, float, float]
-
-
-def quote_label(label: Any) -> str:
-    """JSON-quote a detector/grounder label (bounded) so it is always data, never instruction."""
-    return json.dumps(str(label)[:MAX_TEXT_LENGTH], ensure_ascii=False)
 
 
 class _Occupant:

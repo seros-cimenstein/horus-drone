@@ -35,8 +35,22 @@ target_link_libraries(horus_capture PRIVATE minhook d3d12 dxgi ws2_32 ${static_r
 
 add_executable(horus_capture_selftest capture/selftest/selftest.cpp)
 target_compile_options(horus_capture_selftest PRIVATE -O2 -Wall -Wextra)
-target_include_directories(horus_capture_selftest PRIVATE common)
+target_include_directories(horus_capture_selftest PRIVATE common capture/src)
 target_link_libraries(horus_capture_selftest PRIVATE d3d12 dxgi ${static_runtime})
+
+# Unit tests of the capture plugin's shared view: the marker classification and publish throttle,
+# the camera block's view_mode, and the compositor on a D3D12 device when one exists (run under
+# wine, see gta/capture/README.md).
+add_executable(horus_capture_tests capture/tests/capture_tests.cpp)
+target_compile_options(horus_capture_tests PRIVATE -O2 -Wall -Wextra)
+target_include_directories(horus_capture_tests PRIVATE common capture/src)
+target_link_libraries(horus_capture_tests PRIVATE d3d12 ${static_runtime})
+
+# Compiles capture/src/composite.hlsl into the checked-in composite_shaders.hpp (run under wine by
+# hand after a shader edit, see gta/capture/README.md "Shaders"); not part of the plugin build.
+add_executable(horus_shader_gen capture/tools/shader_gen.cpp)
+target_compile_options(horus_shader_gen PRIVATE -O2 -Wall -Wextra)
+target_link_libraries(horus_shader_gen PRIVATE ${static_runtime})
 
 # HORUS Script Hook: our own implementation of the Script Hook V plugin API. Plugins link against
 # "ScriptHookV.dll" by name, so the output keeps that name; exports.def gives the MSVC-mangled names.

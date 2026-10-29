@@ -13,7 +13,7 @@ ELEVATION = 584.0
 # actors must not generate contacts with the terrain they walk on; the drone keeps the default
 # mask and collides with everything. Generated 1.2 km worlds keep each static collision (terrain,
 # merged scenery mesh, home pad) on its own bit: once a dynamic body exists, dartsim tests every
-# overlapping static pair each 1 ms step, which measured RTF 0.00 on Koko instead of ~0.47.
+# overlapping static pair each 1 ms step, which stalls the real-time factor near zero.
 TERRAIN_COLLIDE_BITMASK = 0x0001
 ACTOR_COLLIDE_BITMASK = 0x0002
 PAD_COLLIDE_BITMASK = 0x0008

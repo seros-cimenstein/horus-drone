@@ -2,7 +2,7 @@
 <sdf version="1.9">
   <model name="horus_iris">
     <include>
-      <uri>model://iris_with_gimbal</uri>
+      <uri>model://horus_iris_with_gimbal</uri>
       <name>iris_with_gimbal</name>
     </include>
     <include>

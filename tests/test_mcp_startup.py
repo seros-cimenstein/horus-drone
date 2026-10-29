@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import time
@@ -92,7 +93,7 @@ def test_fastmcp_serves_state_and_rejects_perception_tools_while_camera_blocks()
         def assert_perception_tools_rejected() -> None:
             for tool_name, arguments in (
                 ("list_candidates", {}),
-                ("follow", {"id": 4}),
+                ("get_frame", {}),
             ):
                 with pytest.raises(Exception, match="perception unavailable:"):
                     call_tool(mcp, tool_name, arguments)
@@ -297,6 +298,53 @@ def test_frame_tools_return_bounded_jpeg_and_quoted_candidate_text():
         assert "jpeg_base64" not in text.text
 
 
+def test_raw_frame_is_the_unmarked_source_image_at_full_resolution():
+    np = pytest.importorskip("numpy")
+    cv2 = pytest.importorskip("cv2")
+    import base64
+
+    from mcp.types import ImageContent, TextContent
+
+    candidate = Candidate(
+        id=7, bbox=(10.0, 20.0, 400.0, 500.0), class_name="person", confidence=0.9,
+        frame_id=9, timestamp=time.monotonic(),
+    )
+    source = np.zeros((800, 1200, 3), dtype=np.uint8)
+    source[:, 600:] = (200, 120, 40)
+    frames = {
+        9: Frame(frame_id=9, timestamp=time.monotonic(), image=source, pose={"north_m": 1.0},
+                 candidates=(candidate,)),
+        8: Frame(frame_id=8, timestamp=time.monotonic(), image=np.zeros((10, 10, 3), dtype=np.uint8),
+                 pose={}, candidates=()),
+    }
+
+    class Perception:
+        def camera_status(self):
+            return {"camera": "streaming", "last_frame_age_s": 0.0, "reason": None}
+
+        def get_frame(self, frame_id=None):
+            return frames[9 if frame_id is None else frame_id]
+
+    mcp = create_mcp(HorusConfig(), _Executor(), FakeFlight(), Perception())
+
+    content = call_tool(mcp, "get_raw_frame", {}, convert_result=True)
+    image = next(block for block in content if isinstance(block, ImageContent))
+    payload = json.loads(next(block for block in content if isinstance(block, TextContent)).text)
+    decoded = cv2.imdecode(np.frombuffer(base64.b64decode(image.data), dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert image.mimeType == "image/jpeg"
+    assert decoded.shape == source.shape
+    # Nothing drawn: candidate 7's box edge and label rows stay black, and the whole frame
+    # stays within JPEG error of the source.
+    assert int(decoded[0:30, 0:410].max()) <= 8
+    assert float(np.abs(decoded.astype(int) - source.astype(int)).mean()) < 1.0
+    assert (payload["frame_id"], payload["width"], payload["height"]) == (9, 1200, 800)
+    assert payload["pose"]["north_m"] == 1.0
+    assert "candidate_table" not in payload
+
+    older = call_tool(mcp, "get_raw_frame", {"frame_id": 8}, convert_result=True)
+    assert json.loads(next(b for b in older if isinstance(b, TextContent)).text)["frame_id"] == 8
+
+
 def test_mcp_event_log_records_tool_failures_and_redacts_credentials_and_images(tmp_path):
     import base64
 
@@ -458,27 +506,6 @@ def test_mcp_box_point_obeys_compensation_config_and_per_call_override():
     assert overridden["candidate"]["id"] == 3
 
 
-def test_get_map_reports_the_enforced_inset_geofence_and_altitude_envelope():
-    from horus.config import ExecutorSettings
-    from horus.executor import Envelope
-
-    settings = ExecutorSettings(
-        max_altitude_m=2.2,
-        geofence_polygon_ned=((-4.0, -5.0), (-4.0, 5.0), (4.0, 5.0), (4.0, -5.0)),
-        geofence_margin_m=1.2,
-    )
-    executor = _Executor()
-    executor.envelope = Envelope(settings)
-    mcp = create_mcp(HorusConfig(executor=settings), executor, FakeFlight(), None)
-
-    envelope = json.loads(call_tool(mcp, "get_map"))["flight_envelope"]
-
-    assert {tuple(vertex) for vertex in envelope["geofence_polygon_ned"]} == {
-        (-2.8, -3.8), (-2.8, 3.8), (2.8, 3.8), (2.8, -3.8)
-    }
-    assert envelope["altitude_m"] == [settings.min_altitude_m, 2.2]
-
-
 def test_wait_for_task_returns_at_terminal_status_or_reports_timeout():
     class Executor(_Executor):
         def __init__(self, statuses):
@@ -500,3 +527,72 @@ def test_wait_for_task_returns_at_terminal_status_or_reports_timeout():
     waiting = json.loads(call_tool(running, "wait_for_task", {"task_id": "t2", "timeout_s": 0.01}))
     assert waiting["status"] == "running" and waiting["timed_out"] is True
     assert waiting["waited_s"] >= 1.0
+
+
+def test_wait_for_event_returns_only_wanted_kinds_and_resumes_from_after_id():
+    import threading
+
+    from horus.events import EventBus
+
+    bus = EventBus()
+    mcp = create_mcp(HorusConfig(), _Executor(), FakeFlight(), None, event_bus=bus)
+    bus.publish("landed", "an earlier landing")
+
+    published = {}
+
+    def publish_later():
+        time.sleep(0.3)
+        bus.publish("pilot_override", "not wanted")
+        published["at"] = time.monotonic()
+        bus.publish("landed", "Vehicle disarmed at low altitude")
+
+    publisher = threading.Thread(target=publish_later)
+    publisher.start()
+    # Without after_id the landing published before the call does not count.
+    result = json.loads(call_tool(mcp, "wait_for_event", {"kinds": ["landed"], "timeout_s": 10}))
+    returned = time.monotonic()
+    publisher.join()
+    # The first matching event comes back within 0.5 s of its publication.
+    assert returned - published["at"] <= 0.5
+    assert result["timed_out"] is False
+    assert [event["summary"] for event in result["events"]] == ["Vehicle disarmed at low altitude"]
+    assert result["last_id"] == 3
+
+    # after_id resumes from an earlier point, so events between two calls are not missed.
+    resumed = json.loads(call_tool(mcp, "wait_for_event", {"kinds": ["landed", "pilot_override"], "after_id": 0}))
+    assert [event["kind"] for event in resumed["events"]] == ["landed", "pilot_override", "landed"]
+
+    with pytest.raises(Exception, match="unknown event kinds"):
+        call_tool(mcp, "wait_for_event", {"kinds": ["touchdown"]})
+
+
+def test_back_to_back_event_waits_keep_a_real_hold_from_auto_rth():
+    from horus.events import EventBus
+    from horus.executor import ExecutorState, HorusExecutor
+    from tests.fakes import executor_settings
+
+    bus = EventBus()
+    settings = executor_settings(link_loss_rth_delay_s=2.0)
+    flight = FakeFlight()
+    executor = HorusExecutor(flight, settings, event_bus=bus)  # its own control thread ticks
+    mcp = create_mcp(HorusConfig(executor=settings), executor, flight, None, event_bus=bus)
+    try:
+        executor.hold()
+        started = time.monotonic()
+        waits = [json.loads(call_tool(mcp, "wait_for_event", {"kinds": ["landed"], "timeout_s": 60}))
+                 for _ in range(3)]
+
+        # Each wait is clamped to 80 % of the 2 s delay; three back to back hold 4.8 s, more than
+        # twice the delay, and the hold never goes 2 s without supervisor contact.
+        assert all(w["timed_out"] and 1.5 <= w["waited_s"] <= 1.7 for w in waits)
+        assert time.monotonic() - started > 4.0
+        assert executor.state == ExecutorState.HOLDING
+        assert ("rth",) not in flight.commands
+        assert not [e for e in asyncio.run(bus.wait(0, 0.0)) if e["kind"] == "auto_rth"]
+
+        # The same hold without calls returns home after the delay.
+        time.sleep(2.5)
+        assert executor.state == ExecutorState.RTH
+        assert [e for e in asyncio.run(bus.wait(0, 0.0)) if e["kind"] == "auto_rth"]
+    finally:
+        executor.close()

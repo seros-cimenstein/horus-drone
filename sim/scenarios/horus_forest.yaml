@@ -87,34 +87,3 @@ agents:
     behavior: idle
     pose: {x: 32.2, y: 33.6, yaw_deg: 166.1578}
     z_offset: 0.0
-  - model: civ_missing_hiker_01
-    kind: pedestrian
-    group: ambient
-    behavior: idle
-    pose: {x: -42, y: 20, yaw_deg: 22.9183}
-    z_offset: 0.0
-  - model: civ_injured_01
-    kind: pedestrian
-    group: ambient
-    behavior: idle
-    pose: {x: -6, y: 30, yaw_deg: 68.7549}
-    z_offset: 0.0
-  - model: civ_hiker_04
-    kind: pedestrian
-    group: follow_hiker
-    behavior: route
-    speed_m_s: 1.25
-    mode: once
-    waypoints:
-      - {x: -16, y: -18}
-      - {x: -10, y: -7}
-      - {x: -2, y: 3}
-      - {x: 11, y: 13}
-      - {x: 22, y: 19}
-    z_offset: 0.0
-  - model: civ_casualty_01
-    kind: pedestrian
-    group: ambient
-    behavior: idle
-    pose: {x: -9.5, y: 33.5, yaw_deg: 137.5099}
-    z_offset: 0.0

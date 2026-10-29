@@ -117,7 +117,7 @@ if [[ -f "${grounder_pid_file}" ]]; then
   fi
   rm -f -- "${grounder_pid_file}"
 fi
-pid_files=("${log_dir}/civilian_life.pid" "${log_dir}/tof_bridge.pid" \
+pid_files=("${log_dir}/civilian_life.pid" "${log_dir}/tof_bridge.pid" "${log_dir}/gimbal.pid" \
   "${log_dir}/gta_bridge.pid" "${log_dir}/range_bridge.pid" "${log_dir}/mavlink_keeper.pid" \
   "${log_dir}/sitl.pid" "${log_dir}/gui.pid" "${log_dir}/gazebo.pid")
 

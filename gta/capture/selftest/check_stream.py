@@ -13,6 +13,12 @@ active 1. Even-colour frames must then be active with that frame's pose seq. Odd
 be inactive, apart from the first presents after the pause (script age <= 2) that still carry the
 last tick of the previous colour.
 
+With ``--shared`` (selftest started with ``--shared``) the selftest alternates drone frames (palette
+colour, 8x8 black corner marker) and player frames (grey, white marker) with the block in shared
+view. Every frame served must then be a drone frame: palette colour outside the marker, black
+marker, camera_active 1, script age 0, an even pose seq naming the frame's colour. The frames must
+arrive at ``--min-hz`` or faster (the plugin publishes at most ``max_hz``, 15 by default).
+
 The checker reads every frame (``require_active=False``), active or not. ``--legacy-header``
 accepts the 40-byte header of plugins built before the camera fields (their frames carry no camera
 fields to check); HORUS itself never accepts it.
@@ -45,6 +51,7 @@ SCRIPT_AGE_NEVER = _gta_stream.SCRIPT_AGE_NEVER
 PALETTE = [(230, 30, 20), (20, 200, 40), (40, 60, 220), (240, 220, 30), (200, 40, 210), (30, 210, 220)]
 FRAMES_PER_COLOUR = 10  # selftest.cpp kFramesPerColour
 MAX_SCRIPT_AGE = 2  # camera_block.hpp kMaxScriptAgePresents
+MARKER_PIXELS = 8  # selftest.cpp kMarkerPixels
 TOLERANCE = 2
 
 
@@ -59,6 +66,18 @@ def connect(host: str, port: int, deadline_s: float, legacy_header: bool) -> Gta
             if time.monotonic() > end:
                 raise
             time.sleep(0.2)
+
+
+def shared_error(colour: int, header) -> str | None:
+    """Why this shared-view frame's camera fields are wrong, or None."""
+    seq = header.pose_seq
+    if header.camera_active != 1 or header.script_age_presents != 0:
+        return f"camera_active {header.camera_active}, script age {header.script_age_presents}"
+    if seq % 2 != 0:
+        return f"pose_seq {seq} is a player frame"
+    if header.game_frame != seq or (seq // FRAMES_PER_COLOUR) % len(PALETTE) != colour:
+        return f"colour {colour} with pose_seq {seq}, game_frame {header.game_frame}"
+    return None
 
 
 def camera_error(colour: int, header, camera: bool) -> str | None:
@@ -90,6 +109,8 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=5610)
     parser.add_argument("--frames", type=int, default=30)
     parser.add_argument("--camera", action="store_true", help="the selftest runs with --camera")
+    parser.add_argument("--shared", action="store_true", help="the selftest runs with --shared")
+    parser.add_argument("--min-hz", type=float, default=10.0, help="--shared: lowest acceptable frame rate")
     parser.add_argument(
         "--legacy-header", action="store_true", help="accept a plugin built before the camera fields"
     )
@@ -100,6 +121,9 @@ def main() -> int:
     indices: list[int] = []
     seqs: list[int] = []
     active_frames = paused_inactive_frames = 0
+    stamps: list[int] = []
+    # Shared view: the marker corner is black and excluded from the uniformity check.
+    body = (slice(None), slice(None))
     try:
         for n in range(args.frames):
             ok, image = stream.read()
@@ -108,11 +132,18 @@ def main() -> int:
             if image.shape != (360, 640, 3):
                 print(f"FAIL frame {n}: shape {image.shape}")
                 return 1
-            spread = image.reshape(-1, 3).max(axis=0).astype(int) - image.reshape(-1, 3).min(axis=0)
+            if args.shared:
+                marker = int(image[:MARKER_PIXELS, :MARKER_PIXELS].max())
+                if marker > TOLERANCE:
+                    print(f"FAIL frame {n}: marker corner is not black (max {marker}); a player frame")
+                    return 1
+                body = (slice(MARKER_PIXELS, None), slice(None))
+            pixels = image[body].reshape(-1, 3)
+            spread = pixels.max(axis=0).astype(int) - pixels.min(axis=0)
             if spread.max() > TOLERANCE:
                 print(f"FAIL frame {n}: not uniform, per-channel spread {spread.tolist()}")
                 return 1
-            b, g, r = (int(v) for v in image[0, 0])
+            b, g, r = (int(v) for v in image[image.shape[0] - 1, image.shape[1] - 1])
             match = [
                 i for i, colour in enumerate(PALETTE)
                 if max(abs(r - colour[0]), abs(g - colour[1]), abs(b - colour[2])) <= TOLERANCE
@@ -120,7 +151,7 @@ def main() -> int:
             if not match:
                 print(f"FAIL frame {n}: RGB {(r, g, b)} is not a palette colour")
                 return 1
-            error = camera_error(match[0], header, args.camera)
+            error = shared_error(match[0], header) if args.shared else camera_error(match[0], header, args.camera)
             if error:
                 print(f"FAIL frame {n}: {error}")
                 return 1
@@ -129,6 +160,7 @@ def main() -> int:
             seen.add(match[0])
             indices.append(header.present_index)
             seqs.append(header.pose_seq)
+            stamps.append(header.capture_unix_ns)
     finally:
         stream.release()
     if len(seen) < 3:
@@ -146,6 +178,12 @@ def main() -> int:
             print(f"FAIL: pose seq went backwards: {seqs}")
             return 1
         camera = f", camera: {active_frames} active, {paused_inactive_frames} paused inactive, seq {seqs[0]}..{seqs[-1]}"
+    if args.shared:
+        rate = (len(stamps) - 1) / max((stamps[-1] - stamps[0]) / 1e9, 1e-9)
+        if rate < args.min_hz:
+            print(f"FAIL: drone frames at {rate:.1f} Hz, below {args.min_hz} Hz")
+            return 1
+        camera = f", shared view: all drone frames, {rate:.1f} Hz, seq {seqs[0]}..{seqs[-1]}"
     print(f"OK {args.frames} frames, {len(seen)} colours, present index {indices[0]}..{indices[-1]}{camera}")
     return 0
 

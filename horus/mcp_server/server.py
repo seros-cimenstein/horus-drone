@@ -1,4 +1,4 @@
-"""Authenticated MCP streamable-HTTP API for bounded HORUS skills and observations."""
+"""Authenticated MCP streamable-HTTP API for HORUS flight moves and observations."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from horus.events import EventBus
 from horus.executor import HorusExecutor
 from horus.flight import FlightLink
 from horus.mcp_server import flight as flight_tools
-from horus.mcp_server import guidance, scene, tasks
+from horus.mcp_server import guidance, maps, scene, tasks
 from horus.mcp_server import perception as perception_tools
 from horus.mcp_server.context import ToolContext
 
@@ -91,7 +91,7 @@ def create_mcp(
         image_publisher=image_publisher,
         event_bus=event_bus or EventBus(),
     )
-    for module in (guidance, flight_tools, perception_tools, scene, tasks):
+    for module in (guidance, flight_tools, perception_tools, scene, tasks, maps):
         module.register(mcp, ctx)
     return mcp
 
@@ -114,6 +114,7 @@ def main(argv: list[str] | None = None) -> None:
     from horus.config import load_config
     from horus.executor import HorusExecutor
     from horus.flight import MavlinkFlightLink
+    from horus.gimbal import MavlinkGimbal
     from horus.mcp_server.gz_image import LIVE_IMAGE_TOPIC, GazeboImagePublisher
 
     parser = argparse.ArgumentParser(description="Run the authenticated HORUS MCP server.")
@@ -128,6 +129,10 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     config = load_config()
+    logging.getLogger(__name__).info(
+        "HORUS config %s (perception.source %s)",
+        os.environ.get("HORUS_CONFIG", "config/horus.yaml"), config.perception.source,
+    )
     token = os.environ.get(config.server.auth_token_env)
     if not token:
         raise SystemExit(f"{config.server.auth_token_env} must be set before starting HORUS MCP")
@@ -147,13 +152,24 @@ def main(argv: list[str] | None = None) -> None:
     event_bus = EventBus()
 
     flight = MavlinkFlightLink(config.flight)
+    gimbal = (
+        None if config.gimbal.connection is None
+        else MavlinkGimbal(config.gimbal, flight.telemetry)
+    )
     perception = None
     executor = None
     unavailable_reason: str | None = None
     image_publisher = None
     live_publisher = None
+    # GTA V draws the camera view itself and no Gazebo GUI watches a GTA run: rendering and
+    # converting every frame for a gz topic there would only cost CPU.
+    gazebo_images = not config.perception.source.startswith("gta://")
+    if not gazebo_images:
+        logging.getLogger(__name__).info("GTA frame source: Gazebo image publishers are off")
     try:
         flight.connect()
+        if gimbal is not None:
+            gimbal.connect()
         if args.no_perception:
             unavailable_reason = "disabled by --no-perception"
         elif not config.perception.enabled:
@@ -168,10 +184,11 @@ def main(argv: list[str] | None = None) -> None:
                 perception = create_perception_system(
                     config.perception,
                     flight,
+                    gimbal=gimbal,
                     camera_horizontal_fov_deg=config.executor.camera_horizontal_fov_deg,
                     event_bus=event_bus,
                 )
-                live_publisher = GazeboImagePublisher(LIVE_IMAGE_TOPIC)
+                live_publisher = GazeboImagePublisher(LIVE_IMAGE_TOPIC) if gazebo_images else None
                 perception.start(
                     LivePerceptionView(
                         perception,
@@ -190,8 +207,8 @@ def main(argv: list[str] | None = None) -> None:
                     perception.close()
                     perception = None
 
-        image_publisher = GazeboImagePublisher()
-        executor = HorusExecutor(flight, config.executor, perception, event_bus=event_bus)
+        image_publisher = GazeboImagePublisher() if gazebo_images else None
+        executor = HorusExecutor(flight, config.executor, perception, event_bus=event_bus, gimbal=gimbal)
         mcp = create_mcp(
             config,
             executor,
@@ -213,6 +230,8 @@ def main(argv: list[str] | None = None) -> None:
             executor.close()
         if perception is not None:
             perception.close()
+        if gimbal is not None:
+            gimbal.close()
         flight.close()
 
 

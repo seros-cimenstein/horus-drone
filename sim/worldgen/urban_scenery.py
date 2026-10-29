@@ -325,15 +325,10 @@ def _shelter_meshes(layout: UrbanLayout, textures: bool) -> list[SceneryMesh]:
     assert city is not None
     tex_glass = "bus_shelter_glass" if textures else None
     tex_roof = "roof_membrane" if textures else None
-    shelters: list[tuple[str, float, float, float, float, bool]] = [
-        (f"bus_stop_shelter_{index + 1:02d}", stop.x, stop.y, stop.yaw, SHELTER_LENGTH_M, True)
-        for index, stop in enumerate(city.bus_stops)
-    ]
-    shelters.append(("follow_shelter", layout.jogger_shelter_center[0],
-                     layout.jogger_shelter_center[1], layout.follow_occluder_yaw,
-                     layout.jogger_shelter_size[1], False))
     out: list[SceneryMesh] = []
-    for name, cx, cy, yaw, length, platform in shelters:
+    length = SHELTER_LENGTH_M
+    for index, stop in enumerate(city.bus_stops):
+        name, cx, cy, yaw = f"bus_stop_shelter_{index + 1:02d}", stop.x, stop.y, stop.yaw
         cos_yaw, sin_yaw = math.cos(yaw), math.sin(yaw)
 
         def place(dx: float, dy: float, _cx=cx, _cy=cy, _c=cos_yaw, _s=sin_yaw):
@@ -341,12 +336,10 @@ def _shelter_meshes(layout: UrbanLayout, textures: bool) -> list[SceneryMesh]:
 
         glass = _Mesh(f"{name}_glass", "bus_shelter_glass", tex_glass)
         roof = _Mesh(f"{name}_roof", "roof_membrane", tex_roof)
-        panels = [(1.55, 0.0, 0.08, length - 0.16)]
-        if platform:
-            # Bus stops have closed ends; the follow occluder keeps them open so the jogger
-            # runs through under the roof (the roof is what blocks the camera ray).
-            panels += [(0.0, length / 2 - 0.04, 3.3, 0.08),
-                       (0.0, -length / 2 + 0.04, 3.3, 0.08)]
+        # Back wall plus closed ends.
+        panels = [(1.55, 0.0, 0.08, length - 0.16),
+                  (0.0, length / 2 - 0.04, 3.3, 0.08),
+                  (0.0, -length / 2 + 0.04, 3.3, 0.08)]
         for dx, dy, sx, sy in panels:
             px, py = place(dx, dy)
             glass.box(px, py, 0.0, 2.2, sx, sy, PAVER_TILE_M, yaw)
@@ -356,8 +349,7 @@ def _shelter_meshes(layout: UrbanLayout, textures: bool) -> list[SceneryMesh]:
         roof.proxies.append(ProxyShape("box", (px, py, 2.29, 0.0, 0.0, yaw), (3.5, length + 0.2, 0.18)))
         for mesh in (glass, roof):
             _first(out, mesh)
-        if platform:
-            _platform_meshes(name, cx, cy, yaw, length, textures, out)
+        _platform_meshes(name, cx, cy, yaw, length, textures, out)
     return out
 
 

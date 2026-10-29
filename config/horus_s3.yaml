@@ -1,6 +1,0 @@
-# S3 fixture: the default 8 m circular geofence (no polygon) and the Anthropic API commander.
-executor:
-  geofence_radius_m: 8.0
-  target_height_m: 1.9
-commander:
-  provider: anthropic

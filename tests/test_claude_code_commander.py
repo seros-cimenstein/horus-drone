@@ -96,6 +96,7 @@ def test_persistent_session_maps_queued_operator_messages_to_results(tmp_path, m
     assert args[args.index("--allowedTools") + 1] == "mcp__horus__*"
     disallowed = args[args.index("--disallowedTools") + 1 : args.index("--append-system-prompt")]
     assert "mcp__horus__wait_events" in disallowed
+    assert "mcp__horus__wait_for_event" not in disallowed
     assert args[args.index("--append-system-prompt") + 1] == "HORUS safety prompt"
     assert args[args.index("--max-turns") + 1] == "37"
     assert args[args.index("--model") + 1] == "opus"
@@ -190,7 +191,7 @@ def test_api_backend_retains_operator_and_event_history_per_mission(monkeypatch)
 
     async def scenario():
         first = await backend.send("[operator] inspect target")
-        second = await backend.send("[HORUS event #7 12:00Z] target_lost: target 3")
+        second = await backend.send("[HORUS event #7 12:00Z] link_lost: Autopilot heartbeat lost")
         await backend.close()
         return first, second
 
@@ -199,7 +200,7 @@ def test_api_backend_retains_operator_and_event_history_per_mission(monkeypatch)
     assert [message["role"] for message in requests[1]] == ["user", "assistant", "user"]
     assert requests[1][0]["content"] == "[operator] inspect target"
     assert requests[1][1]["content"][0].text == "reply-1"
-    assert requests[1][2]["content"] == "[HORUS event #7 12:00Z] target_lost: target 3"
+    assert requests[1][2]["content"] == "[HORUS event #7 12:00Z] link_lost: Autopilot heartbeat lost"
 
 
 def _anthropic_tool_backend(monkeypatch, requests, tool_gate):
@@ -377,8 +378,8 @@ def test_api_backend_interrupt_cancels_active_and_lock_waiting_turns(monkeypatch
     )
 
     async def scenario():
-        active = asyncio.create_task(backend.send("[operator] follow target 3"))
-        waiting = asyncio.create_task(backend.send("[HORUS event #8] target_reacquired"))
+        active = asyncio.create_task(backend.send("[operator] go to the door"))
+        waiting = asyncio.create_task(backend.send("[HORUS event #8] link_restored"))
         while not requests:
             await asyncio.sleep(0)
         await backend.interrupt()
@@ -388,7 +389,7 @@ def test_api_backend_interrupt_cancels_active_and_lock_waiting_turns(monkeypatch
 
     assert all(isinstance(result, asyncio.CancelledError) for result in results)
     # The turn queued behind the interrupted one never reaches the model.
-    assert requests == ["[operator] follow target 3"]
+    assert requests == ["[operator] go to the door"]
 
 
 def test_emergency_discards_operator_requests_queued_before_it_but_not_later_ones(monkeypatch):

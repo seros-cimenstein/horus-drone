@@ -6,7 +6,11 @@ Fuel meshes, so these tests re-measure the meshes and check the numbers still de
 
 from __future__ import annotations
 
+import math
+import xml.etree.ElementTree as ET
+
 import pytest
+import yaml
 
 from sim.worldgen.assets import (
     ASSETS,
@@ -99,3 +103,18 @@ def test_standalone_model_sdf_matches_the_registry(key):
     asset = ASSETS[key]
     committed = (MODELS / asset.model_dir / "model.sdf").read_text(encoding="utf-8")
     assert committed == model_sdf(asset)
+
+
+def test_outdoor_gimbal_camera_loads_no_hfov_overriding_plugin():
+    sdf = MODELS / "horus_gimbal_small_3d_outdoor" / "model.sdf"
+    sensor = ET.parse(sdf).getroot().find("./model/link/sensor[@name='camera']")
+    profile = yaml.safe_load((MODELS.parents[1] / "config" / "horus_forest.yaml").read_text(encoding="utf-8"))
+
+    assert sensor is not None
+    declared = float(sensor.findtext("./camera/horizontal_fov"))
+    assert math.isclose(declared, math.radians(profile["executor"]["camera_horizontal_fov_deg"]), rel_tol=1e-12)
+    plugins = {plugin.get("name") for plugin in sensor.findall("./plugin")}
+    # The upstream CameraZoomPlugin would force the render back to 2.0 rad while the
+    # published CameraInfo keeps these SDF optics, so it must stay out of this sensor.
+    assert "CameraZoomPlugin" not in plugins
+    assert "GstCameraPlugin" in plugins

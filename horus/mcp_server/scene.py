@@ -45,7 +45,7 @@ def watch_region(
     without inventing enter/exit events. Unmeasured camera changes
     (``unmeasured_camera_components``, e.g. zoom) are not detected.
     Targets already inside are initial occupants. Reusing a name replaces that watch. The
-    watch never moves the vehicle; choose bounded skills yourself.
+    watch never moves the vehicle; choose the moves yourself.
     """
     system = ctx.require_perception()
     return to_json(

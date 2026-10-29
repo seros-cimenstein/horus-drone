@@ -1,4 +1,4 @@
-"""Inspect detector proposals and shirt-color attributes for a saved frame."""
+"""Inspect detector proposals for a saved frame."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from horus.config import load_config
-from horus.perception.attributes import classify_shirt_colour
 from horus.perception.detector import DetectorConfig, YOLODetector
 
 
@@ -52,27 +51,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     annotated = image.copy()
     print(f"model: {detector.model_id}")
     for index, detection in enumerate(detections, 1):
-        shirt_colour = None
-        shirt_colour_confidence = None
-        if detection.class_name.casefold() == "person":
-            classification = classify_shirt_colour(image, detection.bbox)
-            if classification is not None:
-                shirt_colour, shirt_colour_confidence = classification
         box = tuple(round(value, 1) for value in detection.bbox)
-        print(
-            f"{index}: class={detection.class_name} conf={detection.confidence:.3f} "
-            f"box={box} shirt_colour={shirt_colour}"
-            + (
-                f" shirt_colour_conf={shirt_colour_confidence:.3f}"
-                if shirt_colour_confidence is not None
-                else ""
-            )
-        )
+        print(f"{index}: class={detection.class_name} conf={detection.confidence:.3f} box={box}")
         x1, y1, x2, y2 = (int(round(value)) for value in detection.bbox)
         cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
         label = f"{detection.class_name} {detection.confidence:.2f}"
-        if shirt_colour is not None:
-            label += f" {shirt_colour}"
         cv2.putText(
             annotated,
             label,

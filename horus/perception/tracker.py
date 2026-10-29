@@ -1,19 +1,16 @@
-"""Persistent multi-object tracking with spatial association and appearance re-ID."""
+"""Persistent multi-object tracking with spatial association and appearance validation."""
 
 from __future__ import annotations
 
-from collections import OrderedDict, deque
 from dataclasses import replace
 import logging
 import math
 import time
 from typing import Any, Mapping, NamedTuple, Sequence
 
-from .attributes import vote_shirt_colour
 from .csrt import advance_csrt, initialize_csrt
 from .embedders import ColorHistogramEmbedder, Embedder, cosine_similarity, normalize_embedding
 from .geometry import coverage, crop_size, image_size, iou, validate_box
-from .reid_log import ReacquisitionGate, ReidSimilarityLog
 from .tracks import (
     FRESH_CANDIDATE_MAX_AGE_S,
     Track,
@@ -30,6 +27,10 @@ _LOGGER = logging.getLogger(__name__)
 
 # Track attributes set when a track is seeded that per-frame detections never carry.
 _PROVENANCE_KEYS = ("grounder_span",)
+# Appearance recovery (_recover_by_appearance) accepts a box at most this much taller or shorter
+# than the track's predicted box: an approach grows a person's box, a different-sized person nearby
+# is someone else.
+_RECOVERY_MAX_HEIGHT_RATIO = 2.0
 
 
 class _Step(NamedTuple):
@@ -45,8 +46,6 @@ class _Step(NamedTuple):
 class PersistentTracker:
     """Track detector proposals, retaining identities through brief occlusions."""
 
-    MAX_RETIRED_TRACKS = 64
-
     def __init__(
         self,
         config: TrackerConfig | None = None,
@@ -56,16 +55,11 @@ class PersistentTracker:
         self.config = config or TrackerConfig()
         self.embedder: Embedder = embedder or ColorHistogramEmbedder()
         self._tracks: dict[int, Track] = {}
-        # Expired tracks keep their reference appearance so a followed target that stays hidden
-        # longer than max_lost_seconds can still be re-identified when it reappears (bounded, FIFO).
-        self._retired: OrderedDict[int, Track] = OrderedDict()
         self._next_id = 1
         self._current: tuple[Candidate, ...] = ()
         self._current_image: Any = None
         self._embedding_cache: dict[tuple[int, int], Embedding | None] = {}
         self._cache_frame_id: int | None = None
-        self._reid_log = ReidSimilarityLog(_LOGGER)
-        self._reacquisition = ReacquisitionGate(self.config.reacquisition_confirm_s)
 
     def seed(
         self,
@@ -81,7 +75,7 @@ class PersistentTracker:
 
         ``attributes`` carries provenance for the caller (for example the grounder span a
         vocabulary seed came from). A seed never carries detector person evidence by itself:
-        only a detector person detection or the person-only shirt-colour attribute grants that.
+        only a detector person detection grants that.
         """
         if source not in {"open_vocab", "point"}:
             raise ValueError("seed source must be 'open_vocab' or 'point'")
@@ -121,27 +115,16 @@ class PersistentTracker:
         self._current = (*self._current, candidate)
         return candidate
 
-    def confirm_seed(
-        self, track_id: int, bbox: BBox, frame: Frame, *, confidence: float, label: str | None = None
-    ) -> bool:
-        """Snap an open-vocabulary seed back onto a fresh grounder box and reset its miss count.
-
-        ``label`` renames the seed (a generic ``object`` seed whose grounder score now passes the
-        term-label floor); returns True when the label changed.
-        """
+    def confirm_seed(self, track_id: int, bbox: BBox, frame: Frame, *, confidence: float) -> None:
+        """Snap an open-vocabulary seed back onto a fresh grounder box and reset its miss count."""
         track = self._tracks.get(track_id)
         if track is None or track.source != "open_vocab":
-            return False
+            return
         box = validate_box(bbox, frame.image, require_image=True)
         track.csrt_tracker = initialize_csrt(frame.image, box)
         track.bbox = box
         track.confidence = float(confidence)
         track.seed_misses = 0
-        if label is None or label == track.class_name:
-            return False
-        track.class_name = label
-        self._current = tuple(track.candidate() if item.id == track_id else item for item in self._current)
-        return True
 
     def age_unconfirmed_seeds(self, confirmed: set[int], *, max_misses: int = 3) -> list[int]:
         """Count a grounder cycle against open-vocabulary seeds it did not re-detect; drop stale ones."""
@@ -181,7 +164,8 @@ class PersistentTracker:
             self._apply_association(self._tracks[track_id], detections[index], step)
             associated.add(track_id)
             detection_track_ids[index] = track_id
-        self._spawn_tracks(detections, detection_track_ids, step)
+        embeddings = self._recover_by_appearance(detections, detection_track_ids, associated, step)
+        self._spawn_tracks(detections, detection_track_ids, step, embeddings)
         candidates = [
             self._tracks[detection_track_ids[index]].candidate()
             for index in range(len(detections))
@@ -194,18 +178,14 @@ class PersistentTracker:
         return self._current
 
     def _expire_tracks(self, now: float) -> None:
-        """Drop tracks unseen for ``max_lost_seconds``; keep their appearance for re-identification."""
+        """Drop tracks unseen for ``max_lost_seconds``."""
         expired = [
             track_id
             for track_id, track in self._tracks.items()
             if now - track.timestamp > self.config.max_lost_seconds
         ]
         for track_id in expired:
-            track = self._tracks.pop(track_id)
-            if track.reference_embedding is not None:
-                self._retired[track_id] = track
-                while len(self._retired) > self.MAX_RETIRED_TRACKS:
-                    self._retired.popitem(last=False)
+            del self._tracks[track_id]
 
     def _advance_seeds(self, step: _Step) -> set[int]:
         """Move seeded tracks with CSRT into this frame; returns the IDs that were advanced."""
@@ -263,7 +243,7 @@ class PersistentTracker:
         if track.source != "detector":
             # A seeded track (open-vocabulary or point) takes its identity from the grounder or
             # the operator, so a detection may refresh it only when the boxes agree strongly; a
-            # weak overlap would attach another person's detection and shirt colour to the seed.
+            # weak overlap would attach another person's detection to the seed.
             overlap = max(iou(predicted, detection.bbox), coverage(predicted, detection.bbox))
             return overlap if overlap >= self.config.revalidation_iou_threshold else None
         if classes_conflict(track.class_name, detection.class_name) or (
@@ -299,10 +279,7 @@ class PersistentTracker:
         provenance = {
             key: track.attributes[key] for key in _PROVENANCE_KEYS if key in track.attributes
         }
-        track.attributes = {
-            **provenance,
-            **self._vote_shirt_colour(detection.attributes, track.shirt_colour_votes),
-        }
+        track.attributes = {**provenance, **dict(detection.attributes)}
         _mark_seen(track, step)
         if is_person_detection(detection):
             track.person_evidence = True
@@ -312,8 +289,89 @@ class PersistentTracker:
             except (RuntimeError, ValueError):
                 pass
 
+    def _recover_by_appearance(
+        self,
+        detections: Sequence[Detection],
+        detection_track_ids: dict[int, int],
+        associated: set[int],
+        step: _Step,
+    ) -> dict[int, Embedding | None]:
+        """Keep the ID of a nearby track the IoU step missed when the detection looks the same.
+
+        An image jump the yaw compensation does not cover (vehicle pitch or translation, a
+        lurch at the start of an approach) moves a small box by more than its own width between
+        two frames, so no detection overlaps the track and the same person would get a new ID. An
+        unmatched detection may take over an unmatched detector track that was not seen in this
+        frame when:
+          1. the classes agree;
+          2. the detection's crop is usable for appearance (_crop_is_usable sizes);
+          3. its centre lies within one box diagonal of the track's predicted box and its height
+             is within a factor _RECOVERY_MAX_HEIGHT_RATIO of the track's;
+          4. its appearance matches any stored reference view of the track at the full
+             ``revalidation_similarity_threshold``.
+        The best-scoring pairs are applied first, one detection per track. Returns the embeddings
+        computed here, keyed by detection index, so spawning does not encode them twice.
+        """
+        embeddings: dict[int, Embedding | None] = {}
+        unmatched = [index for index in range(len(detections)) if index not in detection_track_ids]
+        tracks = [
+            track
+            for track_id, track in self._tracks.items()
+            if track_id not in associated
+            and track.source == "detector"
+            and track.reference_embedding is not None
+            and track.frame_id != step.frame.frame_id
+        ]
+        if not unmatched or not tracks:
+            return embeddings
+        threshold = self.config.revalidation_similarity_threshold
+        pairs: list[tuple[float, int, int]] = []
+        for index in unmatched:
+            detection = detections[index]
+            width_px, height_px = crop_size(step.frame.image, detection.bbox)
+            if (
+                width_px < self.config.reference_view_min_width_px
+                or height_px < self.config.reference_view_min_height_px
+            ):
+                continue
+            for track in tracks:
+                if classes_conflict(track.class_name, detection.class_name) or (
+                    track.class_id is not None
+                    and detection.class_id is not None
+                    and track.class_id != detection.class_id
+                ):
+                    continue
+                predicted = track.predicted_box(max(0.0, step.now - track.timestamp))
+                if normalized_center_distance(predicted, detection.bbox) > 1.0:
+                    continue
+                height_ratio = (detection.bbox[3] - detection.bbox[1]) / max(
+                    1e-6, predicted[3] - predicted[1]
+                )
+                if not 1.0 / _RECOVERY_MAX_HEIGHT_RATIO <= height_ratio <= _RECOVERY_MAX_HEIGHT_RATIO:
+                    continue
+                if index not in embeddings:
+                    embeddings[index] = self.encode(step.frame.image, detection.bbox)
+                similarity, _ = self._match_reference_views(track, embeddings[index])
+                if similarity is not None and similarity >= threshold:
+                    pairs.append((similarity, track.id, index))
+        for similarity, track_id, index in sorted(pairs, reverse=True):
+            if track_id in associated or index in detection_track_ids:
+                continue
+            _LOGGER.debug(
+                "track %d kept by appearance (%.3f) after its box left the IoU gate", track_id, similarity
+            )
+            self._apply_association(self._tracks[track_id], detections[index], step)
+            self._embedding_cache[(step.frame.frame_id, track_id)] = embeddings[index]
+            associated.add(track_id)
+            detection_track_ids[index] = track_id
+        return embeddings
+
     def _spawn_tracks(
-        self, detections: Sequence[Detection], detection_track_ids: dict[int, int], step: _Step
+        self,
+        detections: Sequence[Detection],
+        detection_track_ids: dict[int, int],
+        step: _Step,
+        embeddings: Mapping[int, Embedding | None],
     ) -> None:
         """Start a track for every detection no existing track claimed."""
         for index, detection in enumerate(detections):
@@ -321,15 +379,17 @@ class PersistentTracker:
                 continue
             track_id = self._next_id
             self._next_id += 1
-            embedding = self.encode(step.frame.image, detection.bbox)
-            votes: deque[str] = deque()
+            embedding = (
+                embeddings[index] if index in embeddings
+                else self.encode(step.frame.image, detection.bbox)
+            )
             self._tracks[track_id] = Track(
                 id=track_id,
                 bbox=detection.bbox,
                 class_name=detection.class_name,
                 class_id=detection.class_id,
                 confidence=detection.confidence,
-                attributes=self._vote_shirt_colour(detection.attributes, votes),
+                attributes=dict(detection.attributes),
                 reference_embedding=embedding,
                 current_embedding=embedding,
                 arrival_monotonic=step.arrival,
@@ -337,20 +397,11 @@ class PersistentTracker:
                 frame_id=step.frame.frame_id,
                 pose=step.frame.pose,
                 person_evidence=is_person_detection(detection),
-                shirt_colour_votes=votes,
                 frame_size=step.size,
                 camera_yaw_deg=step.camera_yaw,
             )
             self._embedding_cache[(step.frame.frame_id, track_id)] = embedding
             detection_track_ids[index] = track_id
-
-    def _vote_shirt_colour(self, attributes: Any, votes: deque[str]) -> dict[str, Any]:
-        return vote_shirt_colour(
-            attributes,
-            votes,
-            window=self.config.shirt_colour_window,
-            min_votes=self.config.shirt_colour_min_votes,
-        )
 
     @property
     def current_candidates(self) -> tuple[Candidate, ...]:
@@ -398,11 +449,6 @@ class PersistentTracker:
             self._embedding_cache[cache_key] = self.encode(image, candidate.bbox)
         return self._embedding_cache[cache_key]
 
-    def _log_similarity(self, candidate: Candidate, **fields: Any) -> None:
-        self._reid_log.record(
-            candidate=candidate, crop_px=crop_size(self._current_image, candidate.bbox), **fields
-        )
-
     def validate_candidate(
         self,
         track_id: int,
@@ -431,10 +477,7 @@ class PersistentTracker:
         this to report the actual cause after a rejected validation.
         """
         _, reason = self._validate_candidate(
-            track_id,
-            max_age_seconds=max_age_seconds,
-            min_confidence=min_confidence,
-            log_similarity=False,
+            track_id, max_age_seconds=max_age_seconds, min_confidence=min_confidence
         )
         return reason
 
@@ -480,14 +523,13 @@ class PersistentTracker:
         """Store a confirmed appearance view for a live, continuously associated track.
 
         Rules (all must hold; the caller guarantees the view passed the FULL threshold against the
-        creation view, never on a grace-forgiven frame):
+        creation view):
           1. the candidate is the track's own fresh candidate (guaranteed by the caller);
           2. it passed the full threshold against the creation view (caller);
           3. class gate: a differing known class is never stored;
-          4. shirt-colour gate: a differing known colour is never stored;
-          5. crop gate: the minimum view size (see _crop_is_usable);
-          6. diversity: a view within ``reference_view_dedupe_cos`` of a stored one adds nothing;
-          7. the gallery is capped at ``reference_views`` views in total; the oldest extra view is
+          4. crop gate: the minimum view size (see _crop_is_usable);
+          5. diversity: a view within ``reference_view_dedupe_cos`` of a stored one adds nothing;
+          6. the gallery is capped at ``reference_views`` views in total; the oldest extra view is
              evicted first and the creation view is never evicted.
         """
         if live_embedding is None:
@@ -496,9 +538,6 @@ class PersistentTracker:
         if limit == 0:
             return False
         if classes_conflict(track.class_name, candidate.class_name):
-            return False
-        reference_colour = track.attributes.get("shirt_colour")
-        if reference_colour is not None and candidate.attributes.get("shirt_colour") != reference_colour:
             return False
         if not self._crop_is_usable(candidate):
             return False
@@ -518,7 +557,6 @@ class PersistentTracker:
         *,
         max_age_seconds: float,
         min_confidence: float,
-        log_similarity: bool = True,
     ) -> tuple[Candidate | None, str | None]:
         track_id = int(track_id)
         candidate = self.candidate(track_id)
@@ -539,41 +577,9 @@ class PersistentTracker:
         # The creation view decides admission; matching may use any stored view, so a marginal dip
         # against the creation view does not lose a correctly tracked, associated target.
         primary_similarity = cosine_similarity(track.reference_embedding, live_embedding)
-        similarity, matched_view = self._match_reference_views(track, live_embedding)
-        if log_similarity:
-            self._log_similarity(
-                candidate,
-                mode="selected_validation",
-                similarity=similarity,
-                reference_id=track.id,
-                threshold=threshold,
-                primary_similarity=primary_similarity,
-                matched_view=matched_view,
-                view_count=1 + len(track.reference_views),
-            )
-        now = time.monotonic()
+        similarity, _ = self._match_reference_views(track, live_embedding)
         if similarity is None or similarity < threshold:
-            # A correctly tracked target's score wobbles across the threshold frame to frame, so
-            # a dip within the configured margin is forgiven while the track is fresh and inside
-            # the grace window after an accepted validation. A total appearance change (an
-            # identity swap) fails immediately, a persistent dip expires the window, and
-            # re-acquisition (reidentify_candidate) never grants this grace.
-            if (
-                similarity is not None
-                and similarity >= threshold - self.config.revalidation_grace_margin
-                and track.last_validated_monotonic > 0.0
-                and self.config.revalidation_grace_s > 0.0
-                and now - track.last_validated_monotonic <= self.config.revalidation_grace_s
-            ):
-                _LOGGER.debug(
-                    "appearance score %.3f within %.2f of the %.2f threshold for track %d and "
-                    "%.2fs after the last accepted validation; keeping the identity",
-                    similarity, self.config.revalidation_grace_margin, threshold, track.id,
-                    now - track.last_validated_monotonic,
-                )
-                return replace(candidate, embedding=live_embedding), None
             return None, "appearance_mismatch"
-        track.last_validated_monotonic = now
         if primary_similarity is not None and primary_similarity >= threshold:
             if self._admit_reference_view(track, candidate, live_embedding):
                 _LOGGER.debug(
@@ -581,72 +587,6 @@ class PersistentTracker:
                     track.id, len(track.reference_views), primary_similarity, similarity,
                 )
         return replace(candidate, embedding=live_embedding), None
-
-    def reidentify_candidate(self, track_id: int) -> tuple[Candidate, float] | None:
-        """Re-match a lost track to a fresh current candidate.
-
-        Re-acquisition is anchored on the creation view alone (``reference_embedding``) at the
-        full threshold; the multi-view gallery is deliberately not consulted, because a widened
-        acceptance region admits same-colour look-alikes. A candidate needs the track's class
-        (a generic label cannot re-acquire a known class), its shirt colour and a usable crop,
-        and the same candidate id must pass on two distinct processed frames within
-        ``reacquisition_confirm_s`` before the ID is rematched.
-        """
-        reference_id = int(track_id)
-        track = self._tracks.get(reference_id) or self._retired.get(reference_id)
-        if track is None or track.reference_embedding is None:
-            return None
-        reference_colour = track.attributes.get("shirt_colour")
-        threshold = self.config.revalidation_similarity_threshold
-        best: tuple[Candidate, float] | None = None
-        for candidate in self._current:
-            candidate_track = self._tracks.get(candidate.id)
-            if not self._candidate_is_fresh(
-                candidate,
-                candidate_track,
-                max_age_seconds=FRESH_CANDIDATE_MAX_AGE_S,
-                min_confidence=0.0,
-            ):
-                continue
-            live_embedding = self._embed_candidate(candidate)
-            similarity = cosine_similarity(track.reference_embedding, live_embedding)
-            self._log_similarity(
-                candidate,
-                mode="reidentification",
-                similarity=similarity,
-                reference_id=track.id,
-                threshold=threshold,
-                view_count=1 + len(track.reference_views),
-            )
-            if (
-                is_known_class(track.class_name)
-                and candidate.class_name.casefold() != track.class_name.casefold()
-            ):
-                continue
-            if (
-                reference_colour is not None
-                and candidate.attributes.get("shirt_colour") != reference_colour
-            ):
-                continue
-            if not self._crop_is_usable(candidate):
-                continue
-            if (
-                similarity is not None
-                and similarity >= threshold
-                and (best is None or similarity > best[1])
-            ):
-                best = (replace(candidate, embedding=live_embedding), similarity)
-        if best is None:
-            self._reacquisition.reset(reference_id)
-            return None
-        candidate, similarity = best
-        if not self._reacquisition.confirm(reference_id, candidate.id, candidate.frame_id):
-            _LOGGER.debug(
-                "re-identification of %d as candidate %d is pending a second confirmed frame",
-                reference_id, candidate.id,
-            )
-            return None
-        return candidate, similarity
 
 
 def _mark_seen(track: Track, step: _Step) -> None:

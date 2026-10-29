@@ -233,9 +233,9 @@ at their lowest:
 
 SocialClubHelper cannot be cut: killed while the game runs, it is restarted within a second with
 a third renderer, and available memory fell to 497 MiB. The 8192 MiB guard set from this (the
-stack plus 1 GiB) replaced a 6144 MiB one that let GTA start into a thrash. A HORUS mission in GTA
-needs more: on 2026-10-21 GTA, SITL, horus-mcp and the mission runner took available memory down
-by up to 8658 MiB, from 9106 to 448 MiB (`gta/horus_mod/README.md` "Checked in game", memory
+stack plus 1 GiB) replaced a 6144 MiB one that let GTA start into a thrash. HORUS in GTA needs
+more: on 2026-10-21 GTA, SITL and horus-mcp with a `horus` client took available memory down by up
+to 8658 MiB, from 9106 to 448 MiB (`gta/horus_mod/README.md` "Checked in game", memory
 budget). `gta_game.sh start` therefore requires 9728 MiB available (that plus 1 GiB, rounded up).
 With Koko's usual desktop load (Firefox about 2.4 GiB, Steam's webhelper about 1.5 GiB PSS) that
 requires closing something first; even with Firefox closed, Koko idles at about 9.1 GiB.
@@ -391,7 +391,7 @@ not enabled (they may fail to spawn or be removed). No mod we install spawns a v
   raycasts. Its 15 direct natives are camera, focus, entity, ped ragdoll, weapon, `GET_HASH_KEY` and
   wanted-level calls, and none is a vehicle native.
 
-Planned work (B5 density multipliers, C3 shape tests) does not spawn vehicles either, so no item is
+Density multipliers and shape tests do not spawn vehicles either, so no item is
 needed.
 
 ### Scripts while the game is paused
@@ -421,8 +421,8 @@ frames skipped).
 ## Crossmap licence
 
 The crossmap is YimMenuV2's `src/game/gta/invoker/crossmap.txt`
-([YimMenu/YimMenuV2](https://github.com/YimMenu/YimMenuV2), GPL-2.0, by the YimMenu authors). Decision
-(loop manager for the user, 2026-10-20, ledger item E2): it stays a runtime download and is never
+([YimMenu/YimMenuV2](https://github.com/YimMenu/YimMenuV2), GPL-2.0, by the YimMenu authors). Decision:
+it stays a runtime download and is never
 committed to this repository or embedded in the hook. `gta_mods.sh install` fetches it once into
 Koko's `~/horus-gta/staging/` from a URL pinned to commit
 `c3604ca8195873c6b89008be5fefad517e554b18`. Every install checks the staged copy against the pinned
@@ -442,7 +442,7 @@ scripts/koko/gta_game.sh status    # processes, available memory, ScriptHookV.lo
 scripts/koko/gta_game.sh stop      # close GTA, the Rockstar launcher and Social Club helpers
 ```
 
-`start` refuses while GTA already runs, while Gazebo runs (a HORUS campaign or simulation), while
+`start` refuses while GTA already runs, while Gazebo runs (a HORUS simulation), while
 the running Steam client is not signed in, when no display output is enabled (Koko's screen off:
 GTA's swap chain then presents once a second, so scripts and captured frames run at 1 Hz), while a
 screen lock covers the desktop (a visible `dark-screenlock` window or an active Cinnamon

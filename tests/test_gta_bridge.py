@@ -7,12 +7,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pymavlink import mavutil
 
-from horus.config import FlightSettings
-from horus.flight.link import MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS, MountStatus, Pose, Telemetry
+from horus.config import FlightSettings, GimbalSettings
+from horus.flight.link import Pose, Telemetry
 from horus.gta_bridge import (
     PACKET_SIZE,
+    CameraGimbal,
     CameraPose,
     GtaTelemetryLink,
     compose_camera_pose,
@@ -20,6 +20,7 @@ from horus.gta_bridge import (
     encode_packet,
     parse_target,
 )
+from horus.mavlink import load_mavutil
 
 # Shared with the C# parser tests (gta/horus_mod/tests/Tests.cs).
 VECTOR = json.loads(
@@ -75,7 +76,6 @@ def _telemetry(
     heading_deg: float | None = 30.0,
     pose_age_s: float = 0.02,
     heading_age_s: float = 0.02,
-    mount: MountStatus | None = None,
 ) -> Telemetry:
     return Telemetry(
         observed_at="",
@@ -84,34 +84,69 @@ def _telemetry(
         pose_updated_monotonic=NOW - pose_age_s,
         heading_deg=heading_deg,
         heading_updated_monotonic=NOW - heading_age_s,
-        mount_status=mount,
     )
 
 
-def _mount(pitch: float, roll: float, yaw: float, age_s: float = 0.05) -> MountStatus:
-    return MountStatus(1, 1, None, pitch, roll, yaw, "", NOW - age_s)
+class _FakeEndpoint:
+    """GimbalDeviceEndpoint without a socket: ``setpoint`` is HORUS's latest accepted setpoint."""
+
+    def __init__(self) -> None:
+        self.setpoint: tuple[float, float] | None = None
+        self.published: list[tuple[float, float, float]] = []
+
+    def target(self) -> tuple[float, float] | None:
+        return self.setpoint
+
+    def publish(self, pitch_deg: float, roll_deg: float, yaw_deg: float) -> None:
+        self.published.append((pitch_deg, roll_deg, yaw_deg))
 
 
-def test_without_gimbal_the_camera_uses_the_default_pitch_facing_the_nose() -> None:
-    camera = compose_camera_pose(_telemetry(), NOW, default_pitch_deg=-45.0)
+def _gimbal(default_pitch_deg: float = -45.0) -> tuple[CameraGimbal, _FakeEndpoint]:
+    endpoint = _FakeEndpoint()
+    return CameraGimbal(endpoint, default_pitch_deg, GimbalSettings()), endpoint  # type: ignore[arg-type]
+
+
+def test_before_any_setpoint_the_camera_faces_the_nose_at_the_default_pitch_and_reports_it() -> None:
+    gimbal, endpoint = _gimbal(default_pitch_deg=-45.0)
+    camera = compose_camera_pose(_telemetry(), NOW, *gimbal.update())
     assert camera == CameraPose(4.0, -2.5, -12.0, 0.0, -45.0, 30.0)
+    assert endpoint.published == [(-45.0, 0.0, 0.0)]
 
 
-def test_gimbal_yaw_is_body_relative_and_pitch_roll_are_horizon_relative() -> None:
-    camera = compose_camera_pose(
-        _telemetry(heading_deg=350.0, mount=_mount(-60.0, 2.0, 25.0)), NOW, default_pitch_deg=-45.0
-    )
+def test_setpoint_pitch_is_horizon_relative_and_yaw_is_added_to_the_heading() -> None:
+    gimbal, endpoint = _gimbal()
+    endpoint.setpoint = (-60.0, 25.0)
+    camera = compose_camera_pose(_telemetry(heading_deg=350.0), NOW, *gimbal.update())
     assert camera is not None
-    assert (camera.roll_deg, camera.pitch_deg) == (2.0, -60.0)
+    assert (camera.roll_deg, camera.pitch_deg) == (0.0, -60.0)
     assert camera.yaw_deg == pytest.approx(15.0)  # 350 + 25, wrapped
+    assert endpoint.published == [(-60.0, 0.0, 25.0)]
 
 
-def test_stale_gimbal_falls_back_to_the_default_pitch() -> None:
-    camera = compose_camera_pose(
-        _telemetry(mount=_mount(-90.0, 0.0, 40.0, age_s=1.5)), NOW, default_pitch_deg=-30.0
-    )
-    assert camera is not None
-    assert (camera.pitch_deg, camera.roll_deg, camera.yaw_deg) == (-30.0, 0.0, 30.0)
+def test_the_setpoint_is_held_without_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [NOW]
+    monkeypatch.setattr("horus.gta_bridge.time", SimpleNamespace(monotonic=lambda: clock[0]))
+    gimbal, endpoint = _gimbal()
+    endpoint.setpoint = (-20.0, -90.0)
+    for clock[0] in (NOW, NOW + 5.0, NOW + 600.0):
+        assert gimbal.update() == (-20.0, -90.0)
+    assert endpoint.published == [(-20.0, 0.0, -90.0)] * 3
+
+
+@pytest.mark.parametrize(
+    ("setpoint", "held"),
+    [
+        ((-120.0, 0.0), (-90.0, 0.0)),
+        ((60.0, 0.0), (45.0, 0.0)),
+        ((0.0, 175.0), (0.0, 160.0)),
+        ((0.0, -179.0), (0.0, -160.0)),
+    ],
+)
+def test_setpoints_beyond_horus_limits_stop_at_the_limit(setpoint, held) -> None:
+    gimbal, endpoint = _gimbal()
+    endpoint.setpoint = setpoint
+    assert gimbal.update() == held
+    assert endpoint.published == [(held[0], 0.0, held[1])]
 
 
 @pytest.mark.parametrize(
@@ -124,7 +159,7 @@ def test_stale_gimbal_falls_back_to_the_default_pitch() -> None:
     ],
 )
 def test_no_packet_without_a_fresh_position_and_heading(telemetry: Telemetry) -> None:
-    assert compose_camera_pose(telemetry, NOW, default_pitch_deg=0.0) is None
+    assert compose_camera_pose(telemetry, NOW, 0.0, 0.0) is None
 
 
 def test_link_messages_compose_like_horus_reads_them() -> None:
@@ -135,15 +170,12 @@ def test_link_messages_compose_like_horus_reads_them() -> None:
     link._consume(SimpleNamespace(
         get_type=lambda: "ATTITUDE", roll=math.radians(5.0), pitch=math.radians(-3.0), yaw=math.radians(-90.0),
     ))
-    link._consume(SimpleNamespace(
-        get_type=lambda: "MOUNT_STATUS", target_system=1, target_component=1, mount_mode=2,
-        pointing_a=-4500, pointing_b=150, pointing_c=-2000,
-    ))
     telemetry = link.telemetry()
-    camera = compose_camera_pose(telemetry, telemetry.received_monotonic, default_pitch_deg=0.0)
+    camera = compose_camera_pose(telemetry, telemetry.received_monotonic, -45.0, -20.0)
     assert camera is not None
     assert (camera.north_m, camera.east_m, camera.down_m) == (3.0, -1.0, -25.0)
-    assert (camera.pitch_deg, camera.roll_deg) == (-45.0, 1.5)
+    # The vehicle lean never reaches the camera: the gimbal is self-levelling.
+    assert (camera.pitch_deg, camera.roll_deg) == (-45.0, 0.0)
     assert camera.yaw_deg == pytest.approx(250.0)  # heading 270 + gimbal -20
 
 
@@ -155,19 +187,16 @@ class _FakeMav:
         self.calls.append(fields)
 
 
-def test_link_requests_the_pose_messages_at_the_bridge_rate() -> None:
+def test_link_requests_only_the_pose_messages_at_the_bridge_rate() -> None:
+    mavlink = load_mavutil().mavlink
     link = GtaTelemetryLink(FlightSettings(), interval_us=20_000)
     mav = _FakeMav()
     link._connection = SimpleNamespace(target_system=1, target_component=1, mav=mav)
     link._request_telemetry()
-    intervals = {
-        call[4]: call[5] for call in mav.calls if call[2] == mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL
-    }
-    assert intervals == {
-        mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE: 20_000,
-        mavutil.mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED: 20_000,
-        mavutil.mavlink.MAVLINK_MSG_ID_MOUNT_STATUS: 20_000,
-        MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS: 20_000,
+    assert {call[2] for call in mav.calls} == {mavlink.MAV_CMD_SET_MESSAGE_INTERVAL}
+    assert {call[4]: call[5] for call in mav.calls} == {
+        mavlink.MAVLINK_MSG_ID_ATTITUDE: 20_000,
+        mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED: 20_000,
     }
 
 
