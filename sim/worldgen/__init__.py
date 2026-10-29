@@ -19,7 +19,7 @@ from sim.worldgen.scenario import scenario_text
 from sim.worldgen.urban import build_urban
 from sim.worldgen.urban_procedural import build_urban_procedural
 from sim.worldgen.urban_sampler import sample_urban_layout
-from sim.worldgen.validation import measure_follow, validate_world
+from sim.worldgen.validation import validate_world
 from sim.worldgen.vehicles import vehicle_type
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,7 +29,7 @@ MODEL_DIR = SIM_DIR / "models"
 SCENARIO_DIR = SIM_DIR / "scenarios"
 FileValue: TypeAlias = bytes | str
 # Each kind's world modules provide ``transit_altitude(layout)`` and
-# ``manifest_extras(layout, people) -> (follow, areas, extra fields)``.
+# ``manifest_extras(layout) -> (areas, extra fields)``.
 _WORLD_MODULES = {(kind, canonical): module for kind, canonical, module in (
     ("forest", True, forest), ("forest", False, forest_procedural),
     ("urban", True, urban), ("urban", False, urban_procedural))}
@@ -92,9 +92,6 @@ def _person_manifest(person: dict) -> dict:
         "yaw_deg": math.degrees(person.get("yaw", 0.0)),
         "posture": person["posture"],
         "clothing": person["clothing"],
-        "shirt_colour_attribute": person["shirt_colour_attribute"],
-        "shirt_colour_source": person["shirt_colour_source"],
-        "possible_shirt_colours": person["possible_shirt_colours"],
         "envelope": person["envelope"],
     }
     appearance = person.get("appearance")
@@ -140,7 +137,7 @@ def _manifest(layout: ForestLayout | UrbanLayout, kind: str, stem: str,
     animals = [_animal_manifest(agent) for agent in agents if agent.get("kind") == "animal"]
     vehicles = [_vehicle_manifest(agent) for agent in agents if agent.get("kind") == "vehicle"]
     world = _WORLD_MODULES[(kind, layout.canonical)]
-    follow, areas, extras = world.manifest_extras(layout, {person["model"]: person for person in people})
+    areas, extras = world.manifest_extras(layout)
     ground = None if kind == "urban" else {
         "file": ground_path,
         "origin_xy": [_manifest_number(layout.map.min), _manifest_number(layout.map.min)],
@@ -161,7 +158,6 @@ def _manifest(layout: ForestLayout | UrbanLayout, kind: str, stem: str,
         "people": people,
         "vehicles": vehicles,
         "animals": animals,
-        "follow": follow,
         "transit_altitude_m": world.transit_altitude(layout),
         "areas": areas,
         "attempts": layout.attempts,
@@ -187,7 +183,7 @@ def _build(kind: str, layout: ForestLayout | UrbanLayout, terrain_name: str,
 
 
 def _validate_candidate(kind: str, layout: ForestLayout | UrbanLayout,
-                        stratum: str | None = None) -> tuple[float, list[str]]:
+                        stratum: str | None = None) -> list[str]:
     stem = f"horus_{kind}_p{layout.seed}"
     dressing = _dressing(kind, layout, stratum)
     sdf, agents, _rows, files = _build(kind, layout, f"{stem}_terrain", dressing, textures=False)
@@ -235,10 +231,6 @@ def build_world(kind: str, seed: int, *, procedural: bool,
                              interactions=True, ground_map=layout.map)
     manifest = _manifest(layout, kind, stem, scenario_path,
                          ground_path, f"{stem}.sdf", agents, dressing)
-    if not procedural:
-        plan = measure_follow(kind, layout, sdf, manifest,
-                              model_dir=MODEL_DIR, world_dir=WORLD_DIR)
-        manifest["follow"]["expected_occlusion_s"] = plan.occluded_s
     return WorldBundle(stem, sdf, scenario, manifest, ground_rows, files)
 
 

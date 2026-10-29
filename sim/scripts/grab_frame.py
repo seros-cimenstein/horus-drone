@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from sim.campaign.camera_stream import enable_camera_stream
+from sim.scripts.camera_stream import enable_camera_stream
 
 
 FRAME_PATH = Path("/horus/sim/logs/s0_frame.jpg")

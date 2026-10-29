@@ -1,7 +1,6 @@
 from horus.flight.link import (
     DistanceSensor,
     MavlinkFlightLink,
-    MountStatus,
     Pose,
     Telemetry,
     Velocity,
@@ -13,7 +12,6 @@ __all__ = [
     "DistanceSensor",
     "FlightLink",
     "MavlinkFlightLink",
-    "MountStatus",
     "Pose",
     "Telemetry",
     "Velocity",

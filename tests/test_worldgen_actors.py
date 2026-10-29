@@ -90,15 +90,12 @@ def test_sitting_envelope_bounds_the_scaled_mesh():
     assert envelope["top_z_m"] == pytest.approx(z_extent, abs=0.02)
 
 
-def test_sitting_manifest_attribute_is_the_measured_constant():
-    record = {"model": "probe", "asset": "person_sitting", "role": "injured", "speed": 0.0}
+def test_sitting_manifest_uses_the_rescue_dummy_clothing():
+    record = {"model": "probe", "asset": "person_sitting", "role": "park_sitting", "speed": 0.0}
     d = dressing.Dressing("baseline", dressing.sample_environment(random.Random(0), chaotic=False),
                           appearances={"probe": sample_appearance(random.Random(6))})
     dressed = dressing.dress_person(d, record)
     assert dressed["posture"] == "sitting"
-    assert dressed["shirt_colour_attribute"] is None
-    assert dressed["shirt_colour_source"] == "measured_rendered_asset"
-    assert dressed["possible_shirt_colours"] == ["green"]
     assert dressed["clothing"] == people.SITTING_CLOTHING
     assert dressed["envelope"] == d.appearances["probe"].envelope("sitting")
 

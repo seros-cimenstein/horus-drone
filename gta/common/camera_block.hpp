@@ -7,11 +7,13 @@
 //   0 u32 magic "HGCM"   4 u32 version   8 u64 sequence (seqlock: odd while the script writes,
 //   +2 per tick)   16 u32 active (1 while HorusGta drives the camera)   20 u32 reserved
 //   24 u64 pose_seq (seq of the last applied pose packet)   32 u64 game_frame (GET_FRAME_COUNT)
-//   40..63 reserved
+//   40 u32 view_mode (kViewModeDrone / kViewModeShared; zero in blocks of older scripts)
+//   44..63 reserved
 //
 // Scripts do not tick while the game is paused, so the block then keeps saying active=1. The
 // reader therefore counts presents since the sequence last changed and reports the camera active
-// only while the script ticked within kMaxScriptAgePresents presents.
+// only while the script ticked within kMaxScriptAgePresents presents. The same holds for the
+// shared view: a stale block reads as kViewModeDrone, so a paused game is never composited.
 #pragma once
 
 #define WIN32_LEAN_AND_MEAN
@@ -31,12 +33,18 @@ constexpr uint32_t kCameraBlockVersion = 1;
 // The cost: the first one or two presents after the game pauses may still count as active.
 constexpr uint64_t kMaxScriptAgePresents = 2;
 constexpr uint32_t kScriptAgeNever = 0xFFFFFFFFu;
+// view_mode: the drone camera is on screen (HorusGta's default, and what older scripts leave there).
+constexpr uint32_t kViewModeDrone = 0;
+// view_mode: HorusGta alternates drone and gameplay camera ticks and marks each frame in its top-left
+// corner; horus_capture keeps the drone frames off the screen (gta/capture/README.md "Shared view").
+constexpr uint32_t kViewModeShared = 1;
 
 struct CameraFields {
     uint64_t sequence = 0;
     uint32_t active = 0;
     uint64_t pose_seq = 0;
     uint64_t game_frame = 0;
+    uint32_t view_mode = kViewModeDrone;
 };
 
 // Consistent snapshot of the block (seqlock read); false if it is not a version-1 block or the
@@ -62,6 +70,7 @@ inline bool read_camera_block(const volatile uint8_t* base, CameraFields& out) {
         fields.active = u32(16);
         fields.pose_seq = u64(24);
         fields.game_frame = u64(32);
+        fields.view_mode = u32(40);
         std::atomic_thread_fence(std::memory_order_acquire);
         if (u64(8) != before) continue;
         fields.sequence = before;
@@ -77,6 +86,7 @@ struct CameraStamp {
     uint32_t script_age = kScriptAgeNever;     // presents since the script last ticked
     uint64_t pose_seq = 0;
     uint64_t game_frame = 0;
+    uint32_t view_mode = kViewModeDrone;     // block's view mode while the script ticks recently
 };
 
 // Render-thread state: call observe() once per Present with that Present's index.
@@ -93,9 +103,11 @@ public:
         if (!seen_) return stamp;
         const uint64_t age = present_index - last_change_present_;
         stamp.script_age = age >= kScriptAgeNever ? kScriptAgeNever - 1 : static_cast<uint32_t>(age);
-        stamp.active = (last_.active == 1 && age <= kMaxScriptAgePresents) ? 1u : 0u;
+        const bool fresh = age <= kMaxScriptAgePresents;
+        stamp.active = (last_.active == 1 && fresh) ? 1u : 0u;
         stamp.pose_seq = last_.pose_seq;
         stamp.game_frame = last_.game_frame;
+        stamp.view_mode = fresh ? last_.view_mode : kViewModeDrone;
         return stamp;
     }
 
@@ -107,7 +119,8 @@ private:
 
 // Writer side, for the capture selftest standing in for HorusGta (the script writes the same way
 // from C#): one tick's update under the seqlock.
-inline void write_camera_block(volatile uint8_t* base, uint32_t active, uint64_t pose_seq, uint64_t game_frame) {
+inline void write_camera_block(volatile uint8_t* base, uint32_t active, uint64_t pose_seq, uint64_t game_frame,
+                               uint32_t view_mode = kViewModeDrone) {
     uint8_t* p = const_cast<uint8_t*>(base);
     const uint32_t header[2] = {kCameraBlockMagic, kCameraBlockVersion};
     std::memcpy(p, header, sizeof(header));
@@ -119,6 +132,7 @@ inline void write_camera_block(volatile uint8_t* base, uint32_t active, uint64_t
     std::memcpy(p + 16, &active, sizeof(active));
     std::memcpy(p + 24, &pose_seq, sizeof(pose_seq));
     std::memcpy(p + 32, &game_frame, sizeof(game_frame));
+    std::memcpy(p + 40, &view_mode, sizeof(view_mode));
     std::atomic_thread_fence(std::memory_order_release);
     ++sequence;  // even: done
     std::memcpy(p + 8, &sequence, sizeof(sequence));

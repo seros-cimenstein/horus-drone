@@ -19,7 +19,7 @@ from horus.executor.precision_landing import (
 )
 from horus.flight import Pose
 
-from tests.fakes import FakeFlight, PerceptionStub, executor_settings as _executor_settings
+from tests.fakes import FakeFlight, FakeGimbal, PerceptionStub, executor_settings as _executor_settings
 
 
 def _cv2_aruco():
@@ -98,18 +98,20 @@ class _FakePerception(PerceptionStub):
 @pytest.mark.parametrize(("action", "fallback"), [("rth", ("rth",)), ("land", ("land",))])
 def test_emergency_landing_keeps_autopilot_until_near_home_and_tag_acquisition(action, fallback):
     flight = FakeFlight(Pose(4.0, 0.0, 2.0), armed=True)
+    gimbal = FakeGimbal()
     perception = _FakePerception(_tag_image())
-    executor = HorusExecutor(flight, _executor_settings(), perception, autostart=False)
+    executor = HorusExecutor(flight, _executor_settings(), perception, gimbal=gimbal, autostart=False)
     try:
         getattr(executor, action)()
         executor.tick()
         assert flight.commands == [fallback]
+        assert gimbal.points == []
 
         flight._telemetry.pose = Pose(0.0, 0.0, 2.0)
         flight._telemetry.pose_updated_monotonic = time.monotonic()
         executor.tick()
-        assert flight.commands[-1] == ("gimbal", -90.0, 0.0)
-        assert not any(command[0] == "guided" for command in flight.commands)
+        assert gimbal.points == [(-90.0, 0.0)]
+        assert flight.commands == [fallback]
 
         time.sleep(PrecisionLanding.GIMBAL_SETTLE_S + 0.02)
         perception.frame.timestamp = time.monotonic()
@@ -217,8 +219,7 @@ def test_operator_hold_during_precision_tag_acquisition_is_not_overridden():
         operator.join(2.0)
         assert not worker.is_alive() and not operator.is_alive()
 
-        flight_commands = [c for c in flight.commands if c[0] != "gimbal"]
-        assert flight_commands[-1] == ("hold",)
+        assert flight.commands[-1] == ("hold",)
         mark = len(flight.commands)
         for _ in range(3):
             perception.frame.timestamp = time.monotonic()
@@ -233,13 +234,15 @@ def test_operator_hold_during_precision_tag_acquisition_is_not_overridden():
 
 def test_precision_landing_does_not_steer_on_a_stale_heading():
     flight = FakeFlight(Pose(0.0, 0.0, 2.0), armed=True)
+    gimbal = FakeGimbal()
     perception = _FakePerception(_tag_image())
-    executor = HorusExecutor(flight, _executor_settings(), perception, autostart=False)
+    executor = HorusExecutor(flight, _executor_settings(), perception, gimbal=gimbal, autostart=False)
     try:
         _settle_on_visible_tag(executor, flight, perception)
         flight._telemetry.heading_updated_monotonic = time.monotonic() - 2.0
         executor.tick()
-        assert flight.commands == [("rth",), ("gimbal", -90.0, 0.0)]
+        assert flight.commands == [("rth",)]
+        assert gimbal.points == [(-90.0, 0.0)]
 
         flight._telemetry.heading_updated_monotonic = time.monotonic()
         executor.tick()
@@ -409,16 +412,18 @@ def test_precision_landing_keeps_control_while_altitude_progresses():
 
 def test_operator_hold_restores_the_camera_turned_nadir_for_precision_landing():
     flight = FakeFlight(Pose(0.0, 0.0, 2.0), armed=True)
+    gimbal = FakeGimbal()
     perception = _FakePerception(_tag_image())
-    executor = HorusExecutor(flight, _executor_settings(), perception, autostart=False)
+    executor = HorusExecutor(flight, _executor_settings(), perception, gimbal=gimbal, autostart=False)
     try:
         executor.rth()
         executor.tick()
-        assert flight.commands[-1] == ("gimbal", -90.0, 0.0)
+        assert gimbal.points[-1] == (-90.0, 0.0)
 
         executor.hold()
 
-        assert flight.commands[-2:] == [("hold",), ("gimbal", 0.0, 0.0)]
+        assert flight.commands[-1] == ("hold",)
+        assert gimbal.points[-1] == (0.0, 0.0)
     finally:
         executor.close()
 
@@ -426,12 +431,13 @@ def test_operator_hold_restores_the_camera_turned_nadir_for_precision_landing():
 def test_next_skill_after_a_pilot_override_restores_the_nadir_camera():
     # The override ends precision control but keeps the nadir-camera record for the next skill.
     flight = FakeFlight(Pose(0.0, 0.0, 2.0), armed=True)
+    gimbal = FakeGimbal()
     perception = _FakePerception(_tag_image())
-    executor = HorusExecutor(flight, _executor_settings(), perception, autostart=False)
+    executor = HorusExecutor(flight, _executor_settings(), perception, gimbal=gimbal, autostart=False)
     try:
         executor.rth()
         executor.tick()
-        assert flight.commands[-1] == ("gimbal", -90.0, 0.0)
+        assert gimbal.points[-1] == (-90.0, 0.0)
 
         flight._telemetry.mode = "LOITER"
         executor.tick()
@@ -439,11 +445,12 @@ def test_next_skill_after_a_pilot_override_restores_the_nadir_camera():
         flight._telemetry.mode = "GUIDED"
         executor.tick()
         assert executor.get_state()["state"] == "HOLDING"
+        assert gimbal.points[-1] == (-90.0, 0.0)  # the override itself leaves the camera alone
 
-        mark = len(flight.commands)
+        mark = len(gimbal.points)
         executor.submit_skill("goto", {"pose": {"north_m": 0.0, "east_m": 0.0, "up_m": 2.0}}, ttl_s=5.0)
         _refresh_precision_inputs(flight, perception)
         executor.tick()
-        assert flight.commands[mark] == ("gimbal", 0.0, 0.0)
+        assert gimbal.points[mark] == (0.0, 0.0)
     finally:
         executor.close()

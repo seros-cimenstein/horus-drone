@@ -50,7 +50,7 @@ class Candidate:
     attributes: Mapping[str, Any] = field(default_factory=dict)
     source: str = "detector"
     embedding: Embedding | None = field(default=None, repr=False, compare=False)
-    # Track-level person evidence: a person label or person-only attribute was observed at some
+    # Track-level person evidence: a person label was observed at some
     # point in this track's history, so a frame that mislabels it (e.g. "kite") cannot retract it.
     person_evidence: bool = False
     # Number of stored reference views for this candidate's track, including the creation view

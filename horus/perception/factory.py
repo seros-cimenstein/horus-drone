@@ -9,6 +9,7 @@ from typing import Any
 
 from horus.config import PerceptionSettings
 from horus.flight import MavlinkFlightLink
+from horus.gimbal import Gimbal, GimbalAttitude
 from .camera import CameraConfig, OpenCVCameraReader
 from .detector import DetectorConfig, YOLODetector
 from .embedders import ColorHistogramEmbedder, ONNXReIDEmbedder
@@ -27,16 +28,18 @@ def create_perception_system(
     settings: PerceptionSettings,
     flight: MavlinkFlightLink,
     *,
+    gimbal: Gimbal | None = None,
     camera_horizontal_fov_deg: float | None = None,
     event_bus: Any = None,
 ) -> PerceptionSystem:
     """Build the camera, detector, tracker, latency buffer, and external grounder client.
 
     ``camera_horizontal_fov_deg`` (the executor's camera model) lets the tracker cancel camera
-    yaw between frames before associating detections.
+    yaw between frames before associating detections. Each frame is stamped with the vehicle
+    telemetry and the ``gimbal`` attitude at capture.
     """
     def current_pose(_: float) -> Any:
-        return camera_pose_from_telemetry(flight.telemetry())
+        return camera_pose_from_telemetry(flight.telemetry(), None if gimbal is None else gimbal.attitude())
 
     camera = OpenCVCameraReader(
         CameraConfig(source=settings.source, fps_cap=settings.max_fps),
@@ -57,14 +60,10 @@ def create_perception_system(
     tracker = PersistentTracker(
         TrackerConfig(
             max_lost_seconds=max(2.5, min(settings.ring_buffer_s, _MAX_LOST_TRACK_S)),
-            revalidation_grace_s=float(settings.revalidation_grace_s),
             reference_views=int(settings.reference_views),
             reference_view_min_width_px=int(settings.reference_view_min_width_px),
             reference_view_min_height_px=int(settings.reference_view_min_height_px),
             reference_view_dedupe_cos=float(settings.reference_view_dedupe_cos),
-            reacquisition_confirm_s=float(settings.reacquisition_confirm_s),
-            shirt_colour_window=int(settings.shirt_colour_window),
-            shirt_colour_min_votes=int(settings.shirt_colour_min_votes),
             camera_horizontal_fov_deg=camera_horizontal_fov_deg,
         ),
         embedder=embedder,
@@ -115,13 +114,14 @@ def _create_embedder(
     )
 
 
-def camera_pose_from_telemetry(telemetry: Any, now: float | None = None) -> dict[str, Any] | None:
+def camera_pose_from_telemetry(
+    telemetry: Any, gimbal: GimbalAttitude | None, now: float | None = None
+) -> dict[str, Any] | None:
     """Frame pose at capture: position, heading, vehicle roll/pitch and gimbal attitude with ages.
 
-    Every group carries the age of its own latest MAVLink sample (LOCAL_POSITION_NED/GPS,
-    heading, ATTITUDE, MOUNT_STATUS or GIMBAL_DEVICE_ATTITUDE_STATUS) so scene monitoring rejects
-    stale camera state instead of assuming it held still. Groups never received are omitted, i.e.
-    reported unmeasured.
+    Every group carries the age of its own latest sample (LOCAL_POSITION_NED/GPS, heading,
+    ATTITUDE, GIMBAL_DEVICE_ATTITUDE_STATUS) so scene monitoring rejects stale camera state instead
+    of assuming it held still. Groups never received are omitted, i.e. reported unmeasured.
     """
     monotonic = time.monotonic() if now is None else now
 
@@ -140,12 +140,11 @@ def camera_pose_from_telemetry(telemetry: Any, now: float | None = None) -> dict
         result["vehicle_roll_deg"] = telemetry.vehicle_roll_deg
         result["vehicle_pitch_deg"] = telemetry.vehicle_pitch_deg
         result["attitude_age_s"] = age(telemetry.attitude_updated_monotonic)
-    mount = telemetry.mount_status
-    if mount is not None:
-        result["gimbal_pitch_deg"] = mount.pitch_deg
-        result["gimbal_roll_deg"] = mount.roll_deg
-        result["gimbal_yaw_deg"] = mount.yaw_deg
-        result["gimbal_age_s"] = age(mount.updated_monotonic)
+    if gimbal is not None:
+        result["gimbal_pitch_deg"] = gimbal.pitch_deg
+        result["gimbal_roll_deg"] = gimbal.roll_deg
+        result["gimbal_yaw_deg"] = gimbal.yaw_deg
+        result["gimbal_age_s"] = age(gimbal.updated_monotonic)
     if telemetry.time_boot_ms is not None:
         # Autopilot (in SITL: simulation) clock: capture ≈ time_boot_ms + time_boot_age_s, the
         # age being host monotonic time, so the estimate drifts by age·|1 − real-time factor|.

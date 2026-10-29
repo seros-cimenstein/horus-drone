@@ -18,7 +18,9 @@ namespace HorusGta
         public const uint Magic = 0x4D434748;   // "HGCM"
         public const uint Version = 1;
         public const int MagicOffset = 0, VersionOffset = 4, SequenceOffset = 8, ActiveOffset = 16,
-            PoseSeqOffset = 24, GameFrameOffset = 32;
+            PoseSeqOffset = 24, GameFrameOffset = 32, ViewModeOffset = 40;
+        /// <summary>view_mode: the drone camera is on screen (old mods leave the zero bytes), or the shared view.</summary>
+        public const uint ViewDrone = 0, ViewShared = 1;
 
         readonly MemoryMappedFile file;
         readonly MemoryMappedViewAccessor view;
@@ -38,8 +40,11 @@ namespace HorusGta
         /// <summary>Times the block was written (sequence / 2).</summary>
         public ulong Ticks => view.ReadUInt64(SequenceOffset) / 2;
 
-        /// <summary>One tick's state: whether the drone camera is on screen, the pose packet it shows, the game frame.</summary>
-        public void Publish(bool active, ulong poseSeq, ulong gameFrame)
+        /// <summary>
+        /// One tick's state: whether the drone camera renders this tick's frame, the pose packet it
+        /// shows, the game frame, and the view mode (<see cref="ViewDrone"/> or <see cref="ViewShared"/>).
+        /// </summary>
+        public void Publish(bool active, ulong poseSeq, ulong gameFrame, uint viewMode)
         {
             ulong sequence = view.ReadUInt64(SequenceOffset) | 1;   // odd: writing
             view.Write(SequenceOffset, sequence);
@@ -47,6 +52,7 @@ namespace HorusGta
             view.Write(ActiveOffset, active ? 1u : 0u);
             view.Write(PoseSeqOffset, poseSeq);
             view.Write(GameFrameOffset, gameFrame);
+            view.Write(ViewModeOffset, viewMode);
             Thread.MemoryBarrier();
             view.Write(SequenceOffset, sequence + 1);               // even: done
         }

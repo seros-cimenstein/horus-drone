@@ -10,17 +10,14 @@ import time
 from typing import Any, NamedTuple
 
 from horus.events import EventBus
-from .attributes import classify_shirt_colour
 from .camera import CameraSupervisor, OpenCVCameraReader
 from .frame_buffer import FrameBuffer
 from .geometry import in_ignore_region
 from .grounding import Grounder, GrounderConfig, GroundingPointer
 from .open_vocab import OpenVocabSeeder
-from .recognition import TargetProfile
 from .scene import SceneMonitor
 from .tracker import PersistentTracker
-from .tracks import FRESH_CANDIDATE_MAX_AGE_S
-from .types import Candidate, Detection, Frame, FrameObservation, PointResult
+from .types import Candidate, Frame, FrameObservation, PointResult
 
 
 class _FrameStats(NamedTuple):
@@ -71,7 +68,6 @@ class PerceptionSystem:
             state_lock=self._lock,
         )
         self.mode = "active"
-        self._profile = TargetProfile()
         self._stop_event = threading.Event()
         # Camera-relative motion history and region watches; region events go to the shared bus.
         self._scene = SceneMonitor(event_bus.publish if event_bus is not None else None)
@@ -119,10 +115,7 @@ class PerceptionSystem:
                     if not in_ignore_region(detection.bbox, width, height, self.ignore_regions)
                 )
             detected = time.perf_counter()
-            processed.candidates = self.tracker.update(
-                tuple(_with_shirt_colour(detection, image) for detection in detections),
-                processed,
-            )
+            processed.candidates = self.tracker.update(detections, processed)
             finished = time.perf_counter()
             self.buffer.append(processed)
             shape = getattr(image, "shape", None)
@@ -156,15 +149,7 @@ class PerceptionSystem:
     def list_candidates(self) -> list[dict[str, Any]]:
         """Return current candidates as dict-friendly records with stable integer IDs."""
         frame = self.buffer.latest()
-        return [self._candidate_dict(candidate, frame) for candidate in frame.candidates] if frame else []
-
-    def get_candidate(self, candidate_id: int) -> dict[str, Any] | None:
-        """Return a visible current candidate by integer tracker ID, or ``None``."""
-        frame = self.buffer.latest()
-        if frame is None:
-            return None
-        candidate = next((item for item in frame.candidates if item.id == int(candidate_id)), None)
-        return self._candidate_dict(candidate, frame) if candidate is not None else None
+        return [self._candidate_dict(candidate) for candidate in frame.candidates] if frame else []
 
     def candidate_motion(self, candidate_id: int) -> dict[str, Any]:
         """Recent normalized image motion of a tracker ID (camera-relative, never metric speed)."""
@@ -193,55 +178,6 @@ class PerceptionSystem:
         """Remove a region watch; unknown IDs raise ``LookupError``."""
         return self._scene.remove_region_watch(watch_id)
 
-    def validate_candidate(
-        self,
-        candidate_id: int,
-        *,
-        max_age_seconds: float = FRESH_CANDIDATE_MAX_AGE_S,
-        min_confidence: float = 0.0,
-    ) -> dict[str, Any] | None:
-        """Return a visible candidate only after fresh reference-embedding validation."""
-        with self._lock:
-            candidate = self.tracker.validate_candidate(
-                int(candidate_id),
-                max_age_seconds=max_age_seconds,
-                min_confidence=min_confidence,
-            )
-            return self._candidate_dict(candidate) if candidate is not None else None
-
-    def validate_candidate_failure(
-        self,
-        candidate_id: int,
-        *,
-        max_age_seconds: float = FRESH_CANDIDATE_MAX_AGE_S,
-        min_confidence: float = 0.0,
-    ) -> str | None:
-        """Reason ``validate_candidate`` rejects this ID, or ``None`` when it validates.
-
-        ``not_visible``, ``stale``, ``no_reference_appearance`` or ``appearance_mismatch``; the
-        executor reports the rejected candidate's actual cause from this.
-        """
-        with self._lock:
-            return self.tracker.validate_candidate_failure(
-                int(candidate_id),
-                max_age_seconds=max_age_seconds,
-                min_confidence=min_confidence,
-            )
-
-    def reidentify_candidate(self, candidate_id: int) -> dict[str, Any] | None:
-        """Match the stored reference embedding to a fresh, visible candidate."""
-        with self._lock:
-            match = self.tracker.reidentify_candidate(int(candidate_id))
-            if match is None:
-                return None
-            candidate, similarity = match
-            return {
-                "reference_id": int(candidate_id),
-                "candidate": self._candidate_dict(candidate),
-                "similarity": similarity,
-                "similarity_threshold": self.tracker.config.revalidation_similarity_threshold,
-            }
-
     def get_frame(self, frame_id: int | None = None) -> Frame | None:
         """Return the newest frame or a retained frame by ID; expired IDs raise ``StaleFrameError``."""
         if frame_id is None:
@@ -263,38 +199,13 @@ class PerceptionSystem:
         """Replace up to sixteen open-vocabulary terms and wake the detection loop."""
         return self.open_vocab.set_vocabulary(terms)
 
-    def set_target_profile(self, profile: Any) -> dict[str, Any]:
-        """Set embedding references and optionally train a tiny head on labeled examples.
-
-        The schema is ``recognition.PROFILE_KEYS`` (documented on the MCP tool); unknown keys
-        raise ``ValueError``. The new profile replaces the previous one only after every
-        reference is validated and the head is trained; a rejected profile leaves the prior
-        recognition state untouched.
-        """
-        target = TargetProfile.build(profile, self.tracker.encode)
-        with self._lock:
-            self._profile = target
-        return target.summary()
-
     def set_mode(self, name: str) -> str:
-        """Select active/paused inference or embedding/tiny-head recognition."""
+        """Run (``active``) or pause (``paused``) detection."""
         selected = name.strip().lower()
-        if selected in {"active", "normal"}:
-            self.mode = "active"
-            return self.mode
-        if selected == "paused":
-            self.mode = "paused"
-            return self.mode
-        if selected in {"embedding", "step_1"}:
-            recognition_mode = "embedding"
-        elif selected in {"classifier", "tiny_head", "step_2"}:
-            recognition_mode = "classifier"
-        else:
-            raise ValueError("mode must be active, paused, embedding/step_1, or classifier/step_2")
-        with self._lock:
-            self._profile = self._profile.with_mode(recognition_mode)
-            self.mode = "active"
-        return recognition_mode
+        if selected not in {"active", "paused"}:
+            raise ValueError("mode must be active or paused")
+        self.mode = selected
+        return self.mode
 
     def start(
         self,
@@ -347,38 +258,12 @@ class PerceptionSystem:
             "grounder": grounder_status,
         }
 
-    def _candidate_dict(self, candidate: Candidate, frame: Frame | None = None) -> dict[str, Any]:
-        profile = self._profile
+    def _candidate_dict(self, candidate: Candidate) -> dict[str, Any]:
         result = candidate.to_dict()
         # The candidate object is a per-frame snapshot; report the track's current gallery size so
         # a consumer sees views admitted after the frame was processed.
         result["reference_views"] = max(1, len(self.tracker.reference_embeddings(candidate.id)))
-        embedding = candidate.embedding
-        if embedding is None and frame is not None and profile.needs_embedding(candidate):
-            # Tracks are embedded only when created; score later frames from the shared per-frame cache.
-            with self._lock:
-                embedding = self.tracker.frame_embedding(candidate, frame.image)
-        result.update(profile.score(candidate, embedding))
         return result
-
-
-def _with_shirt_colour(detection: Detection, image: Any) -> Detection:
-    if detection.class_name.casefold() != "person" or "shirt_colour" in detection.attributes:
-        return detection
-    classification = classify_shirt_colour(image, detection.bbox)
-    if classification is None:
-        return detection
-    colour, confidence = classification
-    attributes = dict(detection.attributes)
-    attributes["shirt_colour"] = colour
-    attributes["shirt_colour_confidence"] = confidence
-    return Detection(
-        bbox=detection.bbox,
-        confidence=detection.confidence,
-        class_name=detection.class_name,
-        class_id=detection.class_id,
-        attributes=attributes,
-    )
 
 
 def _observation(frame: Frame) -> FrameObservation:

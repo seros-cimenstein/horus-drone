@@ -57,10 +57,10 @@ namespace HorusGta
         double nextBadLogS;
         double nextBacklogLogS;
         bool appliedThisTick;
-        // C3: SITL flies over a flat plane, so the camera can pass through GTA's buildings.
+        // SITL flies over a flat plane, so the camera can pass through GTA's buildings.
         readonly CameraPath path = new CameraPath();
 
-        // G2: ArduPilot's JSON SITL backend; while its frames arrive they drive the camera.
+        // ArduPilot's JSON SITL backend; while its frames arrive they drive the camera.
         readonly Socket physicsSocket;
         readonly byte[] physicsBuffer = new byte[256];
         EndPoint physicsPeer = new IPEndPoint(IPAddress.Any, 0);
@@ -70,14 +70,14 @@ namespace HorusGta
         double nextPhysicsLogS, physicsLogRealS, physicsLogSimS;
         long physicsLogSteps;
         int physicsBudgetHits, physicsTimeouts;
-        // G3: what the quad collides with (the player's own ped is ignored; water does not stop it).
+        // What the quad collides with (the player's own ped is ignored; water does not stop it).
         const IntersectFlags Solid = IntersectFlags.Map | IntersectFlags.Vehicles | IntersectFlags.Peds | IntersectFlags.Objects
             | IntersectFlags.Glass | IntersectFlags.Foliage;
         readonly CameraPath contacts = new CameraPath();
         Ped rayIgnore;
         WorldProbe probe;
         long probeRaysLogged;
-        // G4: the airframe GTA draws at the physics body (Los Santos FPV's prop), an outside view of
+        // The airframe GTA draws at the physics body (Los Santos FPV's prop), an outside view of
         // it for checking, and the pose trace.
         const string DroneModelName = "ch_prop_casino_drone_02a";
         const System.Windows.Forms.Keys OutsideViewKey = System.Windows.Forms.Keys.F10;
@@ -95,6 +95,26 @@ namespace HorusGta
         RangeSensors sensors;
         bool sensorSendFailed;
         long sensorRaysLogged;
+        // Shared view ([view] mode=shared, README "Shared view"): the player keeps his gameplay camera
+        // and control; the drone camera renders one tick in drone_every, and a corner marker drawn
+        // every tick tells horus_capture.asi which camera each frame used.
+        readonly bool shared;
+        readonly ViewSchedule schedule;
+        bool scriptCamsOn;   // shared view: RENDER_SCRIPT_CAMS(true) was called and not undone yet
+        long viewDroneLogged, viewPlayerLogged;
+        bool outsideViewRefusedLogged;
+        // The drone's surroundings while the streaming focus stays on the player: collision is
+        // requested every tick (REQUEST_COLLISION_AT_COORD), map models are kept by a sphere stream
+        // volume. STREAMVOL_CREATE_SPHERE(x, y, z, radius, flags, lodFlags) returns a handle; the
+        // natives db names the last two only "Any p4, Any p5". The values follow the community reading
+        // of Rockstar's script enums, not checked in game: flags 1 = FLAG_MAPDATA (2 would add mover
+        // collision, 4 weapon collision), lodFlags 127 = every LOD level (HD, orphan HD, LOD,
+        // SLOD1-4). StreamVolumeRadiusM 0 turns the volume off (collision is still requested).
+        const float StreamVolumeRadiusM = 150f;
+        const int StreamVolumeFlags = 1, StreamVolumeLodFlags = 127;
+        readonly StreamAnchor streamAnchor = new StreamAnchor();
+        int streamVolume;
+        bool streamVolumeHeld, streamVolumeLogged, streamVolumeFailedLogged;
 
         public HorusGtaScript()
         {
@@ -115,6 +135,8 @@ namespace HorusGta
                 Log($"{iniPath} not found; using defaults");
             }
             originZ = cfg.Origin.Z;
+            shared = cfg.View.Mode == ViewMode.Shared;
+            schedule = shared ? new ViewSchedule(cfg.View.DroneEvery) : null;
             Log(string.Format(CultureInfo.InvariantCulture,
                 "origin x={0:F2} y={1:F2} heading_deg={2:F1} z={3}; pose timeout {4:g} s; scene weather={5} hour={6} freeze_time={7}",
                 cfg.Origin.X, cfg.Origin.Y, cfg.Origin.HeadingDeg,
@@ -194,13 +216,32 @@ namespace HorusGta
             appliedThisTick = false;
             rayIgnore = Game.Player.Character;
             Step(clock.Elapsed.TotalSeconds);
-            PublishCamera();
+            PublishCamera(shared ? CameraBlock.ViewShared : CameraBlock.ViewDrone);
+            if (shared) DrawMarker();
         }
 
-        /// <summary>F10 while the physics link drives the camera: switch between the HORUS camera and an outside view of the drone.</summary>
+        /// <summary>
+        /// Shared view: the corner marker (8x8 px at 1280x720), issued last in the tick so nothing
+        /// draws over it. Black when this tick's frame renders the drone camera, white otherwise;
+        /// horus_capture.asi reads it back (gta/capture/README.md).
+        /// </summary>
+        void DrawMarker()
+        {
+            int level = appliedThisTick ? SharedView.DroneMarkerLevel : SharedView.PlayerMarkerLevel;
+            Function.Call(Hash.DRAW_RECT, SharedView.MarkerCenterX, SharedView.MarkerCenterY, SharedView.MarkerWidth, SharedView.MarkerHeight,
+                level, level, level, SharedView.MarkerAlpha, false);
+        }
+
+        /// <summary>F10 while the physics link drives the camera: switch between the HORUS camera and an outside view of the drone (not in the shared view).</summary>
         void OnKeyDown(object sender, System.Windows.Forms.KeyEventArgs e)
         {
             if (e.KeyCode != OutsideViewKey || !physicsDriving) return;
+            if (shared)
+            {
+                if (!outsideViewRefusedLogged) Log("physics: outside view (F10) is not available in the shared view");
+                outsideViewRefusedLogged = true;
+                return;
+            }
             outsideView = !outsideView;
             Log($"physics: outside view {(outsideView ? "on (captured frames are marked as not the drone camera)" : "off")}");
         }
@@ -229,8 +270,7 @@ namespace HorusGta
             }
             if (!originZ.HasValue && !ResolveGround(now)) return;
             if (!active) Activate(link.Latest);
-            Apply(link.Latest, now);
-            appliedThisTick = true;
+            appliedThisTick = Apply(link.Latest, now);
         }
 
         /// <summary>
@@ -306,13 +346,13 @@ namespace HorusGta
 
             var packet = physics.CameraPose(originZ.Value, cfg.Physics.HfovDeg);
             if (!active) Activate(packet);
-            Apply(packet, now);
+            bool droneTick = Apply(packet, now);
             ShowDrone();
             if (outsideView) ShowOutsideView();
             else StopOutsideView();
-            Trace(now);
-            // Frames rendered from the outside view are not the drone camera's.
-            appliedThisTick = !outsideView;
+            Trace(now, droneTick);
+            // Frames rendered from the outside view (or, in the shared view, from the player's camera) are not the drone camera's.
+            appliedThisTick = droneTick && !outsideView;
             return true;
         }
 
@@ -359,8 +399,8 @@ namespace HorusGta
             drone.PositionNoOffset = V3(body.P);
             body.Orientation(out double x, out double y, out double z, out double w);
             Function.Call(Hash.SET_ENTITY_QUATERNION, drone.Handle, (float)x, (float)y, (float)z, (float)w);
-            // The 0.9 m prop's legs reach into the drone camera's 84 deg view from the mount (G4 frames:
-            // both lower corners, and HORUS listed a leg as a candidate), so it is drawn only for the
+            // The 0.9 m prop's legs reach into the drone camera's 84 deg view from the mount (both
+            // lower corners; HORUS listed a leg as a candidate), so it is drawn only for the
             // outside view.
             if (drone.IsVisible != outsideView) drone.IsVisible = outsideView;
         }
@@ -415,7 +455,7 @@ namespace HorusGta
         /// read back (the previous tick's) and as set this tick, the drone prop as read back, and
         /// the physics state ArduPilot was sent (NED from the resting body centre).
         /// </summary>
-        void Trace(double now)
+        void Trace(double now, bool droneTick)
         {
             if (cfg.Physics.TraceHz <= 0 || now < nextTraceS || cam == -1) return;
             nextTraceS = Math.Max(nextTraceS + 1 / cfg.Physics.TraceHz, now);
@@ -453,7 +493,8 @@ namespace HorusGta
             const double Deg = 180 / Math.PI;
             trace.WriteLine(string.Format(CultureInfo.InvariantCulture,
                 "{0:F3},{1:F4},{2},{3},{4},{5:F3},{6:F3},{7:F3},{8:F2},{9:F2},{10:F2},{11:F3},{12:F3},{13:F3},{14:F5},{15:F5},{16:F5},{17:F5},{18:F3},{19:F3},{20:F3},{21:F2},{22:F2},{23:F2},{24:F2},{25:F2},{26:F2},{27:F3},{28:F3},{29:F3},{30:F1},{31:F3},{32:F3},{33:F3},{34:F2},{35:F2},{36:F2}",
-                (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds, physics.SimTimeS, physics.LastFrame, Game.FrameCount, outsideView ? "outside" : "drone",
+                (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds, physics.SimTimeS, physics.LastFrame, Game.FrameCount,
+                outsideView ? "outside" : droneTick ? "drone" : "player",
                 c.X, c.Y, c.Z, cr.X, cr.Y, cr.Z, d.X, d.Y, d.Z, qx, qy, qz, qw,
                 p.X, p.Y, p.Z, roll * Deg, pitch * Deg, yaw * Deg,
                 physics.GimbalRollDeg ?? double.NaN, physics.GimbalPitchDeg ?? double.NaN, physics.GimbalYawDeg ?? double.NaN,
@@ -494,12 +535,12 @@ namespace HorusGta
             physics.Frame.Euler(body, out double roll, out double pitch, out double yaw);
             Vec3 p = physics.Frame.ToNed(body.P - physics.Frame.Origin);
             Log(string.Format(CultureInfo.InvariantCulture,
-                "physics: sim {0:F1} s, real-time factor {1:F3}, {2:F0} steps/s at {3} Hz, {4} budget hits, {5} idle ticks, {18:F0} world rays/s{22}; ned ({6:F2}, {7:F2}, {8:F2}) rpy ({9:F1}, {10:F1}, {11:F1}) gimbal rpy ({20:F1}, {12:F1}, {21:F1}); rpm {13:F0} {14:F0} {15:F0} {16:F0}{17}{19}",
+                "physics: sim {0:F1} s, real-time factor {1:F3}, {2:F0} steps/s at {3} Hz, {4} budget hits, {5} idle ticks, {18:F0} world rays/s{22}; ned ({6:F2}, {7:F2}, {8:F2}) rpy ({9:F1}, {10:F1}, {11:F1}) gimbal rpy ({20:F1}, {12:F1}, {21:F1}); rpm {13:F0} {14:F0} {15:F0} {16:F0}{17}{19}{23}",
                 physics.SimTimeS, sim / real, (physics.TotalSteps - physicsLogSteps) / real, physics.FrameRate, physicsBudgetHits, physicsTimeouts,
                 p.X, p.Y, p.Z, roll * 180 / Math.PI, pitch * 180 / Math.PI, yaw * 180 / Math.PI, physics.GimbalPitchDeg ?? double.NaN,
                 body.Rpm[0], body.Rpm[1], body.Rpm[2], body.Rpm[3],
                 body.InContact ? (body.LastContact.Value.Normal.Z > 0.7 ? ", on ground" : ", against a wall") : "", (probe.Rays - probeRaysLogged) / real,
-                DroneRayCheck(body), physics.GimbalRollDeg ?? double.NaN, physics.GimbalYawDeg ?? double.NaN, SensorStats(real)));
+                DroneRayCheck(body), physics.GimbalRollDeg ?? double.NaN, physics.GimbalYawDeg ?? double.NaN, SensorStats(real), ViewStats()));
             physicsLogRealS = now; physicsLogSimS = physics.SimTimeS; physicsLogSteps = physics.TotalSteps;
             physicsBudgetHits = 0; physicsTimeouts = 0; probeRaysLogged = probe.Rays;
             if (sensors != null) sensorRaysLogged = sensors.Rays;
@@ -513,6 +554,16 @@ namespace HorusGta
             double min = sensors.MinHorizontalM;
             return string.Format(CultureInfo.InvariantCulture, ", {0:F0} sensor rays/s, min horizontal range {1}",
                 (sensors.Rays - sensorRaysLogged) / realS, double.IsInfinity(min) ? "clear" : min.ToString("F2", CultureInfo.InvariantCulture) + " m");
+        }
+
+        /// <summary>For the 5 s log in the shared view: drone and player ticks since the last line.</summary>
+        string ViewStats()
+        {
+            if (!shared) return "";
+            string s = $"; view: {schedule.DroneTicks - viewDroneLogged} drone / {schedule.PlayerTicks - viewPlayerLogged} player ticks";
+            viewDroneLogged = schedule.DroneTicks;
+            viewPlayerLogged = schedule.PlayerTicks;
+            return s;
         }
 
         /// <summary>After each physics step: sweep the range sensors when due and send the datagram (a failed send is logged once).</summary>
@@ -539,11 +590,11 @@ namespace HorusGta
 
         /// <summary>
         /// Tell the capture plugin, once per tick, whether this tick put the drone camera on screen
-        /// at a received pose (the frame it renders then shows that pose's seq).
+        /// at a received pose (the frame it renders then shows that pose's seq), and the view mode.
         /// </summary>
-        void PublishCamera()
+        void PublishCamera(uint viewMode)
         {
-            try { camera?.Publish(appliedThisTick, appliedSeq, (ulong)Game.FrameCount); }
+            try { camera?.Publish(appliedThisTick, appliedSeq, (ulong)Game.FrameCount, viewMode); }
             catch (Exception e) { Log($"camera block write failed: {e.Message}"); }
         }
 
@@ -553,7 +604,8 @@ namespace HorusGta
             Release("script aborted");
             try { trace?.Dispose(); } catch { }
             appliedThisTick = false;
-            PublishCamera();
+            // No marker is drawn after the abort, so the plugin goes back to the drone view's handling.
+            PublishCamera(CameraBlock.ViewDrone);
             try { camera?.Dispose(); } catch { }
             LogBadPackets(clock.Elapsed.TotalSeconds, true);
             try { socket?.Close(); } catch { }
@@ -631,6 +683,8 @@ namespace HorusGta
                 {
                     originZ = z;
                     Log(string.Format(CultureInfo.InvariantCulture, "ground z at the origin = {0:F2} (after {1} attempts)", z, groundAttempts));
+                    // The shared view keeps streaming around the player (KeepDroneStreamed covers the drone).
+                    if (shared) ClearFocus();
                     return true;
                 }
             }
@@ -647,8 +701,18 @@ namespace HorusGta
             Log(string.Format(CultureInfo.InvariantCulture,
                 "activated at seq {0}: ned=({1:F2}, {2:F2}, {3:F2}) rpy=({4:F1}, {5:F1}, {6:F1}) hfov={7:F1}",
                 p.Seq, p.NorthM, p.EastM, p.DownM, p.RollDeg, p.PitchDeg, p.YawDeg, p.HfovDeg));
-            prevMaxWanted = Function.Call<int>(Hash.GET_MAX_WANTED_LEVEL);
-            Function.Call(Hash.SET_MAX_WANTED_LEVEL, 0);
+            if (shared)
+            {
+                schedule.Reset();
+                viewDroneLogged = viewPlayerLogged = 0;
+                Log($"view: shared, drone camera every {cfg.View.DroneEvery} ticks, player keeps control");
+            }
+            else
+            {
+                Log("view: drone");
+                prevMaxWanted = Function.Call<int>(Hash.GET_MAX_WANTED_LEVEL);
+                Function.Call(Hash.SET_MAX_WANTED_LEVEL, 0);
+            }
             frozenPed = null;
             ApplyScene();
             path.Reset();
@@ -706,9 +770,16 @@ namespace HorusGta
             }
         }
 
-        void Apply(PosePacket packet, double now)
+        /// <summary>
+        /// Put the scripted camera at the packet's pose and on screen. In the shared view that happens
+        /// on drone ticks only ([view] drone_every); the other ticks give the screen back to the
+        /// gameplay camera, and the streaming focus stays with the player. True when this tick's
+        /// frame renders the drone camera (every tick in the drone view; the F10 outside view aside).
+        /// </summary>
+        bool Apply(PosePacket packet, double now)
         {
-            appliedSeq = packet.Seq;
+            bool droneTick = !shared || schedule.Next();
+            if (droneTick) appliedSeq = packet.Seq;
             var resolution = Screen.Resolution;
             var pose = PoseMapping.Map(packet, cfg.Origin, originZ.Value, resolution.Width, resolution.Height);
             float x = (float)pose.X, y = (float)pose.Y, z = (float)pose.Z;
@@ -721,21 +792,80 @@ namespace HorusGta
                     pose.RotX, pose.RotY, pose.RotZ, pose.VfovDeg, true, PoseMapping.RotationOrder);
                 Log($"scripted camera {cam} created");
             }
-            Function.Call(Hash.SET_CAM_COORD, cam, x, y, z);
-            Function.Call(Hash.SET_CAM_ROT, cam, pose.RotX, pose.RotY, pose.RotZ, PoseMapping.RotationOrder);
-            Function.Call(Hash.SET_CAM_FOV, cam, pose.VfovDeg);
-            camSet = pose;
-            // The outside view (F10) renders its own camera; the drone camera keeps its pose meanwhile.
-            if (!outsideView && !Function.Call<bool>(Hash.IS_CAM_RENDERING, cam))
+            if (droneTick)
             {
-                Function.Call(Hash.SET_CAM_ACTIVE, cam, true);
-                Function.Call(Hash.RENDER_SCRIPT_CAMS, true, false, 0, true, false, 0);
+                Function.Call(Hash.SET_CAM_COORD, cam, x, y, z);
+                Function.Call(Hash.SET_CAM_ROT, cam, pose.RotX, pose.RotY, pose.RotZ, PoseMapping.RotationOrder);
+                Function.Call(Hash.SET_CAM_FOV, cam, pose.VfovDeg);
+                camSet = pose;
+                // The outside view (F10) renders its own camera; the drone camera keeps its pose meanwhile.
+                // The shared view turns script cams on at every drone tick (the player tick before turned them off).
+                if (!outsideView && ((shared && !scriptCamsOn) || !Function.Call<bool>(Hash.IS_CAM_RENDERING, cam)))
+                {
+                    Function.Call(Hash.SET_CAM_ACTIVE, cam, true);
+                    Function.Call(Hash.RENDER_SCRIPT_CAMS, true, false, 0, true, false, 0);
+                    scriptCamsOn = true;
+                }
             }
-            // Stream the world around the drone camera, not around the player.
-            Function.Call(Hash.SET_FOCUS_POS_AND_VEL, x, y, z, 0f, 0f, 0f);
-            focusHeld = true;
-            Function.Call(Hash.HIDE_HUD_AND_RADAR_THIS_FRAME);
-            HoldPlayer();
+            else if (scriptCamsOn || Function.Call<bool>(Hash.IS_CAM_RENDERING, cam))
+            {
+                Function.Call(Hash.RENDER_SCRIPT_CAMS, false, false, 0, true, false, 0);
+                scriptCamsOn = false;
+            }
+            if (shared) KeepDroneStreamed(x, y, z);
+            else
+            {
+                // Stream the world around the drone camera, not around the player.
+                Function.Call(Hash.SET_FOCUS_POS_AND_VEL, x, y, z, 0f, 0f, 0f);
+                focusHeld = true;
+            }
+            if (droneTick) Function.Call(Hash.HIDE_HUD_AND_RADAR_THIS_FRAME);
+            if (!shared) HoldPlayer();
+            return droneTick;
+        }
+
+        /// <summary>
+        /// Shared view: keep the drone's surroundings loaded without taking the streaming focus off
+        /// the player. Collision (what the physics rays and range sensors hit) is requested every
+        /// tick; map models stay streamed by a sphere volume, re-created when the drone moves more
+        /// than <see cref="StreamAnchor.RecentreM"/> from its centre.
+        /// </summary>
+        void KeepDroneStreamed(float x, float y, float z)
+        {
+            Function.Call(Hash.REQUEST_COLLISION_AT_COORD, x, y, z);
+            if (StreamVolumeRadiusM <= 0 || !streamAnchor.Update(new Point3(x, y, z))) return;
+            DeleteStreamVolume();
+            int handle = Function.Call<int>(Hash.STREAMVOL_CREATE_SPHERE, x, y, z, StreamVolumeRadiusM, StreamVolumeFlags, StreamVolumeLodFlags);
+            if (Function.Call<bool>(Hash.STREAMVOL_IS_VALID, handle))
+            {
+                streamVolume = handle;
+                streamVolumeHeld = true;
+                if (!streamVolumeLogged)
+                    Log(string.Format(CultureInfo.InvariantCulture,
+                        "view: stream volume {0} around the drone at ({1:F1}, {2:F1}, {3:F1}), radius {4:g} m, flags {5}, lod flags {6}; moved when the drone is {7:g} m away",
+                        handle, x, y, z, StreamVolumeRadiusM, StreamVolumeFlags, StreamVolumeLodFlags, StreamAnchor.RecentreM));
+                streamVolumeLogged = true;
+            }
+            else
+            {
+                if (!streamVolumeFailedLogged)
+                    Log("view: STREAMVOL_CREATE_SPHERE gave no valid volume; the drone's map models load only as the game streams them (collision is still requested)");
+                streamVolumeFailedLogged = true;
+            }
+        }
+
+        void DeleteStreamVolume()
+        {
+            if (!streamVolumeHeld) return;
+            if (Function.Call<bool>(Hash.STREAMVOL_IS_VALID, streamVolume)) Function.Call(Hash.STREAMVOL_DELETE, streamVolume);
+            streamVolumeHeld = false;
+        }
+
+        void ClearFocus()
+        {
+            if (!focusHeld) return;
+            Function.Call(Hash.CLEAR_FOCUS);
+            focusHeld = false;
         }
 
         /// <summary>
@@ -849,7 +979,10 @@ namespace HorusGta
             frozenPed = null;
         }
 
-        /// <summary>Hand the screen back to the game: stop the camera, focus and player hold.</summary>
+        /// <summary>
+        /// Hand the screen back to the game: stop the camera, focus, stream volume and (drone view
+        /// only) the player hold. The shared view never touched the player.
+        /// </summary>
         void Release(string why)
         {
             if (cam != -1)
@@ -858,18 +991,18 @@ namespace HorusGta
                 if (Function.Call<bool>(Hash.DOES_CAM_EXIST, cam)) Function.Call(Hash.DESTROY_CAM, cam, false);
                 cam = -1;
             }
-            if (focusHeld)
-            {
-                Function.Call(Hash.CLEAR_FOCUS);
-                focusHeld = false;
-            }
+            scriptCamsOn = false;
+            ClearFocus();
+            DeleteStreamVolume();
+            streamAnchor.Clear();
             if (active)
             {
-                RestorePed();
+                if (!shared) RestorePed();
                 RestoreScene();
-                Function.Call(Hash.SET_MAX_WANTED_LEVEL, Math.Max(prevMaxWanted, 0));
+                if (!shared) Function.Call(Hash.SET_MAX_WANTED_LEVEL, Math.Max(prevMaxWanted, 0));
                 active = false;
-                Log($"deactivated: {why}; camera path so far: {path.Intersections} intersections, {path.Repeats} repeat hits");
+                Log($"deactivated: {why}; camera path so far: {path.Intersections} intersections, {path.Repeats} repeat hits"
+                    + (shared ? $"; view: {schedule.DroneTicks} drone / {schedule.PlayerTicks} player ticks" : ""));
             }
             else if (groundNoticeShown && !originZ.HasValue)
             {

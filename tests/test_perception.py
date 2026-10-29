@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import json
-import logging
 import math
 import sys
 import time
@@ -198,7 +196,7 @@ class _VectorEmbedder:
 
 
 class _ImageVector:
-    # Frame size for crop gating; two-dimensional so no shirt colour is classified from it.
+    # Frame size for crop gating.
     shape = (480, 640)
 
     def __init__(self, vector):
@@ -223,139 +221,6 @@ def test_update_embeds_new_tracks_but_not_each_matched_frame() -> None:
 
 
 # Tracker re-identification
-
-
-def test_lost_reference_embedding_rematches_fresh_candidate_under_new_id() -> None:
-    embedder = _VectorEmbedder()
-    # The two-frame re-acquisition confirmation has its own test; this one covers the
-    # embedding schedule of a single matching call, so the confirmation is disabled here.
-    tracker = PersistentTracker(
-        TrackerConfig(reacquisition_confirm_s=0.0), embedder=embedder
-    )
-    reference = tracker.update(
-        [
-            Detection(
-                (10, 10, 40, 60),
-                class_name="person",
-                attributes={"shirt_colour": "blue"},
-            )
-        ],
-        Frame(1, 10.0, _ImageVector((1.0, 0.0))),
-    )[0]
-    tracker.update([], Frame(2, 11.0, _ImageVector((1.0, 0.0))))
-    replacement_detection = Detection(
-        (300, 10, 330, 60),
-        class_name="person",
-        attributes={"shirt_colour": "blue"},
-    )
-    tracker.update([replacement_detection], Frame(3, 11.1, _ImageVector((0.0, 1.0))))
-    replacement = tracker.update(
-        [replacement_detection], Frame(4, 11.2, _ImageVector((1.0, 0.0)))
-    )[0]
-
-    match = tracker.reidentify_candidate(reference.id)
-    repeated_match = tracker.reidentify_candidate(reference.id)
-
-    assert replacement.id != reference.id
-    assert match is not None
-    assert match[0].id == replacement.id
-    assert match[1] >= tracker.config.revalidation_similarity_threshold
-    assert tracker.reference_embeddings(replacement.id)[0] == (0.0, 1.0)
-    assert match[0].embedding == (1.0, 0.0)
-    assert repeated_match is not None
-    assert repeated_match[0].id == replacement.id
-    assert len(embedder.calls) == 3
-
-
-def test_inconclusive_frame_does_not_let_a_lookalike_steal_a_lost_track() -> None:
-    # Identical embeddings (same mesh): only the remembered shirt colour separates the people.
-    tracker = PersistentTracker(embedder=_VectorEmbedder())
-    image = _ImageVector((1.0, 0.0))
-    target = tracker.update(
-        [Detection((10, 10, 40, 60), class_name="person", attributes={"shirt_colour": "blue"})],
-        Frame(1, 10.0, image),
-    )[0]
-    tracker.update(
-        [Detection((12, 10, 42, 60), class_name="person", attributes={})],  # side view: no colour
-        Frame(2, 10.1, image),
-    )
-    red = Detection((400, 10, 430, 60), class_name="person", attributes={"shirt_colour": "red"})
-    tracker.update([red], Frame(3, 10.2, image))
-    tracker.update([red], Frame(4, 10.3, image))
-
-    assert tracker.reidentify_candidate(target.id) is None
-
-
-def test_target_hidden_longer_than_track_retention_is_still_reidentified() -> None:
-    tracker = PersistentTracker(embedder=_VectorEmbedder())
-    image = _ImageVector((1.0, 0.0))
-    blue = {"shirt_colour": "blue"}
-    target = tracker.update(
-        [Detection((10, 10, 40, 60), class_name="person", attributes=blue)], Frame(1, 10.0, image)
-    )[0]
-    # Hidden for longer than max_lost_seconds: the track expires while nothing is detected.
-    tracker.update([], Frame(2, 10.0 + tracker.config.max_lost_seconds + 1.0, image))
-    reappeared = Detection((300, 10, 330, 60), class_name="person", attributes=blue)
-    now = 10.0 + tracker.config.max_lost_seconds + 1.5
-    tracker.update([reappeared], Frame(3, now, image))
-    candidates = tracker.update([reappeared], Frame(4, now + 0.1, image))
-    # The re-acquisition confirmation needs a second distinct frame; the first call is pending.
-    assert tracker.reidentify_candidate(target.id) is None
-    candidates = tracker.update([reappeared], Frame(5, now + 0.2, image))
-
-    match = tracker.reidentify_candidate(target.id)
-
-    assert match is not None
-    assert match[0].id == candidates[0].id
-    assert match[0].id != target.id
-
-
-def test_reidentification_logs_color_excluded_candidates(caplog) -> None:
-    # One-vote window: this test is about the log records and the colour gate, not the vote.
-    tracker = PersistentTracker(
-        TrackerConfig(shirt_colour_window=1, shirt_colour_min_votes=1), embedder=_VectorEmbedder()
-    )
-    reference = tracker.update(
-        [
-            Detection(
-                (10, 10, 40, 60),
-                class_name="person",
-                attributes={"shirt_colour": "blue"},
-            )
-        ],
-        Frame(1, 10.0, _ImageVector((1.0, 0.0))),
-    )[0]
-    blue = Detection(
-        (300, 10, 330, 60),
-        class_name="person",
-        attributes={"shirt_colour": "blue"},
-    )
-    red = Detection(
-        (400, 10, 430, 60),
-        class_name="person",
-        attributes={"shirt_colour": "red"},
-    )
-    tracker.update([blue, red], Frame(2, 10.1, _ImageVector((0.0, 1.0))))
-    candidates = tracker.update([blue, red], Frame(3, 10.2, _ImageVector((1.0, 0.0))))
-
-    caplog.clear()
-    with caplog.at_level(logging.DEBUG, logger="horus.perception.tracker"):
-        pending = tracker.reidentify_candidate(reference.id)
-        tracker.update([blue, red], Frame(4, 10.3, _ImageVector((1.0, 0.0))))
-        match = tracker.reidentify_candidate(reference.id)
-
-    assert pending is None  # first passing frame confirms nothing on its own
-
-    assert match is not None
-    assert match[0].id == candidates[0].id
-    # Every compared candidate is logged, the colour-excluded red one included.
-    records = [
-        record for record in caplog.records
-        if record.name == "horus.perception.tracker"
-        and getattr(record, "event", None) == "perception_reid_similarity"
-    ]
-    assert {record.shirt_colour for record in records} == {"blue", "red"}
-    assert {record.candidate_id for record in records} == {item.id for item in candidates}
 
 
 # Ignore regions
@@ -407,20 +272,18 @@ def _unit_view(cos_to_primary: float, *, up: bool = True) -> tuple[float, float]
     return (cosine, sine if up else -sine)
 
 
-# Tracker multi-view references. R1 multi-view references: gallery for live tracks, primary-only
-# re-acquisition.
+# Tracker multi-view references: gallery for live tracks, primary-only re-acquisition.
 
 
 def _tracker(**overrides) -> PersistentTracker:
     return PersistentTracker(TrackerConfig(**overrides), embedder=_VectorEmbedder())
 
 
-def _frames_for(tracker: PersistentTracker, vector, *, count: int, label="person", colour=None,
+def _frames_for(tracker: PersistentTracker, vector, *, count: int, label="person",
                 box=(10, 10, 40, 60), start_frame: int = 1, start_time: float = 10.0,
                 tracker_id: int | None = None):
     """Feed ``count`` frames of the same detection; return (candidate, last_frame_id)."""
-    detection = Detection(box, class_name=label,
-                          attributes={} if colour is None else {"shirt_colour": colour})
+    detection = Detection(box, class_name=label)
     candidate = None
     frame_id = start_frame
     timestamp = start_time
@@ -434,28 +297,28 @@ def _frames_for(tracker: PersistentTracker, vector, *, count: int, label="person
 
 def test_reference_views_are_admitted_only_at_the_full_threshold_from_the_creation_view() -> None:
     tracker = _tracker()
-    target, _, _ = _frames_for(tracker, _unit_view(1.0), count=2, colour="blue")
+    target, _, _ = _frames_for(tracker, _unit_view(1.0), count=2)
     assert list(tracker.reference_embeddings(target.id)[1:]) == []
-    # An accepted validation starts the grace window (the identical view is deduped, not stored).
+    # The identical view is deduped, not stored.
     assert tracker.validate_candidate(target.id) is not None
     assert list(tracker.reference_embeddings(target.id)[1:]) == []
 
-    # A frame inside the grace margin (0.70 vs the 0.72 threshold) still validates, but it is
-    # never admitted: admission is anchored on the creation view at the full threshold.
-    _frames_for(tracker, _unit_view(0.70), count=1, colour="blue", start_frame=10)
-    assert tracker.validate_candidate(target.id) is not None
+    # A frame just below the threshold (0.70 vs 0.72) fails validation and is never admitted:
+    # admission is anchored on the creation view at the full threshold.
+    _frames_for(tracker, _unit_view(0.70), count=1, start_frame=10)
+    assert tracker.validate_candidate(target.id) is None
     assert list(tracker.reference_embeddings(target.id)[1:]) == []
 
     # A strictly passing frame is admitted.
-    _frames_for(tracker, _unit_view(0.80), count=1, colour="blue", start_frame=20)
+    _frames_for(tracker, _unit_view(0.80), count=1, start_frame=20)
     assert tracker.validate_candidate(target.id) is not None
     assert len(tracker.reference_embeddings(target.id)[1:]) == 1
 
 
 def test_reference_view_admission_cannot_chain_away_from_the_creation_view() -> None:
     tracker = _tracker()
-    target, _, _ = _frames_for(tracker, _unit_view(1.0), count=2, colour="blue")
-    _frames_for(tracker, _unit_view(0.80), count=1, colour="blue", start_frame=10)
+    target, _, _ = _frames_for(tracker, _unit_view(1.0), count=2)
+    _frames_for(tracker, _unit_view(0.80), count=1, start_frame=10)
     assert tracker.validate_candidate(target.id) is not None
     assert len(tracker.reference_embeddings(target.id)[1:]) == 1
     admitted = tracker.reference_embeddings(target.id)[1]
@@ -464,18 +327,17 @@ def test_reference_view_admission_cannot_chain_away_from_the_creation_view() -> 
     # the track alive (validation passes), yet the view is NOT stored, so no drift chain forms.
     chained = _unit_view(0.60)
     assert _cos(admitted, chained) > 0.90
-    _frames_for(tracker, chained, count=1, colour="blue", start_frame=20)
+    _frames_for(tracker, chained, count=1, start_frame=20)
     assert tracker.validate_candidate(target.id) is not None
     assert len(tracker.reference_embeddings(target.id)[1:]) == 1
     assert tracker.reference_embeddings(target.id)[0] == (1.0, 0.0)
 
 
 def test_reference_view_admission_gates() -> None:
-    # These gates act on a settled colour; the vote has its own tests.
-    tracker = _tracker(shirt_colour_window=1, shirt_colour_min_votes=1)
-    target, _, _ = _frames_for(tracker, _unit_view(1.0), count=2, colour="green")
+    tracker = _tracker()
+    target, _, _ = _frames_for(tracker, _unit_view(1.0), count=2)
     # _admit_reference_view is exercised directly on a track record mirroring the tracker's own
-    # (class, settled colour, creation view), read through the public accessors.
+    # (class, creation view), read through the public accessors.
     current = tracker.candidate(target.id)
     track = Track(
         id=target.id,
@@ -501,21 +363,13 @@ def test_reference_view_admission_gates() -> None:
             "confidence": 0.9,
             "frame_id": current.frame_id,
             "timestamp": current.timestamp,
-            "attributes": {"shirt_colour": "green"},
         }
         values.update(overrides)
         return Candidate(**values)
 
     # Class gate: a differing known class is never stored.
     assert not tracker._admit_reference_view(track, candidate(class_name="kite"), good_vector)
-    # Shirt-colour gate: a differing known colour is never stored.
-    assert not tracker._admit_reference_view(
-        track, candidate(attributes={"shirt_colour": "red"}), good_vector
-    )
-    # Colour gate is defensive: an inconclusive colour cannot vouch for the view either when
-    # the track has a known one.
-    assert not tracker._admit_reference_view(track, candidate(attributes={}), good_vector)
-    # Crop gate: a small crop's embedding is noise (10-25 px slivers in the campaign logs).
+    # Crop gate: a small crop's embedding is noise.
     assert not tracker._admit_reference_view(track, candidate(bbox=(10, 10, 20, 35)), good_vector)
     # The same good view passes every gate.
     assert tracker._admit_reference_view(track, candidate(), good_vector)
@@ -525,249 +379,56 @@ def test_reference_view_admission_gates() -> None:
 
 def test_reference_views_are_capped_and_the_oldest_extra_view_is_evicted() -> None:
     tracker = _tracker(reference_views=2)  # creation view + one extra
-    target, _, _ = _frames_for(tracker, _unit_view(1.0), count=2, colour="blue")
+    target, _, _ = _frames_for(tracker, _unit_view(1.0), count=2)
     first = _unit_view(0.75, up=True)
     second = _unit_view(0.75, up=False)
     assert _cos(first, second) < 0.98
     for index, vector in enumerate((first, second)):
-        _frames_for(tracker, vector, count=1, colour="blue", start_frame=10 + 10 * index)
+        _frames_for(tracker, vector, count=1, start_frame=10 + 10 * index)
         assert tracker.validate_candidate(target.id) is not None
     assert len(tracker.reference_embeddings(target.id)[1:]) == 1
     assert tracker.reference_embeddings(target.id)[1] == second  # oldest extra evicted
     assert tracker.reference_embeddings(target.id)[0] == (1.0, 0.0)  # creation view never evicted
 
 
-def test_live_validation_recovers_a_marginal_dip_through_a_stored_view(caplog) -> None:
+def test_live_validation_recovers_a_marginal_dip_through_a_stored_view() -> None:
     tracker = _tracker()
-    target, _, _ = _frames_for(tracker, _unit_view(1.0), count=2, colour="blue")
-    _frames_for(tracker, _unit_view(0.80), count=1, colour="blue", start_frame=10)
+    target, _, _ = _frames_for(tracker, _unit_view(1.0), count=2)
+    _frames_for(tracker, _unit_view(0.80), count=1, start_frame=10)
     assert tracker.validate_candidate(target.id) is not None
     assert len(tracker.reference_embeddings(target.id)[1:]) == 1
 
-    # A marginal dip: 0.7196 against the creation view after 0.7917 on the previous frame.
+    # A marginal dip: 0.7196 against the creation view (below the 0.72 threshold) after 0.7917
+    # on the previous frame; only the stored 0.80 view accepts it.
     dip = _unit_view(0.7196)
-    _frames_for(tracker, dip, count=1, colour="blue", start_frame=20)
-    caplog.clear()
-    with caplog.at_level(logging.DEBUG, logger="horus.perception.tracker"):
-        validated = tracker.validate_candidate(target.id)
-    assert validated is not None
-    assert tracker.validate_candidate_failure(target.id) is None
-    records = [json.loads(record.getMessage()) for record in caplog.records
-               if record.name == "horus.perception.tracker"
-               and getattr(record, "event", None) == "perception_reid_similarity"]
-    assert records[-1]["mode"] == "selected_validation"
-    assert records[-1]["primary_similarity"] == pytest.approx(0.7196, abs=5e-5)
-    assert records[-1]["matched_view"] == 1
-    assert records[-1]["reference_view_count"] == 2
-
-
-def test_reacquisition_refuses_a_same_colour_lookalike_the_gallery_could_match() -> None:
-    tracker = _tracker(reacquisition_confirm_s=0.0)
-    target, _, _ = _frames_for(tracker, _unit_view(1.0), count=2, colour="green")
-    stored = _unit_view(0.80)
-    _frames_for(tracker, stored, count=1, colour="green", start_frame=10)
+    _frames_for(tracker, dip, count=1, start_frame=20)
     assert tracker.validate_candidate(target.id) is not None
-    assert len(tracker.reference_embeddings(target.id)[1:]) == 1
-
-    # A look-alike with the same class and colour, a person-sized crop, 0.7004 against the
-    # creation view but 0.99 against the stored view - the campaign's 147/261 band.
-    lookalike = _unit_view(0.7004)
-    assert _cos(lookalike, stored) > 0.90
-    _frames_for(tracker, lookalike, count=2, colour="green", box=(100, 100, 155, 181),
-                start_frame=20)
-
-    assert tracker.reidentify_candidate(target.id) is None
-
-
-def test_reacquisition_refuses_a_different_colour_high_similarity_candidate() -> None:
-    # These gates act on a settled colour; the vote has its own tests.
-    one_vote = {"shirt_colour_window": 1, "shirt_colour_min_votes": 1}
-    tracker = _tracker(reacquisition_confirm_s=0.0, **one_vote)
-    target, _, _ = _frames_for(tracker, _unit_view(1.0), count=2, colour="green")
-    # 1592-style: 0.8767 similarity but a red shirt against the green reference, elsewhere in
-    # the frame so it stays its own track.
-    vector = _unit_view(0.8767)
-    _frames_for(tracker, vector, count=2, colour="red", box=(300, 10, 330, 60),
-                start_frame=20)
-    assert tracker.reidentify_candidate(target.id) is None
-
-    # Control: the same appearance with the matching colour is re-acquired.
-    control = _tracker(reacquisition_confirm_s=0.0, **one_vote)
-    control_target, _, _ = _frames_for(control, _unit_view(1.0), count=2, colour="green")
-    _frames_for(control, vector, count=2, colour="green", box=(300, 10, 330, 60),
-                start_frame=20)
-    match = control.reidentify_candidate(control_target.id)
-    assert match is not None
-    assert match[1] >= control.config.revalidation_similarity_threshold
-
-
-def test_reacquisition_needs_two_confirmed_frames_of_the_same_candidate(monkeypatch) -> None:
-    clock = [100.0]
-    tracker = _tracker()
-    target, _, _ = _frames_for(tracker, _unit_view(1.0), count=2, colour="blue")
-    returning = _unit_view(0.95)
-    with monkeypatch.context() as patched:
-        patched.setattr("horus.perception.tracker.time.monotonic", lambda: clock[0])
-        _frames_for(tracker, returning, count=2, colour="blue", box=(300, 10, 330, 60),
-                    start_frame=20, start_time=clock[0])
-
-        assert tracker.reidentify_candidate(target.id) is None  # first frame: pending
-        assert tracker.reidentify_candidate(target.id) is None  # same frame: still pending
-
-        clock[0] += 0.2
-        _frames_for(tracker, returning, count=1, colour="blue", box=(300, 10, 330, 60),
-                    start_frame=30, start_time=clock[0])
-        match = tracker.reidentify_candidate(target.id)
-        assert match is not None
-        assert match[1] == pytest.approx(0.95, abs=1e-3)
-
-
-def test_reacquisition_confirmation_expires_with_the_window(monkeypatch) -> None:
-    clock = [100.0]
-    tracker = _tracker(reacquisition_confirm_s=0.5)
-    target, _, _ = _frames_for(tracker, _unit_view(1.0), count=2, colour="blue")
-    returning = _unit_view(0.95)
-    with monkeypatch.context() as patched:
-        patched.setattr("horus.perception.tracker.time.monotonic", lambda: clock[0])
-        _frames_for(tracker, returning, count=2, colour="blue", box=(300, 10, 330, 60),
-                    start_frame=20, start_time=clock[0])
-        assert tracker.reidentify_candidate(target.id) is None
-
-        clock[0] += 1.0  # past the confirmation window
-        _frames_for(tracker, returning, count=1, colour="blue", box=(300, 10, 330, 60),
-                    start_frame=30, start_time=clock[0])
-        assert tracker.reidentify_candidate(target.id) is None
-
-        clock[0] += 0.2
-        _frames_for(tracker, returning, count=1, colour="blue", box=(300, 10, 330, 60),
-                    start_frame=40, start_time=clock[0])
-        assert tracker.reidentify_candidate(target.id) is not None
+    assert tracker.validate_candidate_failure(target.id) is None
 
 
 def test_pipeline_candidate_records_expose_the_reference_view_count() -> None:
-    detection = Detection((10, 10, 40, 60), class_name="person", attributes={"shirt_colour": "blue"})
+    detection = Detection((10, 10, 40, 60), class_name="person")
     system = PerceptionSystem(FixedDetector(detection), PersistentTracker(embedder=_VectorEmbedder()))
     candidate = feed_frame(system, _ImageVector((1.0, 0.0)), 10.0).candidates[0]
     feed_frame(system, _ImageVector((1.0, 0.0)), 10.1)
-    assert system.validate_candidate(candidate.id) is not None
+    assert system.tracker.validate_candidate(candidate.id) is not None
     assert system.list_candidates()[0]["reference_views"] == 1  # dedupe: nothing added
 
     feed_frame(system, _ImageVector((0.8, 0.6)), 10.2)
-    assert system.validate_candidate(candidate.id) is not None
+    assert system.tracker.validate_candidate(candidate.id) is not None
     assert system.list_candidates()[0]["reference_views"] == 2
 
 
 def test_one_reference_view_stores_no_extra_views_and_keeps_the_creation_embedding() -> None:
     tracker = _tracker(reference_views=1)
-    target, _, _ = _frames_for(tracker, _unit_view(1.0), count=2, colour="blue")
-    _frames_for(tracker, _unit_view(0.80), count=1, colour="blue", start_frame=10)
+    target, _, _ = _frames_for(tracker, _unit_view(1.0), count=2)
+    _frames_for(tracker, _unit_view(0.80), count=1, start_frame=10)
     assert tracker.validate_candidate(target.id) is not None
     assert list(tracker.reference_embeddings(target.id)[1:]) == []  # nothing stored
     assert tracker.reference_embeddings(target.id)[0] == (1.0, 0.0)
 
 
 # Tracker validation
-
-
-def test_revalidation_grace_keeps_a_track_through_a_marginal_dip(monkeypatch) -> None:
-    clock = [100.0]
-    tracker = PersistentTracker(
-        TrackerConfig(revalidation_grace_s=1.0), embedder=_VectorEmbedder()
-    )
-    detection = Detection((10, 10, 40, 60), class_name="person")
-    # cos((1, 0), (0.70, 0.714)) = 0.70: inside the default 0.05 grace margin below the 0.72
-    # threshold, like the campaign's correct-target dip 0.7917 -> 0.7196.
-    marginal = _ImageVector((0.70, 0.714))
-    with monkeypatch.context() as patched:
-        patched.setattr("horus.perception.tracker.time.monotonic", lambda: clock[0])
-        tracker.update([detection], Frame(1, clock[0], _ImageVector((1.0, 0.0))))
-        clock[0] += 0.05
-        current = tracker.update([detection], Frame(2, clock[0], _ImageVector((1.0, 0.0))))[0]
-        assert tracker.validate_candidate(current.id) is not None
-
-        clock[0] += 0.10
-        dip = tracker.update([detection], Frame(3, clock[0], marginal))[0]
-        assert dip.id == current.id
-        assert tracker.validate_candidate(dip.id) is not None
-        assert tracker.validate_candidate_failure(dip.id) is None
-
-        # A total appearance change (an identity swap) is never forgiven by the margin.
-        clock[0] += 0.10
-        swapped = tracker.update([detection], Frame(4, clock[0], _ImageVector((0.0, 1.0))))[0]
-        assert tracker.validate_candidate(swapped.id) is None
-        assert tracker.validate_candidate_failure(swapped.id) == "appearance_mismatch"
-
-        # Even a marginal dip expires once the grace window has passed.
-        clock[0] += 2.0
-        late = tracker.update([detection], Frame(5, clock[0], marginal))[0]
-        assert tracker.validate_candidate(late.id) is None
-        assert tracker.validate_candidate_failure(late.id) == "appearance_mismatch"
-
-
-def test_reid_similarity_logging_is_one_summary_per_second(monkeypatch, caplog) -> None:
-    clock = [100.0]
-    tracker = PersistentTracker(embedder=_VectorEmbedder())
-    detection = Detection((10, 10, 40, 60), class_name="person")
-    with monkeypatch.context() as patched:
-        patched.setattr("horus.perception.tracker.time.monotonic", lambda: clock[0])
-        tracker.update([detection], Frame(1, clock[0], _ImageVector((1.0, 0.0))))
-        clock[0] += 0.05
-        current = tracker.update([detection], Frame(2, clock[0], _ImageVector((1.0, 0.0))))[0]
-        caplog.clear()
-        with caplog.at_level(logging.DEBUG, logger="horus.perception.tracker"):
-            for step in range(6):
-                # Two validation ticks per frame, like the executor's control loop.
-                assert tracker.validate_candidate(current.id) is not None
-                assert tracker.validate_candidate(current.id) is not None
-                clock[0] += 0.3
-                tracker.update([detection], Frame(10 + step, clock[0], _ImageVector((1.0, 0.0))))
-
-    records = [
-        json.loads(record.getMessage())
-        for record in caplog.records
-        if record.name == "horus.perception.tracker"
-    ]
-    summaries = [record for record in records if record["event"] == "perception_reid_summary"]
-    per_comparison = [
-        record for record in records if record["event"] == "perception_reid_similarity"
-    ]
-    # 12 comparisons (well over a second of ticks), one INFO window summary; every
-    # per-comparison record stays at DEBUG so a hold cannot flood the log.
-    assert len(summaries) == 1
-    assert summaries[0]["mode"] == "selected_validation"
-    assert summaries[0]["comparisons"] == summaries[0]["total_comparisons"]
-    assert summaries[0]["comparisons"] >= 6
-    assert summaries[0]["own_track_seen"]
-    assert summaries[0]["best_candidate_id"] == current.id
-    assert summaries[0]["best_similarity"] == pytest.approx(1.0)
-    assert len(per_comparison) == 12
-
-
-def test_reid_summary_windows_are_capped_per_reference() -> None:
-    from horus.perception.reid_log import ReidSimilarityLog
-
-    log = ReidSimilarityLog(logging.getLogger("test.reid_cap"), max_references=3)
-    for reference_id in range(1, 7):
-        for mode in ("selected_validation", "reidentification"):
-            log.record(
-                mode=mode,
-                similarity=0.5,
-                reference_id=reference_id,
-                candidate=Candidate(reference_id, (0, 0, 10, 10), "person", 0.9, 1, 1.0),
-                threshold=0.72,
-                crop_px=(10, 10),
-            )
-        # Touching an older reference keeps it among the most recently compared ones.
-        log.record(
-            mode="selected_validation",
-            similarity=0.5,
-            reference_id=1,
-            candidate=Candidate(1, (0, 0, 10, 10), "person", 0.9, 1, 1.0),
-            threshold=0.72,
-            crop_px=(10, 10),
-        )
-    assert sorted(log._windows) == [1, 5, 6]
-    assert set(log._windows[6]) == {"selected_validation", "reidentification"}
 
 
 def test_validation_failure_reason_distinguishes_missing_stale_and_mismatch() -> None:
@@ -795,11 +456,11 @@ def test_validation_rejects_current_embedding_mismatch() -> None:
         PersistentTracker(embedder=_VectorEmbedder()),
     )
     first = feed_frame(system, _ImageVector((1.0, 0.0)), 10.0).candidates[0]
-    assert system.validate_candidate(first.id) is None
+    assert system.tracker.validate_candidate(first.id) is None
     feed_frame(system, _ImageVector((1.0, 0.0)), 10.1)
-    assert system.validate_candidate(first.id) is not None
+    assert system.tracker.validate_candidate(first.id) is not None
     feed_frame(system, _ImageVector((0.0, 1.0)), 10.2)
-    assert system.validate_candidate(first.id) is None
+    assert system.tracker.validate_candidate(first.id) is None
 
 
 def test_validation_encodes_selected_candidate_once_per_frame() -> None:
@@ -852,11 +513,10 @@ def test_grounder_seed_gains_person_evidence_only_from_a_detector_label() -> Non
     assert tracker.candidate(seeded.id).attributes["grounder_span"] == "person person person"
 
 
-def test_loosely_overlapping_detection_does_not_colour_a_seeded_track() -> None:
-    # A grounder seed boxed on a crimson hiker (seed box [277, 422, 322, 478]) must not take
-    # the colour of a detector track on a different, green-shirted person
-    # ([275, 372, 311, 442], IoU 0.156): a seeded track only accepts a detection whose box
-    # agrees strongly.
+def test_loosely_overlapping_detection_does_not_refresh_a_seeded_track() -> None:
+    # A grounder seed boxed on one person (seed box [277, 422, 322, 478]) must not take over
+    # the detection of a different person ([275, 372, 311, 442], IoU 0.156): a seeded track
+    # only accepts a detection whose box agrees strongly.
     import numpy as np
 
     tracker = PersistentTracker()
@@ -873,21 +533,21 @@ def test_loosely_overlapping_detection_does_not_colour_a_seeded_track() -> None:
         source="open_vocab",
         attributes={"grounder_span": "person"},
     )
-    green_person = Detection(
+    other_person = Detection(
         (275, 372, 311, 442),
         class_name="person",
         class_id=0,
         confidence=0.7,
-        attributes={"shirt_colour": "green", "shirt_colour_confidence": 1.0},
     )
 
     candidates = ()
-    for step in range(4):  # more frames than the vote window, so a merge would have settled
-        candidates = tracker.update([green_person], Frame(2 + step, 10.1 + 0.1 * step, image))
+    for step in range(4):
+        candidates = tracker.update([other_person], Frame(2 + step, 10.1 + 0.1 * step, image))
 
     seed_candidate = next(item for item in candidates if item.id == seeded.id)
 
-    assert "shirt_colour" not in seed_candidate.attributes
+    # The detector person would have granted person evidence had it merged.
+    assert tracker.candidate(seeded.id).person_evidence is False
     assert seed_candidate.attributes["grounder_span"] == "person"
     # The seed keeps tracking its own box (CSRT drift of a few pixels), not the other
     # person's box 50 px above it.
@@ -897,9 +557,9 @@ def test_loosely_overlapping_detection_does_not_colour_a_seeded_track() -> None:
     )
 
 
-def test_strongly_overlapping_detection_still_colours_a_seeded_track() -> None:
-    # The legitimate path: the detector really tracks the seeded person, so its vote (and the
-    # person evidence it carries) still reaches the seed.
+def test_strongly_overlapping_detection_still_refreshes_a_seeded_track() -> None:
+    # The legitimate path: the detector really tracks the seeded person, so the person
+    # evidence it carries still reaches the seed.
     import numpy as np
 
     tracker = PersistentTracker()
@@ -917,16 +577,13 @@ def test_strongly_overlapping_detection_still_colours_a_seeded_track() -> None:
         class_name="person",
         class_id=0,
         confidence=0.7,
-        attributes={"shirt_colour": "green", "shirt_colour_confidence": 1.0},
     )
 
     candidates = ()
     for step in range(4):
         candidates = tracker.update([same_person], Frame(2 + step, 10.1 + 0.1 * step, image))
 
-    seed_candidate = next(item for item in candidates if item.id == seeded.id)
-
-    assert seed_candidate.attributes["shirt_colour"] == "green"
+    assert any(item.id == seeded.id for item in candidates)
     assert tracker.candidate(seeded.id).person_evidence is True
 
 
@@ -950,231 +607,6 @@ def test_grounder_seed_does_not_gain_evidence_from_its_own_label() -> None:
     assert not tracker.candidate(seeded.id).person_evidence
 
 
-# Track shirt-colour vote. The published colour is a bounded majority vote, not the latest
-# classification.
-
-
-def _feed(tracker: PersistentTracker, colours, *, start_frame: int = 1):
-    candidate = None
-    for step, colour in enumerate(colours):
-        detection = Detection(
-            (10, 10, 40, 60),
-            class_name="person",
-            attributes={} if colour is None else {"shirt_colour": colour},
-        )
-        candidate = tracker.update(
-            [detection], Frame(start_frame + step, 10.0 + 0.05 * step, _ImageVector((1.0, 0.0)))
-        )[0]
-    return candidate
-
-
-def test_one_misread_frame_does_not_label_a_track() -> None:
-    tracker = _tracker()
-
-    first = _feed(tracker, ["red"])
-
-    assert "shirt_colour" not in first.attributes
-
-    settled = _feed(tracker, ["blue", "blue", "blue"], start_frame=2)
-
-    assert settled.attributes["shirt_colour"] == "blue"
-    assert settled.attributes["shirt_colour_confidence"] == pytest.approx(3 / 4)
-
-
-def test_colour_flip_needs_a_majority_of_the_window() -> None:
-    tracker = _tracker()
-
-    _feed(tracker, ["red", "red", "red"])
-    still_red = _feed(tracker, ["blue", "blue"], start_frame=4)
-
-    # red,red,red,blue,blue: red still holds the majority of the window.
-    assert still_red.attributes["shirt_colour"] == "red"
-
-    flipped = _feed(tracker, ["blue"], start_frame=6)
-
-    # The window slid to red,red,blue,blue,blue: the flip now has its majority.
-    assert flipped.attributes["shirt_colour"] == "blue"
-
-
-def test_tied_votes_publish_nothing() -> None:
-    tracker = _tracker(shirt_colour_window=4, shirt_colour_min_votes=2)
-
-    tied = _feed(tracker, ["red", "red", "blue", "blue"])
-
-    assert "shirt_colour" not in tied.attributes
-
-
-def test_inconclusive_frames_neither_vote_nor_erase_a_settled_colour() -> None:
-    tracker = _tracker()
-
-    _feed(tracker, ["green", "green", "green"])
-    after_none = _feed(tracker, [None, None], start_frame=4)
-
-    assert after_none.attributes["shirt_colour"] == "green"
-
-
-def test_vote_config_requires_a_positive_window_and_reachable_majority() -> None:
-    from horus.config import PerceptionSettings
-
-    for window, minimum in ((0, 1), (5, 0), (True, 1), (5, 6)):
-        with pytest.raises(ValueError):
-            PerceptionSettings(shirt_colour_window=window, shirt_colour_min_votes=minimum)
-
-
-# Shirt-colour attributes
-
-_needs_numpy_for_shirt_colour = pytest.mark.skipif(
-    importlib.util.find_spec("numpy") is None,
-    reason="NumPy is required for shirt-color attribute extraction",
-)
-
-
-@_needs_numpy_for_shirt_colour
-def test_person_candidates_receive_local_torso_colour() -> None:
-    import numpy as np
-
-    image = np.zeros((100, 100, 3), dtype=np.uint8)
-    image[20:60, 20:80] = (220, 45, 10)
-    system = PerceptionSystem(
-        FixedDetector(Detection((0, 0, 100, 100), class_name="person")),
-        PersistentTracker(),
-    )
-
-    candidate = None
-    for step in range(3):  # the published colour is a majority vote over recent frames
-        candidate = feed_frame(system, image, 10.0 + 0.1 * step).candidates[0]
-
-    assert candidate.attributes["shirt_colour"] == "blue"
-    assert candidate.attributes["shirt_colour_confidence"] >= 0.55
-
-
-@_needs_numpy_for_shirt_colour
-def test_distinguishes_static_red_and_green_shirts() -> None:
-    import numpy as np
-
-    from horus.perception.attributes import classify_shirt_colour
-
-    for pixel, expected in (
-        ((220, 45, 10), "blue"),
-        ((20, 40, 220), "red"),
-        ((30, 180, 30), "green"),
-    ):
-        image = np.zeros((100, 100, 3), dtype=np.uint8)
-        image[20:60, 20:80] = pixel
-        assert classify_shirt_colour(image, (0, 0, 100, 100))[0] == expected
-
-
-@_needs_numpy_for_shirt_colour
-def test_supported_garment_hues_report_their_family() -> None:
-    import numpy as np
-
-    from horus.perception.attributes import classify_shirt_colour
-
-    # Nominal worldgen fabric colours (sim/worldgen/appearance.py COLOURS).
-    for pixel, expected in (
-        ((36, 28, 200), "red"),          # red / crimson / scarlet
-        ((34, 18, 165), "red"),
-        ((40, 52, 226), "red"),
-        ((40, 28, 110), "red"),          # maroon
-        ((22, 108, 240), "red"),         # orange reads as red
-        ((18, 110, 250), "red"),         # hi-vis orange
-        ((62, 150, 42), "green"),        # green / kelly / lime
-        ((50, 176, 70), "green"),
-        ((40, 214, 160), "green"),       # lime
-        ((52, 108, 104), "green"),       # olive
-        ((50, 88, 74), "green"),         # woodland green
-        ((186, 74, 32), "blue"),         # blue / royal blue
-        ((210, 96, 44), "blue"),
-        ((72, 36, 26), "blue"),          # navy
-        ((214, 160, 110), "blue"),       # sky blue
-    ):
-        image = np.zeros((100, 100, 3), dtype=np.uint8)
-        image[20:60, 20:80] = pixel
-        assert classify_shirt_colour(image, (0, 0, 100, 100))[0] == expected, (
-            f"{pixel} should read {expected}"
-        )
-
-
-@_needs_numpy_for_shirt_colour
-def test_achromatic_and_off_hue_fabrics_report_no_colour() -> None:
-    import numpy as np
-
-    from horus.perception.attributes import classify_shirt_colour
-
-    # Fabrics the worldgen registry lists with no possible classifier colour. A label
-    # here is a false positive that the tracker then keeps for the track's lifetime.
-    for pixel in (
-        (232, 236, 236),   # white
-        (186, 186, 184),   # light grey
-        (132, 130, 128),   # grey
-        (68, 64, 62),      # charcoal
-        (26, 24, 24),      # black
-        (168, 196, 210),   # beige
-        (118, 160, 176),   # khaki
-        (128, 172, 196),   # sand
-        (132, 146, 150),   # stone
-        (44, 70, 104),     # brown
-        (40, 150, 196),    # mustard
-        (44, 204, 232),    # yellow
-        (206, 204, 200),   # reflective silver
-    ):
-        image = np.zeros((100, 100, 3), dtype=np.uint8)
-        image[20:60, 20:80] = pixel
-        assert classify_shirt_colour(image, (0, 0, 100, 100)) is None, (
-            f"{pixel} must stay indeterminate"
-        )
-
-
-@_needs_numpy_for_shirt_colour
-def test_warm_lit_neutral_fabric_does_not_read_as_red() -> None:
-    import numpy as np
-
-    from horus.perception.attributes import classify_shirt_colour
-
-    # Warm-lit khaki, sand, grey and hi-vis grey torsos (e.g. heather:white, solid:khaki,
-    # hivis:grey+reflective_silver) are achromatic garments: no colour, never "red".
-    for bgr in ((110, 160, 190), (105, 145, 190), (150, 160, 170), (140, 143, 148),
-                (206, 204, 200)):
-        image = np.zeros((100, 100, 3), dtype=np.uint8)
-        image[20:60, 20:80] = bgr
-        assert classify_shirt_colour(image, (0, 0, 100, 100)) is None, (
-            f"warm neutral {bgr} must stay indeterminate"
-        )
-        # A few strongly saturated warm pixels inside an otherwise neutral torso are
-        # not enough either: skin, hair and background keep that share below the floor.
-        image[25:35, 25:55] = (22, 108, 240)  # orange patch, 300 px of the 1750 px band
-        assert classify_shirt_colour(image, (0, 0, 100, 100)) is None
-    # An orange torso covering the band is still a red family garment.
-    image = np.zeros((100, 100, 3), dtype=np.uint8)
-    image[20:60, 20:80] = (22, 108, 240)
-    assert classify_shirt_colour(image, (0, 0, 100, 100))[0] == "red"
-
-
-@_needs_numpy_for_shirt_colour
-def test_light_grey_garment_gets_no_shirt_colour_attribute() -> None:
-    import numpy as np
-
-    system = PerceptionSystem(
-        FixedDetector(Detection((0, 0, 100, 100), class_name="person")),
-        PersistentTracker(),
-    )
-
-    warm_grey = np.zeros((100, 100, 3), dtype=np.uint8)
-    warm_grey[20:60, 20:80] = (150, 160, 170)
-    # The tracker keeps an accepted attribute for the life of a track, so a neutral
-    # garment must stay unlabelled on every frame, not just the first.
-    for step in range(3):
-        grey_candidate = feed_frame(system, warm_grey, 10.0 + 0.1 * step).candidates[0]
-        assert "shirt_colour" not in grey_candidate.attributes
-
-    scarlet = np.zeros((100, 100, 3), dtype=np.uint8)
-    scarlet[20:60, 20:80] = (36, 28, 200)
-    for step in range(3):
-        red_candidate = feed_frame(system, scarlet, 10.3 + 0.1 * step).candidates[0]
-
-    assert red_candidate.attributes["shirt_colour"] == "red"
-
-
 # Set-of-marks rendering
 
 
@@ -1193,7 +625,7 @@ def test_payload_contains_scaled_numbered_candidate_table_and_jpeg() -> None:
         frame_id=12,
         timestamp=44.5,
         pose={"x": 1.0},
-        attributes={"shirt": "red"},
+        attributes={"grounder_span": "person"},
     )
     frame = Frame(
         frame_id=12,
@@ -1245,8 +677,13 @@ def test_camera_yaw_between_frames_keeps_a_narrow_box_on_its_track():
     focal = 320 / math.tan(math.radians(114.59155902616465) / 2)
     person = lambda centre: Detection((centre - 15, 240, centre + 15, 380), class_name="person", class_id=0)
 
+    class NoAppearance:
+        # Geometry alone: appearance recovery (a lost box that looks the same) cannot step in.
+        def embed(self, image, bbox):
+            return None
+
     def run(hfov):
-        tracker = PersistentTracker(TrackerConfig(camera_horizontal_fov_deg=hfov))
+        tracker = PersistentTracker(TrackerConfig(camera_horizontal_fov_deg=hfov), embedder=NoAppearance())
         ids = []
         heading, centre = 350.0, 320.0
         for frame_id in range(1, 7):
@@ -1261,3 +698,58 @@ def test_camera_yaw_between_frames_keeps_a_narrow_box_on_its_track():
 
     assert len(set(run(None))) > 1  # uncompensated: the 28 px jump per frame breaks IoU association
     assert run(114.59155902616465) == [1] * 6
+
+
+class _SceneByBox:
+    """A 1280x720 frame whose embedder answers per box: one appearance vector per person."""
+
+    shape = (720, 1280)
+
+    def __init__(self, people):
+        self.people = people  # [(box, vector)]
+
+
+class _ByBoxEmbedder:
+    def embed(self, image, bbox):
+        return next((vector for box, vector in image.people if tuple(box) == tuple(bbox)), None)
+
+
+def test_an_image_jump_during_an_approach_keeps_the_target_id_without_merging_a_bystander():
+    # An approach that begins with a lurch can make a small person's box come back under a new
+    # ID every frame. Here the box grows 1.5x/s and slides down at 6 fps, one frame is
+    # missed, and an image jump the yaw compensation does not see (vehicle pitch/translation)
+    # moves every box by 30 px right and 12 px down, more than IoU association tolerates.
+    target_look, bystander_look, stranger_look = (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)
+    tracker = PersistentTracker(TrackerConfig(), embedder=_ByBoxEmbedder())
+    target_ids, bystander_ids = [], []
+    for frame in range(18):
+        t = frame / 6.0
+        jump_x, jump_y = (30.0, 12.0) if frame >= 7 else (0.0, 0.0)
+        height = 90.0 * 1.5**t
+        bottom = 429.0 + 40.0 * t + jump_y
+        centre = 530.0 + jump_x
+        target = (centre - 0.2 * height, bottom - height, centre + 0.2 * height, bottom)
+        bystander = (612.0 + jump_x, 345.0 + jump_y, 646.0 + jump_x, 431.0 + jump_y)
+        people = [(bystander, bystander_look)]
+        detections = [Detection(bystander, class_name="person")]
+        if frame != 6:  # the frame before the jump is missed
+            people.append((target, target_look))
+            detections.append(Detection(target, class_name="person"))
+        candidates = tracker.update(detections, Frame(frame + 1, 100.0 + t, _SceneByBox(people)))
+        ids = {tuple(candidate.bbox): candidate.id for candidate in candidates}
+        bystander_ids.append(ids[tuple(bystander)])
+        if frame != 6:
+            target_ids.append(ids[tuple(target)])
+
+    assert set(target_ids) == {target_ids[0]}
+    assert set(bystander_ids) == {bystander_ids[0]} != {target_ids[0]}
+
+    # Someone else appearing next to where the target's box would be (outside IoU association,
+    # inside the recovery gate) is still a new person: appearance decides.
+    last_target = next(box for box, look in people if look == target_look)
+    stranger = (last_target[0] + 100.0, last_target[1], last_target[2] + 100.0, last_target[3])
+    candidates = tracker.update(
+        [Detection(stranger, class_name="person")],
+        Frame(30, 100.0 + 18 / 6.0 + 0.3, _SceneByBox([(stranger, stranger_look)])),
+    )
+    assert candidates[0].id not in {target_ids[0], bystander_ids[0]}

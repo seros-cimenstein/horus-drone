@@ -50,8 +50,8 @@ Usage: ./sim/run.sh <build|start [--procedural [--seed N] [--kind forest|urban] 
   stop [--purge]    Stop the container; optionally delete its active run directory
   status            Show whether the simulation container is running
   s0                Run the pymavlink 5 m takeoff-and-land proof
-  frame             Enable the camera stream and save a frame
-  logs              Follow the Gazebo/SITL container log
+  frame             Enable the Gazebo camera stream and save a frame (Gazebo worlds only)
+  logs              Follow the simulation container log (Gazebo or GTA SITL)
 EOF
 }
 
@@ -59,9 +59,33 @@ require_running_container() {
   local running
   running="$(docker inspect --format '{{.State.Running}}' "${CONTAINER}" 2>/dev/null || true)"
   if [[ "${running}" != true ]]; then
-    printf 'Simulation container %s is not running. Start it with ./sim/scripts/start_sim.sh.\n' "${CONTAINER}" >&2
+    printf 'Simulation container %s is not running. Start it with ./sim/run.sh start [world] or ./sim/run.sh start --gta.\n' "${CONTAINER}" >&2
     exit 1
   fi
+}
+
+# One HORUS world per host, Gazebo or GTA V, never both: two worlds overload Koko. Refuses the
+# other world's host processes and any running HORUS world container, whatever its name
+# (labelled horus.world=gazebo|gta by `start`; older unlabelled ones by their start script).
+refuse_second_world() {
+  local world_kind="$1" name label container_command
+  if [[ "${world_kind}" == gazebo ]] && pgrep -f '[G]TA5_Enhanced' >/dev/null; then
+    printf 'GTA V is running on this host; stop it with scripts/koko/gta_game.sh stop before starting Gazebo.\n' >&2
+    exit 1
+  fi
+  if [[ "${world_kind}" == gta ]] && pgrep -f '[g]z sim' >/dev/null; then
+    printf 'Gazebo (gz sim) is running on this host; stop it with ./sim/run.sh stop before starting --gta.\n' >&2
+    exit 1
+  fi
+  while IFS='|' read -r name label container_command; do
+    [[ -n "${name}" ]] || continue
+    if [[ -n "${label}" || "${container_command}" == *start_sim.sh* \
+      || "${container_command}" == *start_gta_sitl.sh* ]]; then
+      printf 'HORUS world container %s (%s) is already running; stop it first: HORUS_SIM_CONTAINER_NAME=%s ./sim/run.sh stop\n' \
+        "${name}" "${label:-unlabelled}" "${name}" >&2
+      exit 1
+    fi
+  done < <(docker ps --no-trunc --format '{{.Names}}|{{.Label "horus.world"}}|{{.Command}}')
 }
 
 case "${command}" in
@@ -222,12 +246,18 @@ case "${command}" in
       container_command=(/horus/sim/scripts/start_gta_sitl.sh)
       # The GTA profile becomes the container default, so the bridge sends its camera FOV and any
       # HORUS process started in the container loads the same profile.
-      export HORUS_CONFIG="${HORUS_CONFIG:-/horus/config/horus_gta.yaml}"
+      read -r profile_config _ <<< "$(horus_world_profile gta)"
+      export HORUS_CONFIG="${HORUS_CONFIG:-${profile_config}}"
     else
       container_run_root=/horus/sim/run
       container_run_dir="${container_run_root}/${run_id}"
       container_workdir=/opt/ardupilot
       container_command=(/horus/sim/scripts/start_sim.sh "${world}")
+    fi
+    # A config carried over from the other world would wait forever for frames that never come.
+    if (( gui_client_enabled == 0 )) && [[ -n "${HORUS_CONFIG:-}" ]]; then
+      if (( gta == 1 )); then config_world=gta; else config_world="${world}"; fi
+      horus_check_world_config "${config_world}" "${HORUS_CONFIG}" || exit 2
     fi
     if (( gui_enabled == 1 )); then
       IMAGE="${HORUS_SIM_GUI_IMAGE:-horus-sim:local-s1s2-gui}"
@@ -245,6 +275,12 @@ case "${command}" in
     if docker container inspect "${CONTAINER}" >/dev/null 2>&1; then
       printf 'Container %s already exists; stop it with ./sim/scripts/stop_sim.sh first.\n' "${CONTAINER}" >&2
       exit 1
+    fi
+    label_args=()
+    if (( gui_client_enabled == 0 )); then
+      if (( gta == 1 )); then world_label=gta; else world_label=gazebo; fi
+      refuse_second_world "${world_label}"
+      label_args=(--label "horus.world=${world_label}")
     fi
     if (( gui_enabled == 1 )); then
       if [[ ! -d /tmp/.X11-unix ]]; then
@@ -383,12 +419,18 @@ case "${command}" in
         printf 'Host NVIDIA EGL vendor manifest is absent; relying on container runtime injection.\n' >&2
       fi
     fi
-    gz_args=(
-      --env "GZ_IP=${GZ_IP:-127.0.0.1}"
-      --env "GZ_PARTITION=${GZ_PARTITION:-default}"
-    )
-    if [[ -n "${GZ_RELAY:-}" ]]; then
-      gz_args+=(--env "GZ_RELAY=${GZ_RELAY}")
+    # Gazebo transport and model paths only for Gazebo worlds and the GUI client; a GTA
+    # container runs SITL alone and talks to no gz partition.
+    gz_args=()
+    if (( gta == 0 )); then
+      gz_args=(
+        --env "GZ_IP=${GZ_IP:-127.0.0.1}"
+        --env "GZ_PARTITION=${GZ_PARTITION:-default}"
+        --env "GZ_SIM_RESOURCE_PATH=/opt/ardupilot_gazebo/models:/opt/ardupilot_gazebo/worlds:/horus/sim/models:/horus/sim/worlds"
+      )
+      if [[ -n "${GZ_RELAY:-}" ]]; then
+        gz_args+=(--env "GZ_RELAY=${GZ_RELAY}")
+      fi
     fi
     gta_env_args=()
     if (( gta == 1 )); then
@@ -426,6 +468,7 @@ case "${command}" in
     docker run --detach --init \
       --name "${CONTAINER}" \
       --network host \
+      "${label_args[@]}" \
       "${gpu_args[@]}" \
       "${gui_args[@]}" \
       "${gz_args[@]}" \
@@ -444,7 +487,6 @@ case "${command}" in
       --env "XDG_CACHE_HOME=${container_run_dir}/.cache" \
       --env "XDG_CONFIG_HOME=${container_run_dir}/.config" \
       --env "XDG_DATA_HOME=${container_run_dir}/.local/share" \
-      --env "GZ_SIM_RESOURCE_PATH=/opt/ardupilot_gazebo/models:/opt/ardupilot_gazebo/worlds:/horus/sim/models:/horus/sim/worlds" \
       --volume "${PROJECT_DIR}:/horus" \
       --workdir "${container_workdir}" \
       "${IMAGE}" \
@@ -529,6 +571,10 @@ case "${command}" in
     ;;
   frame)
     require_running_container
+    if [[ "$(docker inspect --format '{{index .Config.Labels "horus.world"}}' "${CONTAINER}" 2>/dev/null || true)" == gta ]]; then
+      printf 'frame grabs the Gazebo camera; %s runs GTA, whose frames come from the game (get_frame on the HORUS MCP server).\n' "${CONTAINER}" >&2
+      exit 2
+    fi
     docker exec --workdir /opt/ardupilot "${CONTAINER}" \
       python3 /horus/sim/scripts/grab_frame.py "${@:2}"
     ;;

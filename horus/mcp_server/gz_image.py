@@ -65,6 +65,7 @@ class GazeboImagePublisher:
             self._rgb_int8 = int(rgb_int8)
             self._cv2 = cv2_module
             self._numpy = numpy_module
+            _LOGGER.info("Publishing Gazebo images on %s", topic)
         except Exception as exc:
             _LOGGER.warning("Gazebo image publishing on %s is unavailable: %s", topic, exc)
             self._release()

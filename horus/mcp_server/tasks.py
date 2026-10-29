@@ -1,4 +1,4 @@
-"""Asynchronous task, event and onboard-plan MCP tools."""
+"""Asynchronous task and event MCP tools."""
 
 from __future__ import annotations
 
@@ -7,19 +7,14 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from horus.events import TERMINAL_TASK_STATUSES
-from horus.executor.plan import (
-    DEFAULT_PLAN_TTL_S,
-    MAX_LOOP_ITERS,
-    MAX_PLAN_CHARS,
-    MAX_PLAN_TTL_S,
-    MAX_TOTAL_LOOP_ITERS,
-    function_reference,
-)
+from horus.events import EVENT_KINDS, TERMINAL_TASK_STATUSES
 from horus.mcp_server.context import ToolContext, to_json
 
 _WAIT_MAX_S = 60.0
 _WAIT_POLL_S = 0.5
+# wait_for_event never blocks longer than this, nor longer than 80 % of the link-loss RTH delay:
+# contact is noted only when a call starts and ends, so back-to-back waits keep a hold supervised.
+_EVENT_WAIT_MAX_S = 25.0
 
 
 async def _poll_until(
@@ -38,7 +33,7 @@ async def _poll_until(
 
 
 def get_task_status(ctx: ToolContext, task_id: str) -> str:
-    """Inspect an asynchronous task's state, TTL, errors, and requested/clamped targets."""
+    """Inspect an asynchronous task's state, TTL, errors, and requested/executed targets."""
     return to_json(ctx.executor.get_task_status(task_id))
 
 
@@ -46,7 +41,7 @@ async def wait_for_task(ctx: ToolContext, task_id: str, timeout_s: float = 30.0)
     """Block until a task reaches a terminal status or timeout_s (1-60 s) elapses.
 
     Returns the task status plus ``waited_s`` and ``timed_out``; call again to keep
-    waiting on long skills such as follow.
+    waiting on a long move.
     """
     return await _poll_until(
         lambda: ctx.executor.get_task_status(task_id),
@@ -68,62 +63,52 @@ async def wait_events(ctx: ToolContext, after_id: int = 0, timeout_s: float = 25
     return to_json({"events": events, "last_id": last_id})
 
 
+async def wait_for_event(
+    ctx: ToolContext, kinds: list[str], after_id: int | None = None, timeout_s: float = 20.0
+) -> str:
+    """Block until an event of one of ``kinds`` arrives or timeout_s (1-25 s) elapses.
+
+    Use it instead of polling get_state: after rth or land wait for ["landed"]; while a skill
+    runs wait for e.g. ["task_finished"].
+    Without ``after_id`` only events published after this call starts count, so an event that
+    arrives between two calls is missed: when calling again, pass the previous result's
+    ``last_id`` as ``after_id``. Returns the matching ``events``, ``last_id``, ``waited_s`` and
+    ``timed_out``; call again to keep waiting.
+    """
+    if isinstance(kinds, str) or not kinds or not all(isinstance(kind, str) for kind in kinds):
+        raise ValueError("kinds must be a non-empty list of event kinds")
+    unknown = sorted(set(kinds) - EVENT_KINDS)
+    if unknown:
+        raise ValueError(f"unknown event kinds {unknown}; known: {sorted(EVENT_KINDS)}")
+    wanted = frozenset(kinds)
+    upper = min(_EVENT_WAIT_MAX_S, 0.8 * ctx.config.executor.link_loss_rth_delay_s)
+    timeout = min(upper, max(1.0, float(timeout_s)))
+    cursor = ctx.event_bus.latest_id() if after_id is None else int(after_id)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    matched: list[dict[str, Any]] = []
+    while not matched:
+        remaining = timeout - (loop.time() - started)
+        if remaining <= 0.0:
+            break
+        events = await ctx.event_bus.wait(cursor, remaining)
+        if not events:
+            break
+        cursor = events[-1]["id"]
+        matched = [event for event in events if event["kind"] in wanted]
+    return to_json({
+        "events": matched,
+        "last_id": cursor,
+        "waited_s": round(loop.time() - started, 2),
+        "timed_out": not matched,
+    })
+
+
 def cancel(ctx: ToolContext, task_id: str) -> str:
     """Cancel a queued or running skill by task ID and inspect the resulting status."""
     return to_json(ctx.executor.cancel(task_id))
 
 
-_RUN_PLAN_DESCRIPTION = (
-    "Run a whole mission onboard as one plan, so it continues without further tool calls "
-    "or a live link. Returns a plan_id immediately; wait_for_plan / get_plan_status report "
-    "progress, a plan_finished event reports the end, cancel_plan stops it. While a plan "
-    "runs it owns the skill queue: direct skill tools are refused, while hold/rth/land "
-    "always work and abort it, as do link-loss RTH and a pilot taking over.\n\n"
-    "Language (TypeFly-style restricted Python): calls to the functions below, "
-    "single-name assignment, if/elif/else, `for i in range(<integer literals>)` "
-    f"(at most {MAX_LOOP_ITERS} iterations, {MAX_TOTAL_LOOP_ITERS} nested), "
-    "break/continue/pass, "
-    "comparisons, and/or/not, float + - * /, f-strings. Nothing else: no imports, "
-    "attributes, indexing, while or def. Every flight call is a normal clamped HORUS "
-    "skill and blocks until it ends; its return value lets the plan branch.\n"
-    f"Limits: {MAX_PLAN_CHARS} characters; ttl_s defaults to {DEFAULT_PLAN_TTL_S:g} s "
-    f"(max {MAX_PLAN_TTL_S:g} s).\n\n"
-    "Functions:\n" + function_reference() + "\n\n"
-    "Example:\n"
-    "take_off(3)\n"
-    "t = search(0, 8, -4, 4, class_name='person', attribute='shirt_colour', equals='red')\n"
-    "if t >= 0:\n"
-    "    approach(t, 2)\n"
-    "    log(f'found person {t}')\n"
-    "else:\n"
-    "    rth()"
-)
-
-
-def run_plan(ctx: ToolContext, plan: str, ttl_s: float | None = None) -> str:
-    return to_json(ctx.plans.submit(plan, ttl_s))
-
-
-def get_plan_status(ctx: ToolContext, plan_id: str) -> str:
-    """Inspect a plan: status, current task, finished steps, log lines and final variables."""
-    return to_json(ctx.plans.status(plan_id))
-
-
-async def wait_for_plan(ctx: ToolContext, plan_id: str, timeout_s: float = 30.0) -> str:
-    """Block until a plan ends or timeout_s (1-60 s) elapses; call again for long plans."""
-    return await _poll_until(
-        lambda: ctx.plans.status(plan_id), lambda status: status["status"] != "running", timeout_s
-    )
-
-
-def cancel_plan(ctx: ToolContext, plan_id: str) -> str:
-    """Stop a running plan; its current skill is cancelled and the vehicle holds."""
-    return to_json(ctx.plans.cancel(plan_id))
-
-
 def register(mcp: Any, ctx: ToolContext) -> None:
-    for function in (get_task_status, wait_for_task, wait_events, cancel):
-        ctx.tool(function)
-    ctx.tool(run_plan, description=_RUN_PLAN_DESCRIPTION)
-    for function in (get_plan_status, wait_for_plan, cancel_plan):
+    for function in (get_task_status, wait_for_task, wait_events, wait_for_event, cancel):
         ctx.tool(function)

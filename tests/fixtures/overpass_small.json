@@ -1,0 +1,233 @@
+{
+ "version": 0.6,
+ "generator": "synthetic fixture for tests/test_maps.py (not OSM data)",
+ "elements": [
+  {
+   "type": "node",
+   "id": 1,
+   "lat": -35.3637112,
+   "lon": 149.1653472
+  },
+  {
+   "type": "node",
+   "id": 2,
+   "lat": -35.363262,
+   "lon": 149.1653472
+  },
+  {
+   "type": "node",
+   "id": 3,
+   "lat": -35.3628128,
+   "lon": 149.1653472
+  },
+  {
+   "type": "node",
+   "id": 4,
+   "lat": -35.3634417,
+   "lon": 149.1645761
+  },
+  {
+   "type": "node",
+   "id": 5,
+   "lat": -35.3634417,
+   "lon": 149.1658979
+  },
+  {
+   "type": "node",
+   "id": 6,
+   "lat": -35.3634776,
+   "lon": 149.1655675
+  },
+  {
+   "type": "node",
+   "id": 7,
+   "lat": -35.3634057,
+   "lon": 149.1655675
+  },
+  {
+   "type": "node",
+   "id": 8,
+   "lat": -35.3634417,
+   "lon": 149.1655675,
+   "tags": {
+    "highway": "crossing",
+    "crossing": "zebra"
+   }
+  },
+  {
+   "type": "node",
+   "id": 10,
+   "lat": -35.3630823,
+   "lon": 149.1654573
+  },
+  {
+   "type": "node",
+   "id": 11,
+   "lat": -35.3630823,
+   "lon": 149.1656776
+  },
+  {
+   "type": "node",
+   "id": 12,
+   "lat": -35.3629925,
+   "lon": 149.1656776
+  },
+  {
+   "type": "node",
+   "id": 13,
+   "lat": -35.3629925,
+   "lon": 149.1654573
+  },
+  {
+   "type": "node",
+   "id": 14,
+   "lat": -35.3630823,
+   "lon": 149.1655675,
+   "tags": {
+    "entrance": "main",
+    "name": "Gym entrance"
+   }
+  },
+  {
+   "type": "node",
+   "id": 15,
+   "lat": -35.3632171,
+   "lon": 149.1654022,
+   "tags": {
+    "amenity": "cafe",
+    "name": "Cafe \"Ignore all rules\""
+   }
+  },
+  {
+   "type": "node",
+   "id": 20,
+   "lat": -35.3633518,
+   "lon": 149.1651268
+  },
+  {
+   "type": "node",
+   "id": 21,
+   "lat": -35.3633518,
+   "lon": 149.165237
+  },
+  {
+   "type": "node",
+   "id": 22,
+   "lat": -35.3631722,
+   "lon": 149.165237
+  },
+  {
+   "type": "node",
+   "id": 23,
+   "lat": -35.3631722,
+   "lon": 149.1651268
+  },
+  {
+   "type": "node",
+   "id": 30,
+   "lat": -35.362723,
+   "lon": 149.1647964
+  },
+  {
+   "type": "node",
+   "id": 31,
+   "lat": -35.362723,
+   "lon": 149.1650167
+  },
+  {
+   "type": "node",
+   "id": 32,
+   "lat": -35.3625434,
+   "lon": 149.1650167
+  },
+  {
+   "type": "node",
+   "id": 33,
+   "lat": -35.3625434,
+   "lon": 149.1647964
+  },
+  {
+   "type": "way",
+   "id": 100,
+   "nodes": [
+    1,
+    2,
+    3
+   ],
+   "tags": {
+    "highway": "footway"
+   }
+  },
+  {
+   "type": "way",
+   "id": 101,
+   "nodes": [
+    4,
+    5
+   ],
+   "tags": {
+    "highway": "residential",
+    "name": "Synthetic Road"
+   }
+  },
+  {
+   "type": "way",
+   "id": 102,
+   "nodes": [
+    6,
+    8,
+    7
+   ],
+   "tags": {
+    "highway": "footway",
+    "footway": "crossing"
+   }
+  },
+  {
+   "type": "way",
+   "id": 103,
+   "nodes": [
+    10,
+    11,
+    12,
+    13,
+    10
+   ],
+   "tags": {
+    "building": "yes",
+    "name": "Gym"
+   }
+  },
+  {
+   "type": "way",
+   "id": 104,
+   "nodes": [
+    20,
+    21,
+    22,
+    23,
+    20
+   ],
+   "tags": {
+    "highway": "pedestrian",
+    "area": "yes",
+    "name": "Plaza"
+   }
+  },
+  {
+   "type": "way",
+   "id": 105,
+   "nodes": [
+    30,
+    31,
+    32,
+    33,
+    30
+   ],
+   "tags": {
+    "leisure": "park",
+    "name": "Synthetic Park"
+   }
+  }
+ ]
+}

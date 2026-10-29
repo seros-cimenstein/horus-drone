@@ -10,6 +10,11 @@
 //
 // Every Present also reads HorusGta's camera block (gta/common/camera_block.hpp) so each frame
 // says whether the drone camera was on screen and which pose packet it showed.
+//
+// In shared view (camera block view_mode 1) HorusGta alternates drone and gameplay camera ticks and
+// marks each frame's top-left corner. Every Present is then captured (the worker drops the gameplay
+// frames by their marker), and compositor.hpp replaces drone frames in the back buffer with the
+// last gameplay frame before the real Present, so the player only sees his own camera.
 
 #define WIDL_EXPLICIT_AGGREGATE_RETURNS  // MSVC ABI for methods returning structs (GetDesc).
 #define WIN32_LEAN_AND_MEAN
@@ -21,7 +26,9 @@
 #include <MinHook.h>
 
 #include "camera_block.hpp"
+#include "compositor.hpp"
 #include "dxgi_probe.hpp"
+#include "shared_view.hpp"
 #include "swapchain_queues.hpp"
 
 #include <array>
@@ -116,31 +123,7 @@ bool supported_format(DXGI_FORMAT format) {
     }
 }
 
-float half_to_float(uint16_t h) {
-    const uint32_t sign = (h & 0x8000u) << 16;
-    uint32_t exponent = (h >> 10) & 0x1fu;
-    uint32_t mantissa = h & 0x3ffu;
-    uint32_t bits;
-    if (exponent == 0) {
-        if (mantissa == 0) {
-            bits = sign;
-        } else {  // subnormal: renormalise
-            exponent = 127 - 15 + 1;
-            while ((mantissa & 0x400u) == 0) {
-                mantissa <<= 1;
-                --exponent;
-            }
-            bits = sign | (exponent << 23) | ((mantissa & 0x3ffu) << 13);
-        }
-    } else if (exponent == 31) {
-        bits = sign | 0x7f800000u | (mantissa << 13);
-    } else {
-        bits = sign | ((exponent - 15 + 127) << 23) | (mantissa << 13);
-    }
-    float value;
-    std::memcpy(&value, &bits, sizeof(value));
-    return value;
-}
+using horus::capture::half_to_float;
 
 // scRGB (linear, 1.0 = SDR white) half -> sRGB-encoded byte, for every possible half bit pattern.
 const std::vector<uint8_t>& half_to_srgb8() {
@@ -244,10 +227,24 @@ volatile uint8_t* g_camera_block = nullptr;
 horus::CameraTracker g_camera_tracker;
 horus::CameraStamp g_camera_now;
 
+// Shared-view counters (gta/capture/README.md "Shared view"), logged and reset every 10 s.
+struct SharedStats {
+    std::atomic<uint64_t> presents{0};
+    std::atomic<uint64_t> captures{0};          // readback copies submitted
+    std::atomic<uint64_t> captures_dropped{0};  // readback ring full
+    std::atomic<uint64_t> drone{0};             // worker: frames whose marker says drone
+    std::atomic<uint64_t> player{0};            // worker: all other frames (dropped unconverted)
+    std::atomic<uint64_t> published{0};         // drone frames served (after the max_hz throttle)
+    std::atomic<uint64_t> composited{0};
+    std::atomic<uint64_t> composite_busy{0};         // all compositor allocators in flight
+    std::atomic<uint64_t> composite_unavailable{0};  // compositor not set up (see its log line)
+};
+SharedStats g_shared;
+
 // ---------------------------------------------------------------------------------------------
 // GPU readback ring
 
-using ExecuteCommandListsFn = void(STDMETHODCALLTYPE*)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
+using horus::capture::ExecuteCommandListsFn;
 ExecuteCommandListsFn g_execute_command_lists = nullptr;  // original (unhooked) entry point
 
 template <typename T>
@@ -295,6 +292,12 @@ public:
     }
 
 private:
+    // Shared view captures every Present and the GPU runs a few frames behind, so it needs more
+    // slots than the throttled drone view, which keeps using the first three. Slots are created on
+    // first use, so drone view allocates no more than it always did.
+    static constexpr int kSlots = 8;
+    static constexpr int kDroneViewSlots = 3;
+
     struct Slot {
         ID3D12CommandAllocator* allocator = nullptr;
         ID3D12GraphicsCommandList* list = nullptr;
@@ -303,6 +306,8 @@ private:
         bool busy = false;
         uint64_t present_index = 0;
         uint64_t capture_ns = 0;
+        double present_s = 0.0;  // seconds_now() at the Present (shared view's publish throttle)
+        bool shared = false;     // captured in shared view: classify by marker before converting
         horus::CameraStamp camera;
     };
 
@@ -329,36 +334,45 @@ private:
         UINT64 row_bytes = 0;
         UINT64 total = 0;
         device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint_, &rows, &row_bytes, &total);
+        buffer_bytes_ = total;
+        if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)))) {
+            log("CreateFence failed");
+            return false;
+        }
+        log("capturing %llux%u format %d at up to %.1f Hz", static_cast<unsigned long long>(width_), height_,
+            static_cast<int>(format_), g_config.max_hz);
+        ready_ = true;
+        return true;
+    }
 
+    bool ensure_slot(Slot& slot) {
+        if (slot.buffer) return true;
         D3D12_HEAP_PROPERTIES heap{};
         heap.Type = D3D12_HEAP_TYPE_READBACK;
         D3D12_RESOURCE_DESC buffer_desc{};
         buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        buffer_desc.Width = total;
+        buffer_desc.Width = buffer_bytes_;
         buffer_desc.Height = 1;
         buffer_desc.DepthOrArraySize = 1;
         buffer_desc.MipLevels = 1;
         buffer_desc.SampleDesc.Count = 1;
         buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)))) {
-            log("CreateFence failed");
+        if (FAILED(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.allocator))) ||
+            FAILED(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, slot.allocator, nullptr,
+                                              IID_PPV_ARGS(&slot.list))) ||
+            FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                                                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                    IID_PPV_ARGS(&slot.buffer)))) {
+            if (!warned_slot_) {
+                log("creating readback slot failed");
+                warned_slot_ = true;
+            }
+            release(slot.list);
+            release(slot.allocator);
+            release(slot.buffer);
             return false;
         }
-        for (Slot& slot : slots_) {
-            if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.allocator))) ||
-                FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, slot.allocator, nullptr,
-                                                 IID_PPV_ARGS(&slot.list))) ||
-                FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
-                                                       D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                       IID_PPV_ARGS(&slot.buffer)))) {
-                log("creating readback slot failed");
-                return false;
-            }
-            slot.list->Close();
-        }
-        log("capturing %llux%u format %d at up to %.1f Hz", static_cast<unsigned long long>(width_), height_,
-            static_cast<int>(format_), g_config.max_hz);
-        ready_ = true;
+        slot.list->Close();
         return true;
     }
 
@@ -375,18 +389,24 @@ private:
     }
 
     void submit(ID3D12CommandQueue* queue, ID3D12Resource* back_buffer, const D3D12_RESOURCE_DESC&) {
+        const bool shared = g_camera_now.view_mode == horus::kViewModeShared;
+        const int usable = shared ? kSlots : kDroneViewSlots;
         int index = -1;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            for (int i = 0; i < static_cast<int>(slots_.size()); ++i) {
+            for (int i = 0; i < usable; ++i) {
                 if (!slots_[i].busy) {
                     index = i;
                     break;
                 }
             }
         }
-        if (index < 0) return;  // GPU or converter behind: drop this frame
+        if (index < 0) {  // GPU or converter behind: drop this frame
+            if (shared) g_shared.captures_dropped.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
         Slot& slot = slots_[index];
+        if (!ensure_slot(slot)) return;
         if (FAILED(slot.allocator->Reset()) || FAILED(slot.list->Reset(slot.allocator, nullptr))) return;
 
         D3D12_RESOURCE_BARRIER barrier{};
@@ -415,21 +435,27 @@ private:
         g_execute_command_lists(queue, 1, lists);
         const uint64_t value = ++fence_counter_;
         if (FAILED(queue->Signal(fence_, value))) return;
+        if (shared) g_shared.captures.fetch_add(1, std::memory_order_relaxed);
 
         std::lock_guard<std::mutex> lock(mutex_);
         slot.fence_value = value;
         slot.present_index = g_present_index.load(std::memory_order_relaxed);
         slot.capture_ns = unix_time_ns();
+        slot.present_s = seconds_now();
+        slot.shared = shared;
         slot.camera = g_camera_now;
         slot.busy = true;
         pending_.push_back(index);
         work_.notify_one();
     }
 
-    // Worker thread: wait for each copy, convert it, publish it as the latest frame.
+    // Worker thread: wait for each copy, convert it, publish it as the latest frame. Shared-view
+    // copies are classified by their marker first: player frames are dropped unconverted, drone
+    // frames published at most max_hz times per second.
     void run() {
         HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         std::vector<uint8_t> pixels;
+        horus::capture::PublishThrottle throttle(g_config.max_hz);
         for (;;) {
             int index;
             {
@@ -446,27 +472,40 @@ private:
             }
             const uint32_t width = static_cast<uint32_t>(width_);
             const uint32_t height = height_;
-            pixels.resize(static_cast<size_t>(width) * height * 3);
+            const uint32_t row_pitch = footprint_.Footprint.RowPitch;
             void* mapped = nullptr;
-            D3D12_RANGE read_range{0, static_cast<SIZE_T>(footprint_.Footprint.RowPitch) * height};
+            D3D12_RANGE read_range{0, static_cast<SIZE_T>(row_pitch) * height};
             if (SUCCEEDED(slot.buffer->Map(0, &read_range, &mapped))) {
-                convert_to_bgr(format_, static_cast<const uint8_t*>(mapped) + footprint_.Offset,
-                               footprint_.Footprint.RowPitch, width, height, pixels.data());
+                const uint8_t* data = static_cast<const uint8_t*>(mapped) + footprint_.Offset;
+                bool publish = true;
+                if (slot.shared) {
+                    const bool drone = horus::capture::frame_is_drone(format_, data, row_pitch, width, height);
+                    (drone ? g_shared.drone : g_shared.player).fetch_add(1, std::memory_order_relaxed);
+                    publish = drone && throttle.admit(slot.present_s);
+                }
+                if (publish) {
+                    pixels.resize(static_cast<size_t>(width) * height * 3);
+                    convert_to_bgr(format_, data, row_pitch, width, height, pixels.data());
+                }
                 D3D12_RANGE written{0, 0};
                 slot.buffer->Unmap(0, &written);
-                std::lock_guard<std::mutex> lock(g_latest.mutex);
-                g_latest.pixels.swap(pixels);
-                g_latest.header.present_index = slot.present_index;
-                g_latest.header.capture_unix_ns = slot.capture_ns;
-                g_latest.header.width = width;
-                g_latest.header.height = height;
-                g_latest.header.payload_bytes = width * height * 3;
-                g_latest.header.camera_active = slot.camera.active;
-                g_latest.header.script_age_presents = slot.camera.script_age;
-                g_latest.header.pose_seq = slot.camera.pose_seq;
-                g_latest.header.game_frame = slot.camera.game_frame;
-                ++g_latest.sequence;
-                g_latest.updated.notify_all();
+                if (publish) {
+                    if (slot.shared) g_shared.published.fetch_add(1, std::memory_order_relaxed);
+                    std::lock_guard<std::mutex> lock(g_latest.mutex);
+                    g_latest.pixels.swap(pixels);
+                    g_latest.header.present_index = slot.present_index;
+                    g_latest.header.capture_unix_ns = slot.capture_ns;
+                    g_latest.header.width = width;
+                    g_latest.header.height = height;
+                    g_latest.header.payload_bytes = width * height * 3;
+                    // A shared-view frame that passed the marker test shows the drone camera.
+                    g_latest.header.camera_active = slot.shared ? 1u : slot.camera.active;
+                    g_latest.header.script_age_presents = slot.camera.script_age;
+                    g_latest.header.pose_seq = slot.camera.pose_seq;
+                    g_latest.header.game_frame = slot.camera.game_frame;
+                    ++g_latest.sequence;
+                    g_latest.updated.notify_all();
+                }
             }
             std::lock_guard<std::mutex> lock(mutex_);
             pending_.pop_front();
@@ -479,19 +518,30 @@ private:
     std::condition_variable work_;
     std::condition_variable idle_;
     std::deque<int> pending_;
-    std::array<Slot, 3> slots_{};
+    std::array<Slot, kSlots> slots_{};
     ID3D12Device* device_ = nullptr;
     ID3D12Fence* fence_ = nullptr;
     uint64_t fence_counter_ = 0;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint_{};
+    UINT64 buffer_bytes_ = 0;
     UINT64 width_ = 0;
     UINT height_ = 0;
     DXGI_FORMAT format_ = DXGI_FORMAT_UNKNOWN;
     bool ready_ = false;
     bool warned_format_ = false;
+    bool warned_slot_ = false;
 };
 
 Readback g_readback;
+
+// ---------------------------------------------------------------------------------------------
+// Shared-view compositor (compositor.hpp). Never destroyed: process exit must not wait on the GPU.
+
+void STDMETHODCALLTYPE execute_original(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) {
+    g_execute_command_lists(queue, count, lists);
+}
+
+horus::capture::Compositor& g_compositor = *new horus::capture::Compositor(&execute_original);
 
 // ---------------------------------------------------------------------------------------------
 // Which queue presents which swap chain
@@ -540,6 +590,61 @@ CreateSwapChainForHwndFn g_create_swapchain_for_hwnd = nullptr;
 
 thread_local bool t_in_present = false;  // Present may forward to Present1 internally
 double g_next_capture_at = 0.0;
+bool g_shared_view = false;      // render thread: view mode of the previous Present
+double g_shared_stats_at = 0.0;  // render thread: when the shared-view counters were last logged
+
+// Shared view, after the readback copy: the compositor on the presenting queue, so the copy still
+// holds the frame as rendered (the drone image on drone frames) and the screen gets the player's.
+void composite(IDXGISwapChain3* swapchain, ID3D12CommandQueue* queue) {
+    ID3D12Resource* back_buffer = nullptr;
+    if (FAILED(swapchain->GetBuffer(swapchain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&back_buffer)))) return;
+    std::string message;
+    switch (g_compositor.composite(queue, back_buffer, message)) {
+        case horus::capture::Compositor::Result::kRecorded:
+            g_shared.composited.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case horus::capture::Compositor::Result::kBusy:
+            g_shared.composite_busy.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case horus::capture::Compositor::Result::kUnavailable:
+            g_shared.composite_unavailable.fetch_add(1, std::memory_order_relaxed);
+            break;
+    }
+    if (!message.empty()) log("%s", message.c_str());
+    back_buffer->Release();
+}
+
+void log_view_mode_change(bool shared) {
+    if (shared) {
+        log("view mode: shared (compositing drone frames off screen)");
+        g_compositor.start();
+        g_shared_stats_at = seconds_now();
+        for (std::atomic<uint64_t>* counter :
+             {&g_shared.presents, &g_shared.captures, &g_shared.captures_dropped, &g_shared.drone, &g_shared.player,
+              &g_shared.published, &g_shared.composited, &g_shared.composite_busy, &g_shared.composite_unavailable}) {
+            counter->store(0, std::memory_order_relaxed);
+        }
+    } else if (g_camera_now.script_age > horus::kMaxScriptAgePresents) {
+        log("view mode: drone (HorusGta stopped ticking; paused or gone)");
+    } else {
+        log("view mode: drone");
+    }
+}
+
+void log_shared_stats() {
+    const double now = seconds_now();
+    if (now - g_shared_stats_at < 10.0) return;
+    auto take = [](std::atomic<uint64_t>& counter) {
+        return static_cast<unsigned long long>(counter.exchange(0, std::memory_order_relaxed));
+    };
+    // Worker counters lag the Presents by the GPU latency; they add up over consecutive lines.
+    log("shared view, last %.1f s: %llu presents, %llu captured (%llu dropped, ring full), worker %llu drone / "
+        "%llu player frames, %llu published, %llu composites (%llu skipped busy, %llu skipped unavailable)",
+        now - g_shared_stats_at, take(g_shared.presents), take(g_shared.captures), take(g_shared.captures_dropped),
+        take(g_shared.drone), take(g_shared.player), take(g_shared.published), take(g_shared.composited),
+        take(g_shared.composite_busy), take(g_shared.composite_unavailable));
+    g_shared_stats_at = now;
+}
 
 void on_present(IDXGISwapChain* swapchain, UINT flags) {
     if (t_in_present || (flags & DXGI_PRESENT_TEST)) return;
@@ -549,18 +654,30 @@ void on_present(IDXGISwapChain* swapchain, UINT flags) {
         const bool read = horus::read_camera_block(g_camera_block, fields);
         g_camera_now = g_camera_tracker.observe(present_index, read ? &fields : nullptr);
     }
-    if (!g_client_connected.load(std::memory_order_relaxed)) return;
-    const double now = seconds_now();
-    if (now < g_next_capture_at) return;
-    const double period = 1.0 / g_config.max_hz;
-    g_next_capture_at = (now - g_next_capture_at < period) ? g_next_capture_at + period : now + period;
+    const bool shared = g_camera_now.view_mode == horus::kViewModeShared;
+    if (shared != g_shared_view) {
+        g_shared_view = shared;
+        log_view_mode_change(shared);
+    }
+    const bool client = g_client_connected.load(std::memory_order_relaxed);
+    if (shared) {
+        g_shared.presents.fetch_add(1, std::memory_order_relaxed);
+        log_shared_stats();
+    } else {
+        if (!client) return;
+        const double now = seconds_now();
+        if (now < g_next_capture_at) return;
+        const double period = 1.0 / g_config.max_hz;
+        g_next_capture_at = (now - g_next_capture_at < period) ? g_next_capture_at + period : now + period;
+    }
 
     IDXGISwapChain3* swapchain3 = nullptr;
     if (FAILED(swapchain->QueryInterface(IID_PPV_ARGS(&swapchain3)))) return;
     IUnknown* identity = nullptr;
     swapchain->QueryInterface(IID_PPV_ARGS(&identity));
     if (ID3D12CommandQueue* queue = queue_for(swapchain3, identity)) {
-        g_readback.capture(swapchain3, queue);
+        if (client) g_readback.capture(swapchain3, queue);  // shared view: every Present
+        if (shared) composite(swapchain3, queue);
     } else {
         static bool warned = false;
         if (!warned) {
@@ -594,6 +711,7 @@ HRESULT STDMETHODCALLTYPE hook_present1(IDXGISwapChain1* swapchain, UINT sync, U
 HRESULT STDMETHODCALLTYPE hook_resize_buffers(IDXGISwapChain* swapchain, UINT count, UINT width, UINT height,
                                               DXGI_FORMAT format, UINT flags) {
     g_readback.wait_idle();
+    g_compositor.wait_idle();
     return g_resize_buffers(swapchain, count, width, height, format, flags);
 }
 
@@ -601,6 +719,7 @@ HRESULT STDMETHODCALLTYPE hook_resize_buffers1(IDXGISwapChain3* swapchain, UINT 
                                                DXGI_FORMAT format, UINT flags, const UINT* node_masks,
                                                IUnknown* const* queues) {
     g_readback.wait_idle();
+    g_compositor.wait_idle();
     return g_resize_buffers1(swapchain, count, width, height, format, flags, node_masks, queues);
 }
 

@@ -27,12 +27,3 @@ SIM_WIND_TURB 2
 # velocity at 15 Hz, far inside GUID_TIMEOUT 3 s.
 
 # Keep the ArduCopter SITL GPS model enabled with its default non-glitched settings.
-
-# Outdoor mount starts neutral, pitched 45 degrees below level; missions may aim it over MAVLink.
-MNT1_DEFLT_MODE 1
-MNT1_NEUTRAL_X 0
-MNT1_NEUTRAL_Y -45
-MNT1_NEUTRAL_Z 0
-MNT1_RETRACT_X 0
-MNT1_RETRACT_Y -45
-MNT1_RETRACT_Z 0

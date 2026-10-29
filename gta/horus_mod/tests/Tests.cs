@@ -35,6 +35,10 @@ static class Tests
         Run(SceneConfig);
         Run(PhysicsConfig);
         Run(ShippedIni);
+        Run(ViewConfig);
+        Run(ViewScheduleParity);
+        Run(MarkerRect);
+        Run(StreamAnchorRecentre);
         Run(CameraBlockLayout);
         Run(CameraPathSegments);
         Run(CameraPathRepeats);
@@ -312,7 +316,7 @@ static class Tests
         Near(c.Origin.X, 195, "origin x default"); Near(c.Origin.Y, -933, "origin y default");
         Near(c.Origin.HeadingDeg, 0, "heading default");
         Check(!c.Origin.Z.HasValue, "z probes ground by default");
-        Check(c.Scene.Weather == "EXTRASUNNY" && c.Scene.Hour == 12 && c.Scene.FreezeTime, "scene defaults: clear midday, clock frozen");
+        Check(c.Scene.Weather == null && !c.Scene.Hour.HasValue && !c.Scene.FreezeTime, "scene defaults: the game's own weather and clock");
         Check(c.Warnings.Count == 0, "no warnings for empty file");
     }
 
@@ -348,7 +352,7 @@ static class Tests
         Check(leave.Warnings.Count == 0, "empty scene values are not warnings");
 
         var bad = ModConfig.Parse("[scene]\nweather=sunny\nhour=24\nfreeze_time=yes\n");
-        Check(bad.Scene.Weather == "EXTRASUNNY" && bad.Scene.Hour == 12 && bad.Scene.FreezeTime, "bad scene values fall back to the defaults");
+        Check(bad.Scene.Weather == null && !bad.Scene.Hour.HasValue && !bad.Scene.FreezeTime, "bad scene values fall back to the defaults");
         Check(bad.Warnings.Count == 3 && bad.Warnings[0].Contains("scene.weather 'sunny'"), "one warning per bad scene line: " + string.Join(" | ", bad.Warnings));
     }
 
@@ -376,17 +380,97 @@ static class Tests
         Check(c.Port == 5611 && !c.Origin.Z.HasValue, "shipped ini matches the defaults");
         Near(c.TimeoutS, new ModConfig().TimeoutS, "shipped timeout equals the default");
         Near(c.Origin.X, 195, "shipped origin x"); Near(c.Origin.Y, -933, "shipped origin y");
-        Check(c.Scene.Weather == "EXTRASUNNY" && c.Scene.Hour == 12 && c.Scene.FreezeTime, "shipped scene: clear midday, frozen");
+        Check(c.Scene.Weather == null && !c.Scene.Hour.HasValue && !c.Scene.FreezeTime, "shipped scene: the game's own weather and clock");
         var d = new ModConfig().Physics;
         Check(c.Physics.Bind == d.Bind && c.Physics.Port == d.Port && c.Physics.BudgetMs == d.BudgetMs && c.Physics.HfovDeg == d.HfovDeg
             && c.Physics.TraceHz == d.TraceHz, "shipped [physics] equals the defaults");
         var s = new ModConfig().Sensors;
         Check(c.Sensors.Enabled == s.Enabled && c.Sensors.Host == s.Host && c.Sensors.Port == s.Port && c.Sensors.RateHz == s.RateHz,
             "shipped [sensors] equals the defaults");
+        var v = new ModConfig().View;
+        Check(c.View.Mode == v.Mode && c.View.DroneEvery == v.DroneEvery, "shipped [view] equals the defaults (drone camera on screen)");
+    }
+
+    static void ViewConfig()
+    {
+        var d = ModConfig.Parse("");
+        Check(d.View.Mode == ViewMode.Drone && d.View.DroneEvery == 2, "view defaults: drone camera on screen, drone_every 2");
+        var c = ModConfig.Parse("[view]\nmode = Shared\ndrone_every=3 ; comment\n");
+        Check(c.View.Mode == ViewMode.Shared && c.View.DroneEvery == 3, "view parsed, mode case-insensitive");
+        Check(c.Warnings.Count == 0, "valid view section has no warnings: " + string.Join(" | ", c.Warnings));
+        Check(ModConfig.Parse("[view]\nmode=drone\ndrone_every=4\n").View.Mode == ViewMode.Drone, "mode=drone parsed");
+        Check(ModConfig.Parse("[view]\ndrone_every=4\n").View.DroneEvery == 4, "drone_every 4 accepted");
+        Check(ModConfig.Parse("[view]\ndrone_every=2\n").View.DroneEvery == 2, "drone_every 2 accepted");
+        var bad = ModConfig.Parse("[view]\nmode=both\ndrone_every=1\ndrone_every=5\ndrone_every=2.5\ndrone_every=\nmode=\n");
+        Check(bad.View.Mode == ViewMode.Drone && bad.View.DroneEvery == 2, "bad view values fall back to the defaults");
+        Check(bad.Warnings.Count == 6 && bad.Warnings[0].Contains("view.mode 'both'") && bad.Warnings[0].EndsWith("using the default")
+            && bad.Warnings[1].Contains("view.drone_every '1' is not 2..4"), "one warning per bad view line: " + string.Join(" | ", bad.Warnings));
+        var keep = ModConfig.Parse("[view]\nmode=shared\ndrone_every=3\ndrone_every=9\n");
+        Check(keep.View.Mode == ViewMode.Shared && keep.View.DroneEvery == 3 && keep.Warnings.Count == 1, "a bad line keeps the earlier valid value");
+    }
+
+    // Shared view: the first tick of an activation renders the drone camera, then one in drone_every.
+    static void ViewScheduleParity()
+    {
+        Check(SharedView.IsDroneTick(0, 2) && !SharedView.IsDroneTick(1, 2) && SharedView.IsDroneTick(2, 2), "every 2: even ticks are drone ticks");
+        Check(SharedView.IsDroneTick(3, 3) && !SharedView.IsDroneTick(4, 3) && !SharedView.IsDroneTick(5, 3) && SharedView.IsDroneTick(6, 3), "every 3");
+        foreach (int every in new[] { 2, 3, 4 })
+        {
+            var s = new ViewSchedule(every);
+            string pattern = "";
+            for (int i = 0; i < 3 * every; i++) pattern += s.Next() ? "D" : "p";
+            string one = "D" + new string('p', every - 1);
+            Check(pattern == one + one + one, $"every {every}: {pattern}");
+            Check(s.DroneTicks == 3 && s.PlayerTicks == 3 * (every - 1), $"every {every}: counts {s.DroneTicks} drone / {s.PlayerTicks} player");
+            s.Next();
+            s.Reset();
+            Check(s.DroneTicks == 0 && s.PlayerTicks == 0, $"every {every}: reset clears the counts");
+            Check(s.Next(), $"every {every}: the first tick after a reset is a drone tick");
+        }
+        foreach (int bad in new[] { 1, 5, 0 })
+        {
+            bool threw = false;
+            try { new ViewSchedule(bad); } catch (ArgumentOutOfRangeException) { threw = true; }
+            Check(threw, $"drone_every {bad} rejected");
+        }
+    }
+
+    // The marker horus_capture.asi classifies (texel (2, 2), drone iff max(R, G, B) <= 16).
+    static void MarkerRect()
+    {
+        Check(SharedView.MarkerWidth == 0.00625f && SharedView.MarkerHeight == 0.0111f, "marker size 0.00625 x 0.0111");
+        Check(SharedView.MarkerCenterX == 0.003125f && SharedView.MarkerCenterY == 0.00555f, "DRAW_RECT centre (0.003125, 0.00555)");
+        Near(SharedView.MarkerCenterX - SharedView.MarkerWidth / 2, 0, "marker left edge at x 0", 1e-9);
+        Near(SharedView.MarkerCenterY - SharedView.MarkerHeight / 2, 0, "marker top edge at y 0", 1e-9);
+        Near(SharedView.MarkerWidth * 1280, 8, "8 px wide at 1280", 1e-3);
+        Near(SharedView.MarkerHeight * 720, 8, "8 px high at 720", 0.01);
+        foreach (var (w, h) in new[] { (1280, 720), (1920, 1080), (2560, 1440), (3840, 2160) })
+        {
+            // Pixel (2, 2)'s centre (2.5, 2.5) lies inside the rectangle, so the marker's colour is there.
+            Check(2.5 < SharedView.MarkerWidth * w && 2.5 < SharedView.MarkerHeight * h, $"texel (2, 2) inside the marker at {w}x{h}");
+        }
+        Check(SharedView.DroneMarkerLevel <= 16 && SharedView.PlayerMarkerLevel > 16, "drone marker classifies as drone, player marker as player");
+        Check(SharedView.DroneMarkerLevel == 0 && SharedView.PlayerMarkerLevel == 255 && SharedView.MarkerAlpha == 255, "black / white, opaque");
+    }
+
+    // The stream volume around the drone moves with it once it is more than 30 m from its centre.
+    static void StreamAnchorRecentre()
+    {
+        var a = new StreamAnchor();
+        Check(a.Centre == null, "no centre before the first update");
+        Check(a.Update(new Point3(100, 200, 30)), "first position creates the volume");
+        Check(!a.Update(new Point3(100, 229.9, 30)), "29.9 m away: kept");
+        Check(!a.Update(new Point3(100, 230, 30)), "30 m away: kept");
+        Check(a.Centre.Value.Y == 200, "centre unchanged while kept");
+        Check(a.Update(new Point3(100, 200, 60.5)), "30.5 m up: recreated");
+        Check(a.Centre.Value.Z == 60.5, "new centre at the drone");
+        Check(!a.Update(new Point3(110, 200, 60.5)), "measured from the new centre");
+        a.Clear();
+        Check(a.Centre == null && a.Update(new Point3(110, 200, 60.5)), "after release the next update creates a volume again");
     }
 
     // The bytes horus_capture.asi reads (gta/common/camera_block.hpp): magic, version, seqlock
-    // sequence (even when not writing, +2 per tick), active, pose seq, game frame.
+    // sequence (even when not writing, +2 per tick), active, pose seq, game frame, view mode.
     static void CameraBlockLayout()
     {
         var file = MemoryMappedFile.CreateNew(null, CameraBlock.Size);
@@ -399,21 +483,34 @@ static class Tests
             return raw;
         }
         Check(block.Ticks == 0, "fresh block has no ticks");
-        block.Publish(true, 907, 5120);
-        block.Publish(true, 908, 5121);
+        block.Publish(true, 907, 5120, CameraBlock.ViewDrone);
+        block.Publish(true, 908, 5121, CameraBlock.ViewDrone);
         Check(block.Ticks == 2, "two ticks counted");
         string hex = Convert.ToHexString(Dump()).ToLowerInvariant();
         Check(hex == "4847434d" + "01000000" + "0400000000000000" + "01000000" + "00000000"
             + "8c03000000000000" + "0114000000000000" + new string('0', 48),
             "block bytes after two active ticks: " + hex);
-        block.Publish(false, 908, 5122);
+        block.Publish(false, 908, 5122, CameraBlock.ViewDrone);
         byte[] after = Dump();
         Check(BitConverter.ToUInt64(after, CameraBlock.SequenceOffset) == 6, "third tick: sequence 6 (even)");
         Check(BitConverter.ToUInt32(after, CameraBlock.ActiveOffset) == 0, "inactive tick clears active");
         Check(BitConverter.ToUInt64(after, CameraBlock.GameFrameOffset) == 5122, "game frame updated while inactive");
+
+        // Shared view: view_mode 1 at offset 40, the rest of the block (44..63) stays zero.
+        Check(CameraBlock.ViewModeOffset == 40 && CameraBlock.ViewDrone == 0 && CameraBlock.ViewShared == 1, "view_mode at offset 40: 0 drone, 1 shared");
+        block.Publish(false, 908, 5123, CameraBlock.ViewShared);
+        block.Publish(true, 909, 5124, CameraBlock.ViewShared);
+        hex = Convert.ToHexString(Dump()).ToLowerInvariant();
+        Check(hex == "4847434d" + "01000000" + "0a00000000000000" + "01000000" + "00000000"
+            + "8d03000000000000" + "0414000000000000" + "01000000" + new string('0', 40),
+            "block bytes after a shared-view drone tick: " + hex);
+        block.Publish(false, 909, 5125, CameraBlock.ViewDrone);
+        after = Dump();
+        Check(BitConverter.ToUInt32(after, CameraBlock.ViewModeOffset) == 0 && BitConverter.ToUInt64(after, CameraBlock.SequenceOffset) == 12,
+            "view_mode back to 0, written under the seqlock");
     }
 
-    // C3: the segments HorusGta shape-tests between consecutive camera positions.
+    // The segments HorusGta shape-tests between consecutive camera positions.
     static void CameraPathSegments()
     {
         var path = new CameraPath();
@@ -445,7 +542,7 @@ static class Tests
         Check(path.Intersections == 3 && path.Repeats == 4, "Reset keeps the counts");
     }
 
-    // G2: ArduPilot JSON SITL backend.
+    // ArduPilot JSON SITL backend.
     static byte[] ServoBytes(uint frame, ushort rate, ushort[] pwm, ushort magic = SitlJson.Magic16)
     {
         var b = new byte[8 + 2 * pwm.Length];
@@ -484,7 +581,7 @@ static class Tests
 
     static void GimbalFromServo()
     {
-        var g = new GimbalServo();   // common.parm: MNT1_PITCH_MIN -135, MAX 45; SERVO10 1100..1900
+        var g = new GimbalServo();   // start_gta_sitl.sh physics mode: MNT1_PITCH_MIN -135, MAX 45; SERVO10 1100..1900
         ServoFrame F(ushort pwm) { var p = Pwm(16, 1000); p[9] = pwm; return new ServoFrame { FrameRate = 400, Pwm = p }; }
         Near(g.PitchDeg(F(1500)).Value, -45, "centre = -45 deg", 1e-9);
         Near(g.PitchDeg(F(1100)).Value, -135, "servo min = pitch min");
@@ -621,7 +718,7 @@ static class Tests
         Check(r.Steps == 0 && r.BudgetHit && queue.Count == 2, "an exhausted budget answers nothing");
     }
 
-    // G3: world contact. A fake world: ground plane z = 0 and a wall plane x = 10 facing -X.
+    // World contact. A fake world: ground plane z = 0 and a wall plane x = 10 facing -X.
     static Contact? FakeRay(Vec3 a, Vec3 b, System.Collections.Generic.List<(Vec3, Vec3)> log)
     {
         log?.Add((a, b));
@@ -725,7 +822,7 @@ static class Tests
         var ned = new NedFrame { Origin = new Vec3(195, -933, groundZ + frame.RadiusM + 0.001), HeadingDeg = 30 };
         var link = new PhysicsLink(body, ned, new GimbalServo(), ned.Origin, ned.GtaHeadingRad(0));
 
-        // Resting: G2 put the camera at ArduPilot's down 0 above the ground origin, i.e. in the ground (white frame).
+        // Resting: the camera at ArduPilot's down 0 above the ground origin would be in the ground (white frame).
         var cam = PoseMapping.Map(link.CameraPose(groundZ, 84), origin, groundZ, 1920, 1080);
         Near(cam.Z, groundZ + frame.RadiusM + 0.001 + frame.CameraMountM.Z, "resting camera at the mount, above the ground", 1e-6);
         var mount = body.ToWorld(frame.CameraMountM);

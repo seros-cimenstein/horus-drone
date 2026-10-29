@@ -31,7 +31,7 @@ ARTERIAL_SETBACK_M = 11.8
 MAP_EDGE_MARGIN_M = 12.0
 CROSSWALK_HALF_LENGTH_M = 1.8                      # half width of one zebra patch along the road
 CROSSWALK_ARM_M = 2.4                              # junction extent -> zebra centre
-SHELTER_LENGTH_M = 8.0                             # follow occluder (shelter) length along the lane
+SHELTER_LENGTH_M = 8.0                             # bus shelter length along the road
 
 
 def _setback(coordinate: float, arterials: tuple[float, ...]) -> float:

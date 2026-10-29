@@ -146,6 +146,15 @@ def event_log_path_from_environment() -> Path:
     return Path(selected_run_dir).expanduser() / "events.jsonl"
 
 
+def event_log_from_environment() -> JsonlEventLog | None:
+    """The shared event log from :func:`event_log_path_from_environment`, or None when unset."""
+    try:
+        path = event_log_path_from_environment()
+    except RuntimeError:
+        return None
+    return JsonlEventLog(path)
+
+
 class JsonlEventLog:
     """Append sanitized JSON events to a JSONL file, one complete record per line."""
 

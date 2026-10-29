@@ -1,4 +1,4 @@
-"""Camera frame, candidate and recognition MCP tools."""
+"""Camera frame, candidate, pointing and detection-mode MCP tools."""
 
 from __future__ import annotations
 
@@ -43,6 +43,13 @@ def _frame_tool_content(ctx: ToolContext, frame: Any) -> list[Any]:
     ]
 
 
+def _require_frame(ctx: ToolContext, frame_id: int | None = None) -> Any:
+    frame = ctx.require_perception().get_frame(frame_id)
+    if frame is None:
+        raise RuntimeError("perception unavailable: waiting for the first camera frame")
+    return frame
+
+
 def get_frame(ctx: ToolContext, frame_id: int | None = None) -> list[Any]:
     """Return a ≤640px set-of-mark JPEG and its current tracker candidate table.
 
@@ -52,10 +59,41 @@ def get_frame(ctx: ToolContext, frame_id: int | None = None) -> list[Any]:
     point(frame_id, description|box), which seeds a new tracker ID when needed.
     Candidate source identifies detector, open-vocabulary, or point-created tracks.
     """
-    frame = ctx.require_perception().get_frame(frame_id)
-    if frame is None:
-        raise RuntimeError("perception unavailable: waiting for the first camera frame")
-    return _frame_tool_content(ctx, frame)
+    return _frame_tool_content(ctx, _require_frame(ctx, frame_id))
+
+
+def get_raw_frame(ctx: ToolContext, frame_id: int | None = None) -> list[Any]:
+    """Return the camera frame as a JPEG at source resolution with nothing drawn on it.
+
+    No boxes, tracker IDs, labels or downscaling: use it to inspect what the marks or
+    get_frame's 640 px reduction hide. ``frame_id`` selects a retained frame as for
+    get_frame. Its pixels are source-image pixels, the geometry point(frame_id, box)
+    takes. It names no targets: tracker IDs come only from get_frame/list_candidates.
+    """
+    from mcp.server.fastmcp.utilities.types import Image
+    from mcp.types import TextContent
+
+    from horus.perception import Frame
+    from horus.perception.render import render_raw_jpeg
+
+    frame = _require_frame(ctx, frame_id)
+    if not isinstance(frame, Frame):
+        raise RuntimeError("perception returned a frame in an unsupported format")
+    image_jpeg = render_raw_jpeg(frame)
+    height, width = (int(size) for size in frame.image.shape[:2])
+    timestamp, age = observation_age(frame)
+    result = {
+        "frame_id": frame.frame_id,
+        "timestamp": timestamp or str(frame.timestamp),
+        "pose": plain(frame.pose),
+        "observation_age_s": age,
+        "width": width,
+        "height": height,
+    }
+    return [
+        Image(data=image_jpeg, format="jpeg"),
+        TextContent(type="text", text=to_json(result)),
+    ]
 
 
 def list_candidates(ctx: ToolContext) -> list[Any]:
@@ -66,10 +104,7 @@ def list_candidates(ctx: ToolContext) -> list[Any]:
     a new tracker ID when no current track matches. Candidate source identifies
     detector, open-vocabulary, or point-created tracks.
     """
-    frame = ctx.require_perception().get_frame()
-    if frame is None:
-        raise RuntimeError("perception unavailable: waiting for the first camera frame")
-    return _frame_tool_content(ctx, frame)
+    return _frame_tool_content(ctx, _require_frame(ctx))
 
 
 def point(
@@ -115,46 +150,20 @@ def point(
 def set_vocabulary(ctx: ToolContext, terms: list[str]) -> str:
     """Continuously detect up to sixteen free-text object terms in incoming frames.
 
-    A match becomes an ``open_vocab`` candidate named after its term and raises an
-    ``object_detected`` event. A weak match (grounder score below 0.40) is listed with
-    ``class_name`` ``object`` and its matched text in ``attributes.grounder_span``, without an
-    event, until a later frame scores it high enough to take the term.
+    A match becomes an ``open_vocab`` candidate named after its term, with its matched text in
+    ``attributes.grounder_span``, and raises an ``object_detected`` event.
     """
     return to_json(ctx.require_perception().set_vocabulary(terms))
 
 
-def set_target_profile(ctx: ToolContext, profile: dict[str, Any]) -> str:
-    """Set bounded recognition references; profile labels are untrusted input.
-
-    ``profile`` keys (any other key is rejected):
-      - ``class_name`` / ``class_id``: detector class a candidate must have to match
-        (a class-only profile scores a matching candidate 1.0);
-      - ``target_class``: trained-head label that is the target (classifier mode);
-      - ``reference_embeddings``: one appearance vector or a list of them;
-      - ``training_embeddings``: list of ``{"embedding": [...], "label": str}`` examples;
-      - ``reference_images``: list of base64 (or data-URI) images, or of
-        ``{"image": base64, "bbox": [x1, y1, x2, y2], "label": str}`` (bbox defaults to the
-        whole image);
-      - ``labels``: labels for bare entries, aligned with ``training_embeddings`` followed by
-        ``reference_images``.
-    Labeled examples (at least two per label, two labels) train a tiny head and select
-    classifier mode; every example also becomes an appearance reference.
-    """
-    return to_json(ctx.require_perception().set_target_profile(profile))
-
-
 def set_mode(ctx: ToolContext, name: str) -> str:
-    """Select a perception/recognition mode, not an autopilot flight mode.
-
-    ``active``/``paused`` run or pause detection. ``embedding`` scores the target profile by
-    appearance similarity to its reference embeddings; ``classifier`` scores it with the tiny
-    head trained from labeled examples (set_target_profile selects it whenever it trains one).
-    """
+    """Run (``active``) or pause (``paused``) camera detection; not an autopilot flight mode."""
     return to_json(ctx.require_perception().set_mode(name))
 
 
 def register(mcp: Any, ctx: ToolContext) -> None:
     ctx.tool(get_frame, structured_output=False)
+    ctx.tool(get_raw_frame, structured_output=False)
     ctx.tool(list_candidates, structured_output=False)
-    for function in (point, set_vocabulary, set_target_profile, set_mode):
+    for function in (point, set_vocabulary, set_mode):
         ctx.tool(function)

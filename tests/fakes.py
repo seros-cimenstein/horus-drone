@@ -8,8 +8,9 @@ import threading
 import time
 from typing import Any
 
-from horus.config import ExecutorSettings
+from horus.config import ExecutorSettings, GimbalSettings
 from horus.flight import Pose
+from horus.gimbal import GimbalAttitude
 from horus.perception.types import Detection, Frame, FrameObservation
 
 
@@ -28,7 +29,6 @@ class FakeTelemetry:
         self.mode = mode
         self.proximity: tuple[Any, ...] = ()
         self.ground_distance: Any = None
-        self.mount_status: Any = None
         self.time_boot_ms: int | None = None
         self.time_boot_updated_monotonic: float | None = None
         self.vehicle_roll_deg: float | None = None
@@ -67,9 +67,6 @@ class FakeFlight:
             ("velocity", north, east, down) if yaw_deg is None else ("velocity", north, east, down, yaw_deg)
         )
 
-    def set_gimbal_pitch_yaw(self, pitch_deg: float, yaw_deg: float = 0.0) -> None:
-        self.commands.append(("gimbal", pitch_deg, yaw_deg))
-
     def hold(self) -> None:
         self.commands.append(("hold",))
 
@@ -79,25 +76,42 @@ class FakeFlight:
     def land(self) -> None:
         self.commands.append(("land",))
 
-    def flight_commands(self) -> list[tuple]:
-        """Commands that move the vehicle or change its mode (camera aiming excluded)."""
-        return [command for command in self.commands if command[0] != "gimbal"]
+
+class FakeGimbal:
+    """Stand-in for ``horus.gimbal.Gimbal``: ``attitude_value`` is what it reports (None: nothing
+    yet), ``points`` the accepted ``point`` calls. Out-of-range requests raise like the real link."""
+
+    def __init__(self, pitch_deg: float | None = None, settings: GimbalSettings | None = None):
+        self.settings = settings or GimbalSettings(connection="fake")
+        self.attitude_value: GimbalAttitude | None = None
+        if pitch_deg is not None:
+            self.report(pitch_deg)
+        self.points: list[tuple[float, float]] = []
+
+    def report(self, pitch_deg: float, roll_deg: float = 0.0, yaw_deg: float = 0.0) -> None:
+        """Report a fresh measured attitude."""
+        self.attitude_value = GimbalAttitude(pitch_deg, roll_deg, yaw_deg, "", time.monotonic())
+
+    def attitude(self) -> GimbalAttitude | None:
+        return self.attitude_value
+
+    def point(self, pitch_deg: float, yaw_deg: float = 0.0) -> None:
+        if not self.settings.pitch_min_deg <= pitch_deg <= self.settings.pitch_max_deg:
+            raise ValueError(f"gimbal pitch {pitch_deg} out of range")
+        self.points.append((pitch_deg, yaw_deg))
+
+    def close(self) -> None:
+        pass
 
 
 def executor_settings(**overrides: Any) -> ExecutorSettings:
-    """Small indoor envelope with fast TTLs, shared by executor-level tests."""
+    """Small, fast executor settings with short TTLs, shared by executor-level tests."""
     values: dict[str, Any] = {
         "control_hz": 15.0,
         "command_ttl_s": 1.0,
-        "max_speed_m_s": 1.0,
-        "max_vertical_speed_m_s": 0.5,
-        "max_distance_m": 5.0,
-        "min_altitude_m": 0.5,
-        "max_altitude_m": 4.0,
-        "geofence_radius_m": 3.0,
+        "speed_m_s": 1.0,
+        "vertical_speed_m_s": 0.5,
         "arrival_tolerance_m": 0.25,
-        "follow_distance_m": 2.0,
-        "target_width_m": None,
     }
     values.update(overrides)
     return ExecutorSettings(**values)
@@ -160,22 +174,7 @@ def call_tool(mcp: Any, name: str, arguments: dict | None = None, *, convert_res
 
 
 class PerceptionStub:
-    """Every ``PerceptionPort`` method with a neutral answer; executor fakes override what they need."""
-
-    def latest_observation(self) -> Any | None:
-        return None
-
-    def get_candidate(self, candidate_id: int) -> dict[str, Any] | None:
-        return None
-
-    def validate_candidate(self, candidate_id: int) -> dict[str, Any] | None:
-        return None
-
-    def validate_candidate_failure(self, candidate_id: int) -> str | None:
-        return None
-
-    def reidentify_candidate(self, candidate_id: int) -> dict[str, Any] | None:
-        return None
+    """The ``PerceptionPort`` with a neutral answer; executor fakes override what they need."""
 
     def get_frame(self, frame_id: int | None = None) -> Any | None:
         return None

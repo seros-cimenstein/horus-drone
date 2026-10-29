@@ -26,6 +26,7 @@ TOKEN = "repl-test-token"
     [
         ("/hold", "hold"), ("/rth", "rth"), ("/LAND", "land"), ("hold", "hold"), ("rth", "rth"),
         ("land", "land"), ("stop now", "hold"), ("STOP!", "hold"), ("Return home", "rth"),
+        ("/home", "rth"), ("/HOME", "rth"), ("home", "rth"), ("go home!", "rth"), ("Go home now", "rth"),
     ],
 )
 def test_slash_and_short_imperative_emergencies_route_to_emergency_tools(line, tool):
@@ -40,315 +41,10 @@ def test_sentences_starting_with_an_emergency_word_go_to_the_commander(line):
     assert _interactive_arguments(line) is None
 
 
-def _row(candidate_id, label, shirt=None, quoted=True):
-    """A candidate-table row as list_candidates returns it over MCP (label quoted, untrusted)."""
-    row = {"id": candidate_id, "bbox": [0, 0, 30, 60], "attributes": {} if shirt is None else {"shirt_colour": shirt}}
-    if quoted:
-        row["untrusted_detector_labels"] = [json.dumps(label)]
-    else:
-        row["class_name"] = label
-    return row
-
-
-def _selection_row(candidate_id, *, box, confidence, shirt="red"):
-    return {
-        "id": candidate_id,
-        "bbox": box,
-        "attributes": {"shirt_colour": shirt},
-        "confidence": confidence,
-    }
-
-
-def test_find_candidate_takes_the_exact_attribute_then_the_largest_box_then_the_lowest_id():
-    from horus.repl.missions import _find_candidate
-
-    rows = [
-        _selection_row(2, box=[0, 0, 20, 20], confidence=0.9),
-        _selection_row(9, box=[0, 0, 30, 30], confidence=0.9),
-        _selection_row(4, box=[0, 0, 30, 30], confidence=0.9),
-        _selection_row(1, box=[0, 0, 90, 90], confidence=0.9, shirt="green"),
-    ]
-    rule = {"attribute": "shirt_colour", "choose": "largest"}
-
-    assert _find_candidate(rows, equals="red", **rule)["id"] == 4
-    assert _find_candidate(rows, equals="blue", **rule) is None
-    # Rows without a confidence value (synthetic/partial tables) are not gated by the floor.
-    unscored = {"id": 5, "attributes": {"shirt_colour": "red"}, "bbox": [0, 0, 10, 10]}
-    assert _find_candidate([unscored], equals="red", **rule)["id"] == 5
-
-
-def test_select_candidate_rejects_a_low_confidence_largest_match():
-    from horus.repl.missions import _select_candidate
-
-    rows = [_selection_row(4, box=[0, 0, 90, 90], confidence=0.27)]
-
-    with pytest.raises(RuntimeError, match="confidence"):
-        _select_candidate(rows, attribute="shirt_colour", equals="red", choose="largest")
-
-
-def test_select_candidate_skips_a_low_confidence_match_for_a_confident_smaller_one():
-    from horus.repl.missions import _select_candidate
-
-    rows = [
-        _selection_row(4, box=[0, 0, 90, 90], confidence=0.27),
-        _selection_row(5, box=[0, 0, 30, 60], confidence=0.83),
-    ]
-
-    assert _select_candidate(rows, attribute="shirt_colour", equals="red", choose="largest")["id"] == 5
-
-
-def test_select_candidate_mission_step_honours_the_confidence_floor(tmp_path):
-    import asyncio
-    import io
-    from contextlib import redirect_stdout
-    from unittest.mock import patch
-
-    from horus.repl.missions import run_mission
-
-    mission = tmp_path / "select-candidate.yaml"
-    mission.write_text(
-        "steps:\n"
-        "  - select_candidate:\n"
-        "      attribute: shirt_colour\n"
-        "      equals: red\n"
-        "      choose: largest\n"
-        "      store_as: target\n"
-        "      min_confidence: 0.9\n",
-        encoding="utf-8",
-    )
-    table = [_selection_row(4, box=[0, 0, 90, 90], confidence=0.83)]
-
-    async def tool_call(_session, name, arguments=None):
-        assert name == "list_candidates"
-        return {"candidate_table": table}
-
-    with patch("horus.repl.missions.call_json", side_effect=tool_call), redirect_stdout(io.StringIO()):
-        with pytest.raises(RuntimeError, match=r"0\.9"):
-            asyncio.run(run_mission(session=object(), path=mission))
-
-
-def _run_resolution_mission(tmp_path, tables, *, extra="", settle_s=1.0, timeout_s=3.0, age_s=0.1, rpc_s=0.0, repeat_frame=False):
-    """Run resolve_candidate → follow against scripted tables (fake clock; 0.25 s poll period).
-
-    Each list_candidates call returns the next table (the last one repeats) as a new frame of
-    observation age ``age_s``; ``rpc_s`` is the simulated round-trip time of each call.
-    """
-    import asyncio
-    import io
-    from contextlib import redirect_stdout
-    from unittest.mock import patch
-
-    from horus.repl.missions import run_mission
-
-    mission = tmp_path / "resolve.yaml"
-    mission.write_text(
-        "steps:\n"
-        "  - resolve_candidate:\n"
-        "      class_name: Person\n"
-        f"{extra}"
-        "      store_as: target\n"
-        f"      timeout_s: {timeout_s}\n"
-        f"      settle_s: {settle_s}\n"
-        "  - tool: follow\n"
-        "    arguments: {id: $target.id, ttl_s: 2.0}\n"
-        "    wait: false\n",
-        encoding="utf-8",
-    )
-    clock = [100.0]
-    remaining = list(tables)
-    calls = []
-
-    async def tool_call(_session, name, arguments=None):
-        calls.append((name, arguments))
-        if name == "list_candidates":
-            clock[0] += rpc_s
-            frame_id = 1 if repeat_frame else sum(1 for called, _ in calls if called == "list_candidates")
-            pose = {"time_boot_ms": 50_000 + 250 * frame_id, "time_boot_age_s": 0.1}
-            table = remaining.pop(0) if len(remaining) > 1 else remaining[0]
-            return {"frame_id": frame_id, "observation_age_s": age_s, "pose": pose, "candidate_table": table}
-        return {"task_id": "follow-1"}
-
-    async def sleep(seconds):
-        clock[0] += seconds
-
-    out = io.StringIO()
-    with patch("horus.repl.missions.call_json", side_effect=tool_call), patch("horus.repl.missions.asyncio.sleep", sleep), \
-            patch("horus.repl.missions.time.monotonic", lambda: clock[0]), redirect_stdout(out):
-        asyncio.run(run_mission(session=object(), path=mission))
-    line = next(line for line in out.getvalue().splitlines() if "resolve_candidate:" in line)
-    return json.loads(line.split("resolve_candidate: ", 1)[1]), calls
-
-
-def test_resolve_candidate_follows_the_single_public_cue_match(tmp_path):
-    outcome, calls = _run_resolution_mission(
-        tmp_path,
-        [[], [_row(4, "person", "red"), _row(5, "car")], [_row(4, "person", "red"), _row(6, "person", "blue")]],
-        extra="      attribute: shirt_colour\n      equals: red\n",
-    )
-    assert outcome["outcome"] == "resolved" and outcome["candidate"]["id"] == 4
-    # The decision frame is recorded with its autopilot clock for offline scoring.
-    observation = outcome["observation"]
-    assert observation["frame_time_boot_ms"] == 50_000 + 250 * observation["frame_id"]
-    assert observation["matches"] == [{"id": 4, "bbox": [0, 0, 30, 60]}]
-    assert calls[-1] == ("follow", {"id": 4, "ttl_s": 2.0})
-
-
-def test_resolve_candidate_abstains_when_two_targets_match_during_the_settle_window(tmp_path):
-    # The second matching person is visible only briefly; picking the "largest" would hide that.
-    outcome, calls = _run_resolution_mission(
-        tmp_path,
-        [[_row(4, "person", quoted=False)], [_row(4, "person"), _row(9, "person")], [_row(4, "person")]],
-    )
-    assert (outcome["outcome"], outcome["reason"], outcome["candidate_ids"]) == ("abstain", "ambiguous", [4, 9])
-    assert outcome["observation"]["frame_id"] == 2  # the frame that showed both
-    assert [m["id"] for m in outcome["observation"]["matches"]] == [4, 9]
-    assert "follow" not in [name for name, _ in calls]
-
-
-def test_resolve_candidate_abstains_without_a_match_before_the_timeout(tmp_path):
-    outcome, calls = _run_resolution_mission(tmp_path, [[_row(5, "car")]])
-    assert (outcome["outcome"], outcome["reason"]) == ("abstain", "no_match")
-    assert [name for name, _ in calls] == ["list_candidates"] * 12  # 0, 0.25 … 2.75 s; none at 3.0
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "reason"),
-    [
-        ({"age_s": 2.0}, "no_fresh_observation"),  # stalled camera: old frames never count
-        ({"repeat_frame": True}, "unstable"),  # the same frame re-served is one sighting, not two
-    ],
-)
-def test_resolve_candidate_needs_fresh_new_frames(tmp_path, kwargs, reason):
-    outcome, calls = _run_resolution_mission(tmp_path, [[_row(4, "person")]], **kwargs)
-    assert (outcome["outcome"], outcome["reason"]) == ("abstain", reason)
-    assert "follow" not in [name for name, _ in calls]
-
-
-def test_resolve_candidate_rejects_an_id_seen_only_in_the_decision_frame(tmp_path):
-    # ID 4 is replaced by ID 7 on the last frame of the settle window: 7 is not yet stable.
-    outcome, _ = _run_resolution_mission(tmp_path, [[_row(4, "person")]] * 3 + [[_row(7, "person")]])
-    assert (outcome["outcome"], outcome["reason"], outcome["candidate_ids"]) == ("abstain", "unstable", [4, 7])
-
-
-def test_resolve_candidate_ignores_a_first_match_returned_after_the_deadline(tmp_path):
-    # Slow round trips: the call made before the deadline returns the first match after it.
-    outcome, calls = _run_resolution_mission(tmp_path, [[], [], [_row(4, "person")]], timeout_s=1.0, rpc_s=0.45)
-    assert (outcome["outcome"], outcome["reason"]) == ("abstain", "no_match")
-    assert "follow" not in [name for name, _ in calls]
-
-
-def _run_with_finally(tmp_path, *, table, take_off_status="succeeded"):
-    """Mission: take_off, resolve a person, approach; finally rth + land; result JSON under runs/."""
-    import asyncio
-    import io
-    from contextlib import redirect_stdout
-    from unittest.mock import patch
-
-    from horus.repl.missions import run_mission
-
-    missions = tmp_path / "missions"
-    missions.mkdir()
-    mission = missions / "find.yaml"
-    mission.write_text(
-        "name: find\n"
-        "result_dir: ../runs\n"
-        "steps:\n"
-        "  - tool: take_off\n"
-        "    arguments: {altitude_m: 10}\n"
-        "  - resolve_candidate: {class_name: person, store_as: target, timeout_s: 1.0, settle_s: 0.5}\n"
-        "  - tool: approach\n"
-        "    arguments: {id: $target.id, dist_m: 14}\n"
-        "finally:\n"
-        "  - tool: rth\n"
-        "  - tool: land\n",
-        encoding="utf-8",
-    )
-    clock = [100.0]
-    calls = []
-
-    async def tool_call(_session, name, arguments=None):
-        calls.append(name)
-        if name == "list_candidates":
-            frame = sum(1 for called in calls if called == "list_candidates")
-            return {"frame_id": frame, "observation_age_s": 0.1, "pose": {}, "candidate_table": table}
-        if name == "wait_for_task":
-            status = take_off_status if arguments["task_id"] == "take_off-1" else "succeeded"
-            return {"task_id": arguments["task_id"], "status": status, "error": None if status == "succeeded" else "boom"}
-        if name in ("take_off", "approach"):
-            return {"task_id": f"{name}-1"}
-        return {"state": name}
-
-    async def sleep(seconds):
-        clock[0] += seconds
-
-    error = None
-    with patch("horus.repl.missions.call_json", side_effect=tool_call), patch("horus.repl.missions.asyncio.sleep", sleep), \
-            patch("horus.repl.missions.time.monotonic", lambda: clock[0]), redirect_stdout(io.StringIO()):
-        try:
-            asyncio.run(run_mission(session=object(), path=mission))
-        except RuntimeError as exc:
-            error = exc
-    results = sorted((tmp_path / "runs").glob("find-run-001-*-result.json"))
-    assert len(results) == 1
-    return json.loads(results[0].read_text(encoding="utf-8")), [name for name in calls if name != "list_candidates"], error
-
-
-def test_mission_finally_lands_after_an_abstain_and_the_result_names_the_reason(tmp_path):
-    result, calls, error = _run_with_finally(tmp_path, table=[_row(5, "car")])
-    assert error is None
-    assert result["outcome"] == "abstained"
-    resolve = next(step for step in result["steps"] if step["kind"] == "resolve_candidate")
-    assert (resolve["result"]["outcome"], resolve["result"]["reason"]) == ("abstain", "no_match")
-    # The approach is skipped, but the vehicle still goes home and lands.
-    assert calls == ["take_off", "wait_for_task", "rth", "land"]
-    assert [step["result"]["tool"] for step in result["steps"][-2:]] == ["rth", "land"]
-
-
-def test_mission_result_names_the_resolved_candidate(tmp_path):
-    result, calls, error = _run_with_finally(tmp_path, table=[_row(4, "person")])
-    assert error is None and result["outcome"] == "completed"
-    assert result["variables"]["target"]["id"] == 4
-    approach = next(step for step in result["steps"] if step["kind"] == "tool" and step["result"]["tool"] == "approach")
-    assert approach["result"]["arguments"] == {"id": 4, "dist_m": 14}
-    assert calls[-2:] == ["rth", "land"]
-
-
-def test_mission_finally_lands_after_a_failed_step_and_the_failure_is_recorded(tmp_path):
-    result, calls, error = _run_with_finally(tmp_path, table=[_row(4, "person")], take_off_status="failed")
-    assert error is not None and "ended failed" in str(error)
-    assert result["outcome"] == "failed" and "ended failed" in result["error"]
-    assert result["steps"][0]["result"]["terminal"]["status"] == "failed" and "error" in result["steps"][0]
-    assert calls == ["take_off", "wait_for_task", "rth", "land"]
-
-
-def test_resolve_candidate_bounds_a_hanging_list_candidates_call():
-    import asyncio
-    from unittest.mock import patch
-
-    from horus.repl.missions import _resolution_spec, _resolve_candidate
-
-    async def hang(*_args, **_kwargs):
-        await asyncio.Event().wait()
-
-    resolution = _resolution_spec({"class_name": "person", "store_as": "t", "timeout_s": 0.3, "settle_s": 0.2})
-    started = time.monotonic()
-    with patch("horus.repl.missions.call_json", side_effect=hang):
-        outcome = asyncio.run(_resolve_candidate(object(), resolution))
-    assert outcome["reason"] == "no_fresh_observation"
-    assert time.monotonic() - started < 1.0
-
-
-@pytest.mark.parametrize(
-    "spec",
-    [{"store_as": "t"}, {"class_name": "person", "store_as": "t", "attribute": "shirt_colour"},
-     {"class_name": "person", "store_as": "t", "choose": "largest"}, {"class_name": "person", "store_as": "t", "timeout_s": 0},
-     {"class_name": "person", "store_as": "t", "settle_s": 0}],
-)
-def test_resolve_candidate_rejects_malformed_specs(spec):
-    from horus.repl.missions import _resolution_spec
-
-    with pytest.raises(ValueError):
-        _resolution_spec(spec)
+@pytest.mark.parametrize("line", ["/follow 3", "/approach 2 1.5", "/orbit 4 2"])
+def test_removed_target_skill_commands_are_not_mcp_calls(line):
+    # approach/follow/orbit are gone; like any unknown slash line they are not turned into a tool call.
+    assert _interactive_arguments(line) is None
 
 
 # A Claude Code stand-in: operator turns never finish on their own (like a long model turn);
@@ -411,6 +107,7 @@ def test_repl_slash_hold_interrupts_a_running_commander_turn_while_input_stays_l
         "PYTHONDONTWRITEBYTECODE": "1",
         "HORUS_MCP_TOKEN": TOKEN,
         "HORUS_FAKE_CLAUDE_LOG": str(claude_log),
+        "HORUS_EVENT_LOG": str(tmp_path / "events.jsonl"),
     }
     repl = subprocess.Popen(
         [sys.executable, "-m", "horus.repl.app", "--server-url", server.url, "--config", str(config)],
@@ -445,3 +142,45 @@ def test_repl_slash_hold_interrupts_a_running_commander_turn_while_input_stays_l
     assert "[operator] then follow the person in red" not in texts
     assert "[operator] /hold" not in texts
     assert texts[0] == "[operator] inspect the north wall"
+    # The emergency is logged as the operator's, through the commander path too.
+    operator = [e for e in _claude_log(tmp_path / "events.jsonl") if e.get("source") == "operator"]
+    assert [(e["kind"], e["action"], e["status"]) for e in operator] == [("emergency", "hold", "executed")]
+
+
+def test_repl_home_without_a_commander_is_logged_as_an_operator_emergency(tmp_path, serve):
+    flight = FakeFlight(Pose(0.0, 0.0, 2.0), armed=True, mode="GUIDED")
+    executor = HorusExecutor(flight, HorusConfig().executor, autostart=False)
+    server = serve(create_application(create_mcp(HorusConfig(), executor, flight, None), token=TOKEN))
+    event_log = tmp_path / "events.jsonl"
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(tmp_path),
+        "PYTHONPATH": str(ROOT),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "HORUS_MCP_TOKEN": TOKEN,
+        "HORUS_EVENT_LOG": str(event_log),
+    }
+    try:
+        repl = subprocess.run(
+            [sys.executable, "-m", "horus.repl.app", "--server-url", server.url,
+             "--config", str(ROOT / "config" / "horus.yaml")],
+            cwd=tmp_path,
+            env=env,
+            input="/home\n/quit\n",
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        executor.close()
+
+    assert repl.returncode == 0, repl.stderr
+    assert ("rth",) in flight.commands
+    # No model was started: the operator's emergency is the only record.
+    records = _claude_log(event_log)
+    assert len(records) == 1, records
+    record = records[0]
+    assert (record["kind"], record["action"], record["source"], record["status"]) == (
+        "emergency", "rth", "operator", "executed",
+    )
+    assert record["result"]["action"] == "rth"

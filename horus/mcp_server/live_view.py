@@ -1,8 +1,9 @@
 """Publish every processed perception frame, annotated, for human observers.
 
 The set-of-mark image only updates when the commander requests a frame; this view shows the
-detector, tracker IDs, shirt-colour attribute, and model timings continuously, and logs a
-periodic throughput summary.
+detector, tracker IDs, and model timings continuously, and logs a
+periodic throughput summary. Without a publisher (GTA runs, where no Gazebo GUI watches) it
+renders nothing and only logs the summary.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ class LivePerceptionView:
     def __init__(
         self,
         perception: Any,
-        publisher: Any,
+        publisher: Any | None,
         *,
         ignore_regions: Sequence[Sequence[float]] = (),
         detector_name: str = "YOLO",
@@ -47,7 +48,8 @@ class LivePerceptionView:
             LOGGER.debug("Perception stats unavailable: %s", exc)
             return
         frame = getattr(observation, "frame", None)
-        if frame is not None and self._publisher.available and not self._render_failed:
+        publisher = self._publisher
+        if frame is not None and publisher is not None and publisher.available and not self._render_failed:
             try:
                 image = render_live_view(
                     frame,
@@ -59,7 +61,7 @@ class LivePerceptionView:
                 self._render_failed = True
                 LOGGER.warning("Disabling live perception view rendering: %s", exc)
             else:
-                self._publisher.publish_bgr(image)
+                publisher.publish_bgr(image)
         self._maybe_log(stats, getattr(observation, "candidates", ()))
 
     def _maybe_log(self, stats: dict[str, Any], candidates: Sequence[Any]) -> None:
@@ -83,6 +85,4 @@ class LivePerceptionView:
 
 
 def _track_summary(candidate: Any) -> str:
-    summary = f"#{candidate.id} {candidate.class_name} {candidate.confidence:.2f}"
-    shirt = candidate.attributes.get("shirt_colour")
-    return f"{summary} shirt={shirt}" if shirt is not None else summary
+    return f"#{candidate.id} {candidate.class_name} {candidate.confidence:.2f}"

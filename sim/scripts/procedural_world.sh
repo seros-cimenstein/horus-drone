@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared world helpers for `sim/run.sh start`, `scripts/demo.sh`, `sim/scripts/start_sim.sh` and
-# `scripts/koko/remote_up.sh`. Sourced, not executed: callers get horus_world_profile() and
-# generate_procedural_world().
+# `scripts/koko/remote_up.sh`. Sourced, not executed: callers get horus_world_profile(),
+# horus_check_world_config() and generate_procedural_world().
 
 _procedural_sim_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 _procedural_project_dir="$(cd -- "${_procedural_sim_dir}/.." && pwd)"
@@ -11,6 +11,12 @@ horus_world_profile() {
   # HORUS_SITL_PARAM_FILE list) for a world stem, file name or SDF path, or nothing when the
   # world has no profile. The table lives in sim/scripts/world_profiles.py.
   python3 "${_procedural_sim_dir}/scripts/world_profiles.py" "$1"
+}
+
+horus_check_world_config() {
+  # Fail with a message when HORUS config $2 (container path) belongs to the other world than
+  # $1 (a Gazebo world, or "gta"): a GTA config needs GTA's gta:// frames, a Gazebo one its camera.
+  python3 "${_procedural_sim_dir}/scripts/world_profiles.py" check-config "$1" "$2"
 }
 
 procedural_world_stem() {

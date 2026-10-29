@@ -1,4 +1,4 @@
-"""Terminal control loop; ``--mission`` hands a YAML file to :mod:`horus.repl.missions`."""
+"""Terminal control loop: typed skill calls, emergencies, and free text for the commander."""
 
 from __future__ import annotations
 
@@ -13,8 +13,12 @@ from typing import Any
 from horus.commander import HorusCommander
 from horus.commander.intents import emergency_action
 from horus.config import HorusConfig, load_config
+from horus.event_log import JsonlEventLog, event_log_from_environment
 from horus.mcp_client import DEFAULT_MCP_URL, call_json, open_session
-from horus.repl.missions import EMERGENCY_TOOLS, run_mission
+
+EMERGENCY_TOOLS = {"hold", "rth", "land"}
+# Slash emergencies: the tool names plus /home, the operator's word for return-to-home.
+_SLASH_EMERGENCIES = {**{tool: tool for tool in EMERGENCY_TOOLS}, "home": "rth"}
 
 
 def _interactive_arguments(line: str) -> tuple[str, dict[str, Any]] | None:
@@ -36,10 +40,10 @@ def _interactive_arguments(line: str) -> tuple[str, dict[str, Any]] | None:
         return "__quit__", {}
     if command == "/state":
         return "get_state", {}
-    if len(parts) == 1 and command.removeprefix("/") in EMERGENCY_TOOLS:
-        # /hold /rth /land are documented; the bare words stay accepted. A longer line such as
-        # "land next to the hiker" is operator free text for the commander, not an emergency.
-        return command.removeprefix("/"), {}
+    if len(parts) == 1 and command.removeprefix("/") in _SLASH_EMERGENCIES:
+        # /hold /rth /home /land are documented; the bare words stay accepted. A longer line such
+        # as "land next to the hiker" is operator free text for the commander, not an emergency.
+        return _SLASH_EMERGENCIES[command.removeprefix("/")], {}
     if command == "/goto":
         if len(parts) != 4:
             raise ValueError("usage: /goto NORTH_M EAST_M ALTITUDE_M")
@@ -54,14 +58,6 @@ def _interactive_arguments(line: str) -> tuple[str, dict[str, Any]] | None:
         if len(parts) > 2:
             raise ValueError("usage: /take_off [ALTITUDE_M]")
         return "take_off", {"altitude_m": float(parts[1]) if len(parts) == 2 else 2.0, "ttl_s": 30.0}
-    if command in ("/approach", "/follow", "/orbit"):
-        if len(parts) < 2 or len(parts) > 3:
-            raise ValueError(f"usage: {command} TRACKER_ID [DISTANCE_M]")
-        key = "radius_m" if command == "/orbit" else "dist_m"
-        args = {"id": int(parts[1]), "ttl_s": 30.0}
-        if len(parts) == 3:
-            args[key] = float(parts[2])
-        return command[1:], args
     return None
 
 
@@ -90,12 +86,27 @@ def _discard_queued(lines: asyncio.Queue[str]) -> int:
         discarded += 1
 
 
+def _record_emergency(event_log: JsonlEventLog | None, action: str, **outcome: Any) -> None:
+    """Log an operator emergency to the shared event log, as the commander web server does.
+
+    It runs with no model involved, so this record is the only log entry naming the operator as
+    its source. A logging failure never blocks the emergency.
+    """
+    if event_log is None:
+        return
+    try:
+        event_log.append({"kind": "emergency", "action": action, "source": "operator", **outcome})
+    except (OSError, TypeError) as exc:
+        print(f"warning: could not append the emergency to the event log: {exc}", file=sys.stderr)
+
+
 async def interactive(server_url: str, token: str, config: HorusConfig) -> None:
     commander: HorusCommander | None = None
     commander_task: asyncio.Task | None = None
     turns_task: asyncio.Task | None = None
     lines: asyncio.Queue[str] = asyncio.Queue()
-    print("HORUS REPL. /state /goto N E ALT /hold /rth /land /take_off [ALT]; free text goes to commander.")
+    event_log = event_log_from_environment()
+    print("HORUS REPL. /state /goto N E ALT /hold /rth /home /land /take_off [ALT]; free text goes to commander.")
     try:
         async with open_session(server_url, token) as session:
             quit_requested = False
@@ -120,13 +131,18 @@ async def interactive(server_url: str, token: str, config: HorusConfig) -> None:
                     elif parsed[0] in EMERGENCY_TOOLS:
                         # Free text typed before the emergency must not reach the model after it.
                         discarded = _discard_queued(lines)
-                        if commander is None:
-                            result = await call_json(session, parsed[0])
-                            print(json.dumps(result, ensure_ascii=False, indent=2))
-                        else:
-                            # Interrupts the active model turn; uses this session until the
-                            # commander's own MCP session is connected.
-                            print(await commander.emergency(parsed[0], session=session))
+                        try:
+                            if commander is None:
+                                result: Any = await call_json(session, parsed[0])
+                            else:
+                                # Interrupts the active model turn; uses this session until the
+                                # commander's own MCP session is connected.
+                                result = await commander.emergency(parsed[0], session=session)
+                        except Exception as exc:
+                            _record_emergency(event_log, parsed[0], status="error", error=str(exc))
+                            raise
+                        _record_emergency(event_log, parsed[0], status="executed", result=result)
+                        print(json.dumps(result, ensure_ascii=False, indent=2) if commander is None else result)
                         if discarded:
                             print(f"discarded {discarded} queued commander request(s)", file=sys.stderr)
                     else:
@@ -158,26 +174,13 @@ async def _run(args: argparse.Namespace, config: HorusConfig) -> None:
     token = os.environ.get(config.server.auth_token_env)
     if not token:
         raise RuntimeError(f"{config.server.auth_token_env} must be set")
-    if args.mission:
-        async with open_session(server_url, token) as session:
-            await run_mission(
-                session,
-                args.mission,
-                args.repeat,
-                server_url=server_url,
-                bearer_token=token,
-                commander_settings=config.commander,
-            )
-    else:
-        await interactive(server_url, token, config)
+    await interactive(server_url, token, config)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="HORUS terminal REPL and skill/commander mission runner")
+    parser = argparse.ArgumentParser(description="HORUS terminal REPL")
     parser.add_argument("--server-url", help=f"MCP streamable HTTP URL (default: {DEFAULT_MCP_URL})")
     parser.add_argument("--config", help="HORUS YAML config file")
-    parser.add_argument("--mission", help="run a missions/*.yaml file and exit")
-    parser.add_argument("--repeat", type=int, default=1, help="repeat mission N times")
     args = parser.parse_args()
     try:
         asyncio.run(_run(args, load_config(args.config)))

@@ -1,27 +1,20 @@
 # Procedurally generated 1.2 km city worlds; as config/horus_procedural_forest.yaml except the
-# cruise gate and altitude ceiling.
+# cruise gate.
 flight:
   heartbeat_timeout_s: 180.0
+gimbal:
+  # Simulated gimbal device; see config/horus.yaml.
+  connection: udpin:127.0.0.1:14600
 executor:
   command_ttl_s: 360.0
-  max_speed_m_s: 3.0
-  # Above the 34 m building/roof-equipment cap + 4 m margin the horizontal limit rises to
-  # 8 m/s; below it (or on a leg whose commanded target altitude is lower) the proven 3 m/s
-  # limit applies. The generator's transit altitude stays >= 38 m and <= 45 m.
+  speed_m_s: 3.0
+  # Above the 34 m building/roof-equipment cap + 4 m margin the horizontal speed rises to
+  # 8 m/s; below it (or on a leg whose commanded target altitude is lower) the controller
+  # flies at 3 m/s. The generator's transit altitude stays >= 38 m and <= 45 m.
   cruise_speed_m_s: 8.0
   cruise_min_altitude_m: 38.0
-  max_vertical_speed_m_s: 1.5
-  max_distance_m: 850.0
-  min_altitude_m: 1.0
-  max_altitude_m: 48.0
-  geofence_polygon_ned:
-    - [-585.0, -585.0]
-    - [-585.0, 585.0]
-    - [585.0, 585.0]
-    - [585.0, -585.0]
+  vertical_speed_m_s: 1.5
   arrival_tolerance_m: 0.4
-  follow_distance_m: 3.0
-  target_height_m: 1.9
   camera_horizontal_fov_deg: 84.0
   default_gimbal_pitch_deg: -45.0
 perception:

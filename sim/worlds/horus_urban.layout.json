@@ -34,11 +34,6 @@
       "yaw_deg": 89.95437383553924,
       "posture": "standing",
       "clothing": "blue",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -82,11 +77,6 @@
       "yaw_deg": -89.95437383553924,
       "posture": "standing",
       "clothing": "green",
-      "shirt_colour_attribute": "green",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "green"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -126,11 +116,6 @@
       "yaw_deg": 0.0,
       "posture": "standing",
       "clothing": "dark",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -174,11 +159,6 @@
       "yaw_deg": 179.9087476710785,
       "posture": "standing",
       "clothing": "orange",
-      "shirt_colour_attribute": "red",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "red"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -222,11 +202,6 @@
       "yaw_deg": 89.95437383553924,
       "posture": "standing",
       "clothing": "dark",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -266,11 +241,6 @@
       "yaw_deg": -89.95437383553924,
       "posture": "standing",
       "clothing": "blue",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -310,11 +280,6 @@
       "yaw_deg": 179.9087476710785,
       "posture": "standing",
       "clothing": "green",
-      "shirt_colour_attribute": "green",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "green"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -358,11 +323,6 @@
       "yaw_deg": 0.0,
       "posture": "standing",
       "clothing": "dark",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -406,11 +366,6 @@
       "yaw_deg": 89.95437383553924,
       "posture": "standing",
       "clothing": "blue",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -450,11 +405,6 @@
       "yaw_deg": 0.0,
       "posture": "standing",
       "clothing": "green",
-      "shirt_colour_attribute": "green",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "green"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -494,11 +444,6 @@
       "yaw_deg": 0.0,
       "posture": "standing",
       "clothing": "orange",
-      "shirt_colour_attribute": "red",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "red"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -534,11 +479,6 @@
       "yaw_deg": 180.0,
       "posture": "standing",
       "clothing": "blue",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -574,11 +514,6 @@
       "yaw_deg": 0.0,
       "posture": "standing",
       "clothing": "green",
-      "shirt_colour_attribute": "green",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "green"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -614,11 +549,6 @@
       "yaw_deg": 180.0,
       "posture": "standing",
       "clothing": "blue",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -654,11 +584,6 @@
       "yaw_deg": 89.95437383553924,
       "posture": "standing",
       "clothing": "blue",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -682,11 +607,6 @@
       "yaw_deg": 143.2394487827058,
       "posture": "standing",
       "clothing": "green",
-      "shirt_colour_attribute": "green",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "green"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -710,11 +630,6 @@
       "yaw_deg": 68.75493541569878,
       "posture": "standing",
       "clothing": "dark",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -738,11 +653,6 @@
       "yaw_deg": -11.459155902616466,
       "posture": "standing",
       "clothing": "orange",
-      "shirt_colour_attribute": "red",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "red"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -766,11 +676,6 @@
       "yaw_deg": 89.95437383553924,
       "posture": "standing",
       "clothing": "orange",
-      "shirt_colour_attribute": "red",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "red"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -814,11 +719,6 @@
       "yaw_deg": 89.95437383553924,
       "posture": "standing",
       "clothing": "blue",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -850,62 +750,6 @@
       "speed_m_s": 2.5
     },
     {
-      "model": "civ_jogger_03",
-      "role": "jogger",
-      "asset": "person_red_kinematic",
-      "group": "follow_jogger",
-      "behavior": "route",
-      "position": [
-        21.65,
-        -43.0
-      ],
-      "yaw_deg": 90.0,
-      "posture": "standing",
-      "clothing": "red",
-      "shirt_colour_attribute": "red",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "red"
-      ],
-      "envelope": {
-        "x_min_m": -0.071,
-        "x_max_m": 0.252,
-        "y_min_m": -0.27,
-        "y_max_m": 0.27,
-        "top_z_m": 1.926,
-        "torso_z_m": 1.1,
-        "height_m": 1.926
-      },
-      "route": [
-        [
-          21.65,
-          -43.0
-        ],
-        [
-          21.65,
-          -21.65
-        ],
-        [
-          18.0,
-          -21.65
-        ],
-        [
-          18.0,
-          -10.35
-        ],
-        [
-          21.65,
-          -10.35
-        ],
-        [
-          21.65,
-          10.0
-        ]
-      ],
-      "route_mode": "once",
-      "speed_m_s": 2.5
-    },
-    {
       "model": "civ_park_sitting_01",
       "role": "park_sitting",
       "asset": "person_sitting",
@@ -918,11 +762,6 @@
       "yaw_deg": 0.0,
       "posture": "sitting",
       "clothing": "blue",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.22,
         "x_max_m": 0.46,
@@ -946,11 +785,6 @@
       "yaw_deg": 90.0,
       "posture": "sitting",
       "clothing": "blue",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.22,
         "x_max_m": 0.46,
@@ -974,11 +808,6 @@
       "yaw_deg": 0.0,
       "posture": "sitting",
       "clothing": "blue",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.22,
         "x_max_m": 0.46,
@@ -1002,11 +831,6 @@
       "yaw_deg": 180.0,
       "posture": "sitting",
       "clothing": "blue",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.22,
         "x_max_m": 0.46,
@@ -1030,11 +854,6 @@
       "yaw_deg": 22.918311805232932,
       "posture": "standing",
       "clothing": "dark",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -1058,11 +877,6 @@
       "yaw_deg": -28.64788975654116,
       "posture": "standing",
       "clothing": "blue",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -1086,11 +900,6 @@
       "yaw_deg": 114.59155902616465,
       "posture": "standing",
       "clothing": "green",
-      "shirt_colour_attribute": "green",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "green"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -1114,11 +923,6 @@
       "yaw_deg": -137.50987083139756,
       "posture": "standing",
       "clothing": "dark",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -1142,11 +946,6 @@
       "yaw_deg": 63.02535746439056,
       "posture": "standing",
       "clothing": "orange",
-      "shirt_colour_attribute": "red",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "red"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -1170,11 +969,6 @@
       "yaw_deg": 171.88733853924697,
       "posture": "standing",
       "clothing": "blue",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -1198,11 +992,6 @@
       "yaw_deg": -34.37746770784939,
       "posture": "standing",
       "clothing": "green",
-      "shirt_colour_attribute": "green",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "green"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -1226,11 +1015,6 @@
       "yaw_deg": 28.64788975654116,
       "posture": "standing",
       "clothing": "dark",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -1254,11 +1038,6 @@
       "yaw_deg": 103.13240312354819,
       "posture": "standing",
       "clothing": "blue",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -1282,11 +1061,6 @@
       "yaw_deg": -120.32113697747289,
       "posture": "standing",
       "clothing": "orange",
-      "shirt_colour_attribute": "red",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "red"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -1310,11 +1084,6 @@
       "yaw_deg": 160.42818263663048,
       "posture": "standing",
       "clothing": "green",
-      "shirt_colour_attribute": "green",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "green"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -1338,11 +1107,6 @@
       "yaw_deg": -85.94366926962348,
       "posture": "standing",
       "clothing": "dark",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -1354,8 +1118,8 @@
       }
     },
     {
-      "model": "civ_red_shirt_01",
-      "role": "red_shirt",
+      "model": "civ_plaza_crowd_13",
+      "role": "plaza_crowd",
       "asset": "person_red_kinematic",
       "group": "ambient",
       "behavior": "idle",
@@ -1366,11 +1130,6 @@
       "yaw_deg": -45.836623610465864,
       "posture": "standing",
       "clothing": "red",
-      "shirt_colour_attribute": "red",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "red"
-      ],
       "envelope": {
         "x_min_m": -0.071,
         "x_max_m": 0.252,
@@ -1378,34 +1137,6 @@
         "y_max_m": 0.27,
         "top_z_m": 1.926,
         "torso_z_m": 1.1,
-        "height_m": 1.926
-      }
-    },
-    {
-      "model": "civ_collapsed_01",
-      "role": "collapsed",
-      "asset": "person_collapsed_kinematic",
-      "group": "ambient",
-      "behavior": "idle",
-      "position": [
-        -8.0,
-        22.0
-      ],
-      "yaw_deg": 11.459155902616466,
-      "posture": "lying",
-      "clothing": "dark",
-      "shirt_colour_attribute": "blue",
-      "shirt_colour_source": "measured_legacy_asset",
-      "possible_shirt_colours": [
-        "blue"
-      ],
-      "envelope": {
-        "x_min_m": -0.27,
-        "x_max_m": 0.27,
-        "y_min_m": -0.963,
-        "y_max_m": 0.963,
-        "top_z_m": 0.323,
-        "torso_z_m": 0.25,
         "height_m": 1.926
       }
     }
@@ -1613,53 +1344,6 @@
     }
   ],
   "animals": [],
-  "follow": {
-    "model": "civ_jogger_03",
-    "group": "follow_jogger",
-    "route": [
-      [
-        21.65,
-        -43.0
-      ],
-      [
-        21.65,
-        -21.65
-      ],
-      [
-        18.0,
-        -21.65
-      ],
-      [
-        18.0,
-        -10.35
-      ],
-      [
-        21.65,
-        -10.35
-      ],
-      [
-        21.65,
-        10.0
-      ]
-    ],
-    "speed_m_s": 2.5,
-    "occluder_models_or_collisions": [
-      "jogger_shelter_roof_collision"
-    ],
-    "occluder_type": "shelter",
-    "occluder_xy": [
-      21.65,
-      -5.0
-    ],
-    "follower_altitude_m": 10.0,
-    "follower_horizontal_m": 5.0,
-    "expected_occlusion_s": 3.3,
-    "shirt_colour_attribute": "red",
-    "stage_xy": [
-      17.32,
-      -40.5
-    ]
-  },
   "transit_altitude_m": 38.23,
   "areas": {
     "roads": {

@@ -61,6 +61,12 @@ case "${world_stem}" in
     payload_layout=seven
     ;;
 esac
+# Worlds with the HORUS airframe carry the Gazebo gimbal, which horus-gz-gimbal drives as HORUS's
+# MAVLink gimbal device; ArduPilot has no mount.
+gimbal_device=0
+case "${world_stem}" in
+  horus_indoor|horus_forest*|horus_urban*) gimbal_device=1 ;;
+esac
 # The SITL parameter fragments follow the world (sim/scripts/world_profiles.py: indoor
 # proximity avoidance, canonical outdoor, or generated-world fence/speed). An explicit
 # HORUS_SITL_PARAM_FILE (one file or a colon-separated list) always wins.
@@ -116,8 +122,8 @@ fi
 # Job control gives Gazebo and SITL separate process groups so stop_sim.sh can
 # terminate each command and its children without touching unrelated processes.
 set -m
-rm -f "${log_dir}/gazebo.pid" "${log_dir}/sitl.pid" \
-  "${log_dir}/tof_bridge.pid" "${log_dir}/civilian_life.pid" "${log_dir}/gui.pid"
+rm -f "${log_dir}/gazebo.pid" "${log_dir}/sitl.pid" "${log_dir}/tof_bridge.pid" \
+  "${log_dir}/gimbal.pid" "${log_dir}/civilian_life.pid" "${log_dir}/gui.pid"
 
 civilian_life_pid_matches() {
   local pid="$1" command
@@ -146,7 +152,7 @@ bash /horus/scripts/start_grounder.sh
 
 cleanup() {
   local pid_file pid alive attempt
-  for pid_file in "${log_dir}/civilian_life.pid" "${log_dir}/tof_bridge.pid" \
+  for pid_file in "${log_dir}/civilian_life.pid" "${log_dir}/tof_bridge.pid" "${log_dir}/gimbal.pid" \
     "${log_dir}/sitl.pid" "${log_dir}/gui.pid" "${log_dir}/gazebo.pid"; do
     [[ -f "${pid_file}" ]] || continue
     read -r pid < "${pid_file}" || true
@@ -155,7 +161,7 @@ cleanup() {
   done
   for ((attempt = 0; attempt < 10; attempt++)); do
     alive=0
-    for pid_file in "${log_dir}/civilian_life.pid" "${log_dir}/tof_bridge.pid" \
+    for pid_file in "${log_dir}/civilian_life.pid" "${log_dir}/tof_bridge.pid" "${log_dir}/gimbal.pid" \
       "${log_dir}/sitl.pid" "${log_dir}/gui.pid" "${log_dir}/gazebo.pid"; do
       [[ -f "${pid_file}" ]] || continue
       read -r pid < "${pid_file}" || true
@@ -171,7 +177,7 @@ cleanup() {
     (( alive == 0 )) && break
     sleep 1
   done
-  for pid_file in "${log_dir}/civilian_life.pid" "${log_dir}/tof_bridge.pid" \
+  for pid_file in "${log_dir}/civilian_life.pid" "${log_dir}/tof_bridge.pid" "${log_dir}/gimbal.pid" \
     "${log_dir}/sitl.pid" "${log_dir}/gui.pid" "${log_dir}/gazebo.pid"; do
     [[ -f "${pid_file}" ]] || continue
     read -r pid < "${pid_file}" || true
@@ -185,8 +191,8 @@ cleanup() {
     fi
   done
   wait 2>/dev/null || true
-  rm -f "${log_dir}/gazebo.pid" "${log_dir}/sitl.pid" \
-    "${log_dir}/tof_bridge.pid" "${log_dir}/civilian_life.pid" "${log_dir}/gui.pid"
+  rm -f "${log_dir}/gazebo.pid" "${log_dir}/sitl.pid" "${log_dir}/tof_bridge.pid" \
+    "${log_dir}/gimbal.pid" "${log_dir}/civilian_life.pid" "${log_dir}/gui.pid"
 }
 trap 'exit 0' INT TERM
 trap cleanup EXIT
@@ -316,6 +322,18 @@ if [[ -n "${payload_chain}" ]]; then
   bridge_pid=$!
   printf '%s\n' "${bridge_pid}" > "${log_dir}/tof_bridge.pid"
 fi
+gimbal_pid=""
+if (( gimbal_device == 1 )); then
+  (
+    # Runs from the mounted checkout (the image's console scripts can predate new entry points).
+    # It waits for the airframe IMU topic, then reports to HORUS's gimbal.connection.
+    cd /horus
+    exec /opt/horus-venv/bin/python -m horus.gimbal.gazebo --world "${world_stem}" \
+      --mavlink udpout:127.0.0.1:14600
+  ) > "${log_dir}/gimbal.log" 2>&1 &
+  gimbal_pid=$!
+  printf '%s\n' "${gimbal_pid}" > "${log_dir}/gimbal.pid"
+fi
 scenario_pid=""
 if [[ -f "${scenario_file}" ]]; then
   civilian_driver=/horus/sim/scripts/civilian_life.py
@@ -399,6 +417,10 @@ while true; do
     # (bad arguments, topic resolution, MAVLink connect). Silently continuing would drop the
     # proximity data that PRX1_TYPE/AVOID_ENABLE depend on in these worlds.
     printf 'ToF bridge exited; inspect %s/tof_bridge.log.\n' "${log_dir}" >&2
+    exit 1
+  fi
+  if [[ -n "${gimbal_pid}" ]] && ! kill -0 "${gimbal_pid}" 2>/dev/null; then
+    printf 'Gimbal device exited; inspect %s/gimbal.log.\n' "${log_dir}" >&2
     exit 1
   fi
   if [[ -n "${scenario_pid}" ]] && ! civilian_life_pid_matches "${scenario_pid}"; then
