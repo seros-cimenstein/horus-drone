@@ -15,7 +15,7 @@ from sim.worldgen.assembly import assemble_world
 from sim.worldgen.dressing import Dressing
 from sim.worldgen.layout import URBAN_SIDEWALK_WIDTH_M, UrbanLayout, road_half_width
 from sim.worldgen.plan import checked_transit_altitude
-from sim.worldgen.scenario import follow_manifest, procedural_manifest_fields
+from sim.worldgen.scenario import procedural_manifest_fields
 from sim.worldgen.sdf import (
     SURFACE_COLOURS, TERRAIN_COLLIDE_BITMASK, collide_surface, static_model, visual,
 )
@@ -56,20 +56,13 @@ def transit_altitude(layout: UrbanLayout) -> float:
                                     procedural=True)
 
 
-def manifest_extras(layout: UrbanLayout, people: dict[str, dict]) -> tuple[dict, dict, dict]:
-    """The generated city's ``(follow, areas, extra manifest fields)``."""
+def manifest_extras(layout: UrbanLayout) -> tuple[dict, dict]:
+    """The generated city's ``(areas, extra manifest fields)``."""
     city = layout.city
-    follow = follow_manifest(layout, layout.follow_jogger, people, {
-        "occluder_models_or_collisions": ["follow_shelter_glass", "follow_shelter_roof"],
-        "occluder_type": layout.follow_occluder_kind,
-        "occluder_xy": [layout.jogger_shelter_center[0], layout.jogger_shelter_center[1]],
-    })
     areas = urban_areas(layout)
-    mission = next(plaza for plaza in city.plazas if plaza.mission)
-    areas["plaza"] = {"center": [mission.x, mission.y], "half_size": mission.half_size}
-    areas["plazas"] = [{"center": [p.x, p.y], "half_size": p.half_size, "mission": p.mission}
+    areas["plazas"] = [{"center": [p.x, p.y], "half_size": p.half_size, "crowd": p.crowd}
                        for p in city.plazas]
-    areas["parks"] = [{"center": [p.x, p.y], "half_size": p.half_size, "mission": p.mission}
+    areas["parks"] = [{"center": [p.x, p.y], "half_size": p.half_size, "sitters": p.sitters}
                       for p in city.parks]
     areas["arterial_roads"] = {"x": list(city.arterial_roads_x), "y": list(city.arterial_roads_y)}
     areas["road_half_width_m"] = {
@@ -78,7 +71,7 @@ def manifest_extras(layout: UrbanLayout, people: dict[str, dict]) -> tuple[dict,
     }
     areas["sidewalk_width_m"] = URBAN_SIDEWALK_WIDTH_M
     areas["building_count"] = len(layout.buildings)
-    return follow, areas, procedural_manifest_fields(layout)
+    return areas, procedural_manifest_fields(layout)
 
 
 __all__ = ["build_urban_procedural"]

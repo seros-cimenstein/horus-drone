@@ -1,8 +1,8 @@
 """Seeded world dressing layered over a validated layout.
 
 Everything here draws from independent hashed streams (``seeding.substream``) so the layout
-sampler's own stream, and therefore every existing seed's roads, trails, routes and occluders,
-is untouched. Canonical worlds keep their fixed legacy dressing.
+sampler's own stream, and therefore every existing seed's roads, trails and routes, is
+untouched. Canonical worlds keep their fixed legacy dressing.
 
 Strata: ``baseline`` worlds get mild everyday variation; ``chaotic`` worlds (about a third of
 seeds, or forced by the caller) add harsher light, more animals and clutter, a milling crowd
@@ -23,10 +23,7 @@ from sim.worldgen.layout import (
     GEOFENCE_INSET_M, HOME_PAD_KEEPOUT_M, URBAN_SIDEWALK_WIDTH_M, ForestLayout, UrbanLayout,
     distance_to_path, distance_to_paths, point_segment_distance, road_half_width,
 )
-from sim.worldgen.people import (
-    PERSON_ASSETS, SITTING_CLOTHING, SITTING_POSSIBLE_SHIRT_COLOURS, SITTING_SHIRT_COLOUR,
-    actor_model_files, legacy_envelope,
-)
+from sim.worldgen.people import PERSON_ASSETS, SITTING_CLOTHING, actor_model_files, legacy_envelope
 from sim.worldgen.meshes import LoftMesh, rotate_xy
 from sim.worldgen.proxy import ProxyShape
 from sim.worldgen.scenery import SceneryInstance, SceneryMesh
@@ -97,12 +94,10 @@ def keep_right_loop(points: tuple[tuple[float, ...], ...], offset: float) -> tup
     return tuple(shifted(forward) + shifted(forward[::-1]))
 
 
-def _person_constraints(kind: str, layout: Any, stream: random.Random) -> tuple[dict[str, dict], frozenset[str]]:
-    """Role constraints: follow/select targets get a unique solid primary colour."""
+def _person_constraints(kind: str, layout: Any, stream: random.Random) -> dict[str, dict]:
+    """Role constraints: forest rangers wear hi-vis, and some family members are children."""
     constraints: dict[str, dict] = {}
     if kind == "forest":
-        nominal = stream.choice(("red", "green", "blue"))
-        constraints[layout.follow_hiker.model] = {"nominal": nominal}
         for ranger in layout.ranger_routes:
             constraints[ranger.model] = {"hivis": True}
         family = [person.model for person in layout.family_positions]
@@ -110,13 +105,7 @@ def _person_constraints(kind: str, layout: Any, stream: random.Random) -> tuple[
         children = min(stream.randint(0, 2), max(0, len(family) - 2))
         for model in family[len(family) - children:]:
             constraints.setdefault(model, {})["child"] = True
-        reserved = frozenset({nominal})
-    else:
-        constraints[layout.red_shirt.model] = {"nominal": "red"}
-        follow = stream.choice(("green", "blue"))
-        constraints[layout.follow_jogger.model] = {"nominal": follow}
-        reserved = frozenset({"red", follow})
-    return constraints, reserved
+    return constraints
 
 
 def _clear_of(point: tuple[float, float], paths: list[tuple[list, float]], margin: float) -> bool:
@@ -130,14 +119,13 @@ def sample_dressing(kind: str, layout: ForestLayout | UrbanLayout, *, stratum: s
     dressing = Dressing(chosen, sample_environment(substream(seed, "environment"), chaotic=chaotic),
                         asset_prefix=f"h{kind[0]}{seed}_",
                         actor_inset_m=float(layout.actor_inset_m))
-    constraints, reserved = _person_constraints(kind, layout, substream(seed, "roles"))
+    constraints = _person_constraints(kind, layout, substream(seed, "roles"))
     for person in layout.people:
         rules = constraints.get(person.model, {})
         rng = substream(seed, "appearance", person.model)
-        nominal = rules.get("nominal")
         dressing.appearances[person.model] = sample_appearance(
-            rng, nominal=nominal, child=rules.get("child", False), outdoor=kind == "forest",
-            hivis=rules.get("hivis", False), exclude=frozenset() if nominal else reserved)
+            rng, child=rules.get("child", False), outdoor=kind == "forest",
+            hivis=rules.get("hivis", False))
     return dressing
 
 
@@ -148,9 +136,6 @@ def dress_person(dressing: Dressing, record: dict) -> dict:
     record["posture"] = posture
     if dressing.canonical:
         record["envelope"] = legacy_envelope(legacy)
-        record["shirt_colour_attribute"] = PERSON_ASSETS[legacy]["shirt_colour_attribute"]
-        record["shirt_colour_source"] = "measured_legacy_asset"
-        record["possible_shirt_colours"] = [PERSON_ASSETS[legacy]["shirt_colour_attribute"]]
         record["clothing"] = PERSON_ASSETS[legacy]["clothing"]
         return record
     appearance = dressing.appearances[record["model"]]
@@ -158,17 +143,9 @@ def dress_person(dressing: Dressing, record: dict) -> dict:
     record["appearance"] = appearance
     record["envelope"] = appearance.envelope(posture)
     if posture == "sitting":
-        # Seated actors render the person_sitting_a hi-vis rescue jacket, so the manifest
-        # records what the shirt-colour classifier measured on a rendered drone view of that
-        # asset (see people.SITTING_SHIRT_COLOUR) instead of the sampled standing garment.
-        record["shirt_colour_attribute"] = SITTING_SHIRT_COLOUR
-        record["shirt_colour_source"] = "measured_rendered_asset"
-        record["possible_shirt_colours"] = list(SITTING_POSSIBLE_SHIRT_COLOURS)
+        # Seated actors render the person_sitting_a rescue coverall, not the sampled garment.
         record["clothing"] = SITTING_CLOTHING
     else:
-        record["shirt_colour_attribute"] = appearance.shirt_colour_attribute
-        record["shirt_colour_source"] = "design_nominal" if appearance.shirt_colour_attribute else "none_indeterminate"
-        record["possible_shirt_colours"] = list(appearance.possible_shirt_colours)
         record["clothing"] = f"{appearance.top.style}:{'+'.join(appearance.top.colours)}"
     jogger = record["role"] == "jogger"
     if record.get("waypoints"):
@@ -185,14 +162,9 @@ def dress_person(dressing: Dressing, record: dict) -> dict:
                 record["mode"] = "loop"
     record["radius"] = round(max(record["envelope"]["x_max_m"] - record["envelope"]["x_min_m"],
                                  record["envelope"]["y_max_m"] - record["envelope"]["y_min_m"]) / 2, 3)
-    # Generated actors join the person-asset registry so posture and the design classifier
-    # labels (including every colour the shirt could be reported as) can be looked up by
+    # Generated actors join the person-asset registry so their posture can be looked up by
     # asset name, exactly like the legacy assets.
-    PERSON_ASSETS[record["asset"]] = {
-        "posture": posture,
-        "shirt_colour_attribute": record["shirt_colour_attribute"],
-        "possible_shirt_colours": list(record["possible_shirt_colours"]),
-    }
+    PERSON_ASSETS[record["asset"]] = {"posture": posture}
     return record
 
 
@@ -320,8 +292,7 @@ def fauna_areas(kind: str, layout: Any) -> dict[str, list[tuple[float, float]]]:
 
 
 def _forest_clutter_clear(layout: Any, point: tuple[float, float], size: float) -> bool:
-    """True when forest clutter at ``point`` clears trails, creeks, clearings, camps and the
-    mission people (the missing hiker's canopy and the follow occluder included)."""
+    """True when forest clutter at ``point`` clears trails, creeks, clearings, camps and people."""
     if distance_to_paths(point, layout.trails) < size + 3.5:
         return False
     if distance_to_paths(point, layout.creeks) < size + 2.5:
@@ -330,9 +301,6 @@ def _forest_clutter_clear(layout: Any, point: tuple[float, float], size: float) 
            for cx, cy, radius in layout.clearings):
         return False
     if any(math.hypot(point[0] - cx, point[1] - cy) < 15.0 + size for cx, cy in layout.camps):
-        return False
-    if math.hypot(point[0] - layout.follow_occluder_xy[0], point[1] - layout.follow_occluder_xy[1]) \
-            < size + 4.0:
         return False
     for person in layout.people:
         if math.hypot(point[0] - person.position[0], point[1] - person.position[1]) < size + 8.0:
@@ -384,7 +352,7 @@ def add_clutter(dressing: Dressing, kind: str, layout: Any, agents: list[dict], 
             continue
         if kind == "urban":
             # Wider arterials need the road's own half width; keep clutter off the pavement
-            # and out of every plaza and park (the mission crowds live there).
+            # and out of every plaza and park (the crowds and sitters live there).
             clearance = size + 0.6 + URBAN_SIDEWALK_WIDTH_M
             if any(abs(x - road) < clearance + road_half_width(road, city.arterial_roads_x)
                    for road in layout.roads_x):
@@ -430,8 +398,7 @@ def shrub_mesh(name: str, x: float, y: float, z: float, *, height: float, crown_
                base_radius: float, seed: int = 0) -> SceneryMesh:
     """A dense bush: narrow base, wide irregular top, foliage-textured loft plus crown blobs.
 
-    Two cylinder proxies (narrow lower, wide upper) keep the collision budget cheap; a
-    follow-hiker occluder uses 4-5 m of height with a 0.5-0.9 m base and a 2-3 m crown.
+    Two cylinder proxies (narrow lower, wide upper) keep the collision budget cheap.
     """
     rng = random.Random(seed)
     mesh = LoftMesh()

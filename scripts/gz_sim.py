@@ -2,14 +2,130 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from sim.campaign.gz_topics import sim_time_s, topic_messages
+# Gazebo protobuf-text messages are echoed one message at a time; this only bounds a
+# pathological stream. A message that exceeds it is flushed (never silently truncated).
+TOPIC_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+TOPIC_BODY_MARKERS = ("pose {", "real_time_factor:")
+
+_NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+
+
+def _brace_delta(text: str) -> int:
+    """Net protobuf-text brace delta of a line, ignoring braces inside quoted strings."""
+    depth = 0
+    quoted = escaped = False
+    for char in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+            continue
+        if char == '"':
+            quoted = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+    return depth
+
+
+def topic_messages(lines: Iterable[str], *, max_message_bytes: int = TOPIC_MAX_MESSAGE_BYTES
+                   ) -> Iterator[tuple[str, bool]]:
+    """Split a ``gz topic -e`` protobuf-text stream into whole messages.
+
+    Messages are delimited by blank lines, ``---`` markers or a top-level ``header {``
+    once a body is present.  Nested ``header {`` blocks (every Pose_V entity has one)
+    never split a message.  Yields ``(text, truncated)``; ``truncated`` is True only
+    when one message exceeds ``max_message_bytes`` and had to be flushed early.
+    """
+    buffer: list[str] = []
+    pending_bytes = 0
+    depth = 0
+    has_body = False
+
+    def flush() -> str:
+        nonlocal pending_bytes, depth, has_body
+        text = "".join(buffer)
+        buffer.clear()
+        pending_bytes = 0
+        depth = 0
+        has_body = False
+        return text
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "":
+            if buffer and depth == 0:
+                yield flush(), False
+            continue
+        if stripped == "---" or (stripped.startswith("header {") and depth == 0 and has_body):
+            if buffer:
+                yield flush(), False
+            if stripped == "---":
+                continue
+        if not has_body and any(marker in line for marker in TOPIC_BODY_MARKERS):
+            has_body = True
+        depth = max(0, depth + _brace_delta(line))
+        buffer.append(line)
+        pending_bytes += len(line)
+        if pending_bytes > max_message_bytes:
+            yield flush(), True
+    if buffer:
+        yield flush(), False
+
+
+def _braced(text: str, label: str) -> list[str]:
+    """Extract protobuf-text blocks for ``label`` while respecting quoted strings."""
+    blocks: list[str] = []
+    for match in re.finditer(rf"\b{re.escape(label)}\s*\{{", text):
+        start = match.end()
+        depth = 1
+        quoted = escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    quoted = False
+            elif char == '"':
+                quoted = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    blocks.append(text[start:index])
+                    break
+    return blocks
+
+
+def _scalar(block: str, field: str) -> float | None:
+    """First numeric value of ``field`` in a protobuf-text block, or None when omitted."""
+    match = re.search(rf"\b{re.escape(field)}\s*:\s*({_NUMBER})", block)
+    return None if match is None else float(match.group(1))
+
+
+def sim_time_s(text: str) -> float | None:
+    """Simulation time of a world-statistics message; omitted ``sec``/``nsec`` fields are zero."""
+    blocks = _braced(text, "sim_time")
+    if not blocks:
+        return None
+    sec, nsec = _scalar(blocks[0], "sec"), _scalar(blocks[0], "nsec")
+    return (sec or 0.0) + (nsec or 0.0) * 1e-9
 
 
 @dataclass(frozen=True, slots=True)

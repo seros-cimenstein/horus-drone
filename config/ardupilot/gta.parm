@@ -1,0 +1,15 @@
+# GTA V (sim/scripts/start_gta_sitl.sh appends this to its SITL overrides in pose and physics
+# mode). ArduPilot holds the operating area: 40 m around home (Legion Square and its edges) and
+# the urban profile's 48 m ceiling, with RTL (or LAND) on a breach.
+# The 6 m floor (FENCE_TYPE bit 8) keeps flight above the 4.4 m kiosk roof and the unmapped low
+# objects (config/horus_gta.yaml). Copter 4.7.1 arms it only once the vehicle first climbs above
+# FENCE_ALT_MIN ("Min Alt fence enabled (auto enable)") and disarms it when LAND or RTL starts
+# ("Min Alt fence auto-disabled"), so take-off from the ground, LAND and RTL still work: checked
+# on SITL with a 10 m take-off followed by LAND and by RTL.
+FENCE_ENABLE 1
+FENCE_TYPE 11
+FENCE_ACTION 1
+FENCE_MARGIN 2
+FENCE_RADIUS 40
+FENCE_ALT_MAX 48
+FENCE_ALT_MIN 6

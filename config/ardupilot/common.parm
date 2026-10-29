@@ -6,9 +6,8 @@
 # ArduPilot's simple avoidance brakes before obstacles instead of flying through them.
 PRX1_TYPE 2
 AVOID_ENABLE 3
-# Stop 1 m from proximity obstacles (default 2 m): indoors the executor's 1.2 m wall-centre
-# geofence inset (0.1 m half wall + 1 m + 0.1 m slack) stays reachable instead of fighting
-# avoidance at the edge; outdoors the executor's clearance margins (orbit 1.5 m, scan 2 m) do.
+# Stop 1 m from proximity obstacles (default 2 m), so the vehicle can still pass doorways and fly
+# along the indoor room's walls; avoidance, not HORUS, keeps every world's obstacles away.
 AVOID_MARGIN 1.0
 
 # Downward ToF (payload range_down, 4 m range) from DISTANCE_SENSOR orientation PITCH_270 as a
@@ -19,15 +18,8 @@ RNGFND1_ORIENT 25
 RNGFND1_MIN 0.05
 RNGFND1_MAX 4.0
 
-# Gimbal (iris_with_gimbal): servo 9/10/11 drive roll/pitch/yaw (mount servo functions roll=8,
-# tilt=7, pan=6). The model maps the pitch servo's 1100-1900 us range to +135..-45 deg, so
-# MNT1_PITCH_MIN/MAX must be -135/45 (upstream gazebo-iris-gimbal.parm) for a -90 deg command to
-# point the camera straight down.
-MNT1_TYPE 1
-MNT1_PITCH_MIN -135
-MNT1_PITCH_MAX 45
-MNT1_YAW_MIN -160
-MNT1_YAW_MAX 160
-SERVO9_FUNCTION 8
-SERVO10_FUNCTION 7
-SERVO11_FUNCTION 6
+# The gazebo-iris SITL defaults enable ArduPilot precision landing (PLND_ENABLED 1, PLND_TYPE 3,
+# a Gazebo IR-lock beacon) that nothing here feeds. With no target ever seen, every LAND and RTL
+# touchdown starts with "PrecLand: Failsafe Measures" and hovers 7 s before descending. HORUS
+# runs its own AprilTag precision landing in GUIDED and hands touchdown to plain LAND.
+PLND_ENABLED 0

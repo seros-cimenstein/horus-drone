@@ -1,4 +1,4 @@
-"""Pixel-box geometry shared by detection, tracking, grounding and recognition.
+"""Pixel-box geometry shared by detection, tracking and grounding.
 
 Boxes are ``(x1, y1, x2, y2)`` in source-image pixels.
 """

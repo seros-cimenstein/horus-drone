@@ -15,21 +15,16 @@ TERMINAL_TASK_STATUSES = frozenset({"succeeded", "failed", "cancelled", "expired
 # EventBus kinds by publisher. The commander mirrors every EVENT_KINDS event to its log and the
 # GUI; other kinds (vocabulary_changed) stay on the MCP wait_events stream only.
 EXECUTOR_EVENT_KINDS = frozenset({
-    "task_finished", "target_lost", "target_reacquired", "target_found", "link_lost",
-    "link_restored", "auto_rth", "emergency", "landed", "precision_landing_stalled",
-    "pilot_override", "pilot_released", "fence_limit",
+    "task_finished", "link_lost", "link_restored", "auto_rth", "emergency", "landed",
+    "precision_landing_stalled", "pilot_override", "pilot_released",
 })
-PLAN_EVENT_KINDS = frozenset({"plan_finished", "plan_log"})
 # watch_region occupancy transitions, then watch lifecycle changes.
 REGION_TRANSITION_KINDS = frozenset({"region_enter", "region_exit", "region_dwell"})
 REGION_EVENT_KINDS = REGION_TRANSITION_KINDS | {
     "region_watch_paused", "region_watch_resumed", "region_watch_expired",
 }
 SCENE_EVENT_KINDS = REGION_EVENT_KINDS | {"object_detected"}
-EVENT_KINDS = EXECUTOR_EVENT_KINDS | PLAN_EVENT_KINDS | SCENE_EVENT_KINDS
-# Kinds that may wake the commander model (subject to its repeat limits). plan_log lines are
-# GUI-only: the plan reports to the model once through plan_finished.
-MODEL_WAKE_EVENT_KINDS = EVENT_KINDS - {"plan_log"}
+EVENT_KINDS = EXECUTOR_EVENT_KINDS | SCENE_EVENT_KINDS
 
 
 class EventBus:
@@ -57,6 +52,11 @@ class EventBus:
                 }
             )
             return event_id
+
+    def latest_id(self) -> int:
+        """ID of the newest published event (0 before the first one)."""
+        with self._lock:
+            return self._next_id - 1
 
     async def wait(self, after_id: int, timeout_s: float) -> list[dict[str, Any]]:
         """Wait without blocking the asyncio loop; return buffered events newer than after_id."""

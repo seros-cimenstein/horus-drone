@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from scripts.gz_sim import _SimClock
+from scripts.gz_sim import _SimClock, topic_messages
 
 
 class _Process:
@@ -67,3 +67,39 @@ def test_sim_clock_startup_wait_can_keep_waiting_for_a_flight_client():
 
     with pytest.raises(RuntimeError, match="/world/horus_urban/stats"):
         _sim_clock(process=_Process(None)).wait_ready(timeout_s=0.0, keep_waiting=lambda elapsed_s: False)
+
+
+def test_topic_stream_keeps_nested_headers_in_one_message():
+    message = (
+        'header {\n  stamp {\n    sec: 1\n  }\n}\n'
+        'pose {\n  header {\n    stamp {\n      sec: 1\n    }\n  }\n'
+        '  name: "civ_a"\n  id: 1\n  position {\n    x: 1.0\n  }\n}\n'
+        'pose {\n  header {\n    stamp {\n      sec: 1\n    }\n  }\n'
+        '  name: "civ_b"\n  id: 2\n  position {\n    x: 2.0\n  }\n}\n'
+    )
+    stream = message.splitlines(keepends=True) + ["\n", "---\n", message]
+
+    messages = list(topic_messages(stream))
+
+    assert [truncated for _text, truncated in messages] == [False, False]
+    first, second = (text for text, _truncated in messages)
+    assert first == message
+    assert second == message
+    assert first.count("header {") == 3
+    assert second.count("pose {") == 2
+
+    # A consecutive message that starts with its own top-level header must split too,
+    # even though every entity inside the message also carries a nested header.
+    header_split = list(topic_messages(message.splitlines(keepends=True) * 2))
+    assert [text for text, _truncated in header_split] == [message, message]
+
+
+def test_topic_stream_flags_oversized_messages_without_dropping_lines():
+    stream = ['header {\n', '  field: "x"\n', '}\n', 'next {\n', '  field: "y"\n', '}\n']
+
+    messages = list(topic_messages(stream, max_message_bytes=25))
+
+    assert [truncated for _text, truncated in messages] == [True, False]
+    assert all(text for text, _truncated in messages)
+    assert "".join(text for text, _truncated in messages) == "".join(stream)
+    assert messages[0][0].startswith("header {")

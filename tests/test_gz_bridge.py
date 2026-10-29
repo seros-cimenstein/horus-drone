@@ -395,17 +395,17 @@ def test_commander_events_render_tool_calls_and_errors_readably():
     def line(data):
         return format_commander_event(SSEEvent("1", data))
 
-    tool_use = line('{"kind":"tool_use","tool":"mcp__horus__follow","args":{"id":7}}')
-    assert "mcp__horus__" not in tool_use and "follow" in tool_use and '{"id":7}' in tool_use
+    tool_use = line('{"kind":"tool_use","tool":"mcp__horus__turn","args":{"by_deg":90}}')
+    assert "mcp__horus__" not in tool_use and "turn" in tool_use and '{"by_deg":90}' in tool_use
     # An error result never renders like a success with the same text.
     assert line('{"kind":"tool_result","summary":"x","is_error":true}') != (
         line('{"kind":"tool_result","summary":"x","is_error":false}'))
     for event, text in (
         ('{"kind":"task_error","error":"boom"}', "boom"),
         ('{"kind":"emergency","action":"land","status":"executed","result":"ok"}', "LAND"),
-        ('{"kind":"target_lost","summary":"track 3"}', "track 3"),
+        ('{"kind":"link_lost","summary":"Autopilot heartbeat lost"}', "heartbeat lost"),
         ('{"kind":"region_watch_paused","summary":"camera moved"}', "camera moved"),
-        ('{"kind":"plan_log","summary":"step 2"}', "step 2"),
+        ('{"kind":"object_detected","summary":"person lying on the ground"}', "person lying"),
     ):
         assert text in line(event), event
     # Assistant text is one bounded line; non-JSON payloads pass through unchanged.

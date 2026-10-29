@@ -1,18 +1,11 @@
-# Outdoor 150 m city map; as config/horus_forest.yaml except the higher altitude ceiling.
+# Outdoor 150 m city map; as config/horus_forest.yaml.
+gimbal:
+  # Simulated gimbal device; see config/horus.yaml.
+  connection: udpin:127.0.0.1:14600
 executor:
-  max_speed_m_s: 3.0
-  max_vertical_speed_m_s: 1.5
-  max_distance_m: 70.0
-  min_altitude_m: 1.0
-  max_altitude_m: 48.0
-  geofence_polygon_ned:
-    - [-65.0, -65.0]
-    - [-65.0, 65.0]
-    - [65.0, 65.0]
-    - [65.0, -65.0]
+  speed_m_s: 3.0
+  vertical_speed_m_s: 1.5
   arrival_tolerance_m: 0.4
-  follow_distance_m: 3.0
-  target_height_m: 1.9
   camera_horizontal_fov_deg: 84.0
   default_gimbal_pitch_deg: -45.0
 perception:

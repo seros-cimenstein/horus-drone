@@ -10,28 +10,22 @@ from collections.abc import Sequence
 from typing import Any
 
 from .bridge import (
-    DistanceSensorReading,
     MultiSensorBridge,
     RING_BEAMS,
     RingSensorSpec,
     SensorSpec,
     validate_rate_hz,
 )
+from .mavlink_out import (
+    BRIDGE_SOURCE_COMPONENT,
+    BRIDGE_SOURCE_SYSTEM,
+    PAYLOAD_DOWN_SENSOR,
+    PAYLOAD_SENSORS,
+    PymavlinkSender,
+    open_mavlink,
+)
 from .transport import subscribe_laser_scan
 
-BRIDGE_SOURCE_SYSTEM = 254
-BRIDGE_SOURCE_COMPONENT = 196  # MAV_COMP_ID_OBSTACLE_AVOIDANCE
-
-# The downward rangefinder (MAVLink PITCH_270), identical in both payload layouts.
-PAYLOAD_DOWN_SENSOR = ("range_down", 25, 6)
-# The standard HORUS ToF payload (sim/models/horus_sensor_payload): sensor name, MAVLink
-# DISTANCE_SENSOR orientation and sensor ID, in id order. The horizontal sensors are the named
-# RING_BEAMS directions; the payload SDF yaws each beam to the matching body direction.
-PAYLOAD_SENSORS: tuple[tuple[str, int, int], ...] = (
-    *sorted(((beam.name, beam.orientation, beam.sensor_id) for beam in RING_BEAMS if beam.name),
-            key=lambda sensor: sensor[2]),
-    PAYLOAD_DOWN_SENSOR,
-)
 PAYLOAD_LINK = "payload"
 # Generated worlds (horus_forest_p*/horus_urban_p*) carry horus_sensor_payload_procedural: one
 # 8-beam ring fanned out over every RING_BEAMS direction, plus the downward rangefinder.
@@ -78,30 +72,6 @@ def payload_specs(world: str, model_chain: str, layout: str = "seven") -> list[S
     if layout == "ring":
         return payload_ring_sensors(world, model_chain)
     raise ValueError(f"unknown payload layout {layout!r}; expected one of {', '.join(PAYLOAD_LAYOUTS)}")
-
-
-class _PymavlinkSender:
-    """Adapt a pymavlink connection or MAVLink object to the bridge sender API."""
-
-    def __init__(self, link: Any) -> None:
-        mav = getattr(link, "mav", link)
-        self._send = getattr(mav, "distance_sensor_send", None)
-        if not callable(self._send):
-            raise RuntimeError("MAVLink link has no distance_sensor_send method")
-        self._lock = threading.Lock()
-
-    def __call__(self, reading: DistanceSensorReading) -> None:
-        with self._lock:
-            self._send(
-                reading.time_boot_ms,
-                reading.min_distance,
-                reading.max_distance,
-                reading.current_distance,
-                reading.sensor_type,
-                reading.sensor_id,
-                reading.orientation,
-                reading.covariance,
-            )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -182,28 +152,13 @@ class _StartupWatch:
                 f"{', '.join(missing)}")
 
 
-def _open_mavlink(endpoint: str) -> Any:
-    try:
-        from pymavlink import mavutil
-    except ImportError as exc:
-        raise RuntimeError("pymavlink is unavailable; install it in the simulation container") from exc
-    try:
-        return mavutil.mavlink_connection(
-            endpoint,
-            source_system=BRIDGE_SOURCE_SYSTEM,
-            source_component=BRIDGE_SOURCE_COMPONENT,
-        )
-    except Exception as exc:
-        raise RuntimeError(f"could not open MAVLink endpoint {endpoint!r}: {exc}") from exc
-
-
 def _serve(
     sensors: Sequence[SensorSpec | RingSensorSpec],
     link: Any,
     rate_hz: float,
     startup_timeout: float,
 ) -> None:
-    bridge = MultiSensorBridge(_PymavlinkSender(link), sensors, rate_hz)
+    bridge = MultiSensorBridge(PymavlinkSender(link), sensors, rate_hz)
     received: set[str] = set()
     received_lock = threading.Lock()
     callback_errors: queue.Queue[Exception] = queue.Queue(maxsize=1)
@@ -275,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
     try:
-        link = _open_mavlink(args.mavlink)
+        link = open_mavlink(args.mavlink)
         print(
             f"Connected to {args.mavlink} as sysid={BRIDGE_SOURCE_SYSTEM} "
             f"compid={BRIDGE_SOURCE_COMPONENT}",

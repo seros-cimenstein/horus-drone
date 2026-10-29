@@ -157,6 +157,7 @@ rsync --archive --compress --delete \
   --exclude='/sim/logs/***' \
   --exclude='/sim/run/***' \
   --exclude='/models/***' \
+  --exclude='/data/***' \
   "${PROJECT_DIR}/" "${HORUS_REMOTE}:${HORUS_REMOTE_DIR}/"
 
 remote_arch="$(ssh -T "${HORUS_REMOTE}" uname -m)"

@@ -144,7 +144,7 @@ ARCHIVES = [
     # meshes carry no image references and their Ogre material scripts (alpha rejection) are not
     # copied, so the importer embeds the branch/bark textures into the COLLADA effects (diffuse
     # + alpha). Generated worlds then place each tree as one material-free visual whose instances
-    # share the mesh materials: thousands of per-visual SDF materials exhausted Koko's iGPU.
+    # share the mesh materials: thousands of per-visual SDF materials exhaust an integrated GPU.
     {
         "fuel": "OpenRobotics/Pine Tree", "version": 6,
         "sha256": "d436a44229321314e79e4c2ba709dc926e833a5b5d90d16c5d085c2a74576e25",

@@ -9,7 +9,6 @@ from .grounding import (
     GrounderConfig,
     GroundingPointer,
 )
-from .recognition import TinyEmbeddingClassifier
 from .pipeline import PerceptionSystem
 from .render import render_set_of_marks
 from .tracker import PersistentTracker
@@ -54,7 +53,6 @@ __all__ = [
     "SetOfMarkPayload",
     "StaleFrameError",
     "TrackerConfig",
-    "TinyEmbeddingClassifier",
     "YOLODetector",
     "cosine_similarity",
     "create_perception_system",

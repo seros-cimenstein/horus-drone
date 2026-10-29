@@ -1,24 +1,9 @@
 # Indoor room-and-corridor profile. Only non-default settings are listed; horus/config.py holds
 # the defaults and documents each executor field.
-executor:
-  # Indoor walls are 2.5 m high (indoor SITL RTL_ALT_M 2); keep the airframe below them rather
-  # than the 5 m outdoor envelope.
-  max_altitude_m: 2.2
-  # Room and corridor.
-  geofence_polygon_ned:
-    - [-4.0, -5.0]
-    - [-4.0, 5.0]
-    - [4.0, 5.0]
-    - [4.0, 1.4]
-    - [8.0, 1.4]
-    - [8.0, -1.4]
-    - [4.0, -1.4]
-    - [4.0, -5.0]
-  # Polygon edges are wall centre lines (walls are 0.2 m thick). ArduPilot proximity avoidance
-  # holds AVOID_MARGIN 1.0 m (config/ardupilot/*.parm) from wall faces, so the inset is
-  # 0.1 m half wall + 1.0 m + 0.1 m slack; a smaller inset makes edge targets unreachable.
-  geofence_margin_m: 1.2
-  target_height_m: 1.9
+gimbal:
+  # The simulated gimbal device (horus-gz-gimbal, or horus-gta-bridge in GTA pose mode) sends to
+  # this port; HORUS drives it directly, not through ArduPilot.
+  connection: udpin:127.0.0.1:14600
 perception:
   # Frames are kept by wall time. The commander often thinks 10-25 s between get_frame and point,
   # so keep 30 s (~140 MB at 5 fps, 640x480); tracker retention stays capped at 10 s.

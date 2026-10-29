@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .bridge import DistanceSensorReading, laser_scan_to_distance_sensor
-from .cli import BRIDGE_SOURCE_COMPONENT, BRIDGE_SOURCE_SYSTEM, PAYLOAD_SENSORS, _open_mavlink, _PymavlinkSender
+from .mavlink_out import BRIDGE_SOURCE_COMPONENT, BRIDGE_SOURCE_SYSTEM, PAYLOAD_SENSORS, PymavlinkSender, open_mavlink
 
 PACKET = struct.Struct("<4sIII7f")
 MAGIC = b"HRNG"
@@ -159,7 +159,7 @@ def _open_when_listening(endpoint: str) -> Any:
                 break
             except OSError:
                 time.sleep(1.0)
-    return _open_mavlink(endpoint)
+    return open_mavlink(endpoint)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -180,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     sock.settimeout(1.0)
     print(f"listening for HorusGta range packets on udp {args.listen}", flush=True)
     try:
-        serve(sock, _PymavlinkSender(link), log=lambda line: print(line, flush=True))
+        serve(sock, PymavlinkSender(link), log=lambda line: print(line, flush=True))
     except KeyboardInterrupt:
         return 0
     finally:

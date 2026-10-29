@@ -54,10 +54,26 @@ namespace HorusGta
         public string Target => Host + ":" + Port.ToString(CultureInfo.InvariantCulture);
     }
 
+    /// <summary>What the screen shows while the drone flies ([view], README "Shared view").</summary>
+    public enum ViewMode
+    {
+        /// <summary>The drone camera is on screen; the player is held (view_mode 0).</summary>
+        Drone,
+        /// <summary>The player keeps his camera; the drone camera renders one tick in DroneEvery (view_mode 1).</summary>
+        Shared,
+    }
+
+    public struct ViewSettings
+    {
+        public ViewMode Mode;
+        /// <summary>Shared view: one drone tick every this many ticks, 2..4.</summary>
+        public int DroneEvery;
+    }
+
     /// <summary>
     /// HorusGta.ini: [pose] bind, port, timeout_s; [origin] x, y, heading_deg, optional z;
     /// [scene] weather, hour, freeze_time (empty = leave the game's); [physics] bind, port,
-    /// budget_ms, hfov_deg, trace_hz; [sensors] enabled, target, rate_hz.
+    /// budget_ms, hfov_deg, trace_hz; [sensors] enabled, target, rate_hz; [view] mode, drone_every.
     /// </summary>
     public sealed class ModConfig
     {
@@ -79,8 +95,8 @@ namespace HorusGta
         public double TimeoutS = 1.9;
         /// <summary>Legion Square, Los Santos.</summary>
         public Origin Origin = new Origin { X = 195.0, Y = -933.0, HeadingDeg = 0.0, Z = null };
-        /// <summary>Clear midday light that stays put, so perception sees the same scene every run.</summary>
-        public Scene Scene = new Scene { Weather = "EXTRASUNNY", Hour = 12, FreezeTime = true };
+        /// <summary>The game's own weather and clock unless [scene] sets them.</summary>
+        public Scene Scene = new Scene { Weather = null, Hour = null, FreezeTime = false };
         /// <summary>
         /// SITL's JSON default port; 10 ms of a ~33 ms tick, about 30 % of the game frame, for the
         /// lockstep answers (800 Hz needs ~27 per tick in real time); HORUS's 84° camera.
@@ -88,6 +104,8 @@ namespace HorusGta
         public PhysicsSettings Physics = new PhysicsSettings { Bind = "127.0.0.1", Port = 9002, BudgetMs = 10, HfovDeg = 84, TraceHz = 0 };
         /// <summary>On, to the HORUS range bridge (horus.tof_bridge.gta) on loopback, 20 sweeps per sim second.</summary>
         public SensorSettings Sensors = new SensorSettings { Enabled = true, Host = "127.0.0.1", Port = 5612, RateHz = RangeSensors.DefaultRateHz };
+        /// <summary>The drone camera on screen, as before the shared view existed.</summary>
+        public ViewSettings View = new ViewSettings { Mode = ViewMode.Drone, DroneEvery = SharedView.DefaultDroneEvery };
         /// <summary>Problems found while parsing; each falls back to the default.</summary>
         public readonly List<string> Warnings = new List<string>();
 
@@ -201,6 +219,16 @@ namespace HorusGta
                 case "sensors.rate_hz":
                     if (TryNumber(value, out double rate) && rate >= RangeSensors.MinRateHz && rate <= RangeSensors.MaxRateHz) Sensors.RateHz = rate;
                     else Warn(n, $"sensors.rate_hz '{value}' is not 10..20");
+                    break;
+                case "view.mode":
+                    if (value.Equals("drone", StringComparison.OrdinalIgnoreCase)) View.Mode = ViewMode.Drone;
+                    else if (value.Equals("shared", StringComparison.OrdinalIgnoreCase)) View.Mode = ViewMode.Shared;
+                    else Warn(n, $"view.mode '{value}' is not drone or shared");
+                    break;
+                case "view.drone_every":
+                    if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int every)
+                        && every >= SharedView.MinDroneEvery && every <= SharedView.MaxDroneEvery) View.DroneEvery = every;
+                    else Warn(n, $"view.drone_every '{value}' is not {SharedView.MinDroneEvery}..{SharedView.MaxDroneEvery}");
                     break;
                 default:
                     Warn(n, $"unknown setting [{section}] {key}", usesDefault: false);

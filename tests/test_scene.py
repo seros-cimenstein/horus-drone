@@ -515,8 +515,10 @@ def test_wall_clock_steps_do_not_change_camera_state_freshness_for_watches(monke
     import math
     from datetime import datetime, timedelta, timezone
 
-    from horus.config import FlightSettings
+    from horus.config import FlightSettings, GimbalSettings
     import horus.flight.link as link_module
+    import horus.gimbal.link as gimbal_module
+    from horus.gimbal import frames
     from horus.perception.factory import camera_pose_from_telemetry
 
     clock = [1000.0]
@@ -529,25 +531,30 @@ def test_wall_clock_steps_do_not_change_camera_state_freshness_for_watches(monke
 
     monkeypatch.setattr(link_module.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(link_module, "datetime", SteppedDatetime)
+    monkeypatch.setattr(gimbal_module, "datetime", SteppedDatetime)
     link = link_module.MavlinkFlightLink(FlightSettings(), connection=SimpleNamespace())
+    gimbal = gimbal_module.MavlinkGimbal(GimbalSettings(), link.telemetry, connection=SimpleNamespace())
+    gimbal_status = SimpleNamespace(
+        get_type=lambda: "GIMBAL_DEVICE_ATTITUDE_STATUS", get_srcSystem=lambda: 1, get_srcComponent=lambda: 154,
+        flags=frames.HORIZON_LOCKED_VEHICLE_YAW, q=frames.quaternion_from_euler(0.0, -45.0, 0.0),
+        delta_yaw=math.nan,
+    )
 
-    def feed(*, mount=True, attitude=True):
+    def feed(*, gimbal_reports=True, attitude=True):
         link._consume(SimpleNamespace(get_type=lambda: "LOCAL_POSITION_NED", x=0.0, y=0.0, z=-10.0, vx=0.0, vy=0.0, vz=0.0))
         link._consume(SimpleNamespace(get_type=lambda: "GLOBAL_POSITION_INT", vx=0, vy=0, vz=0, hdg=9000, lat=0, lon=0, relative_alt=10000))
         if attitude:
             link._consume(SimpleNamespace(get_type=lambda: "ATTITUDE", roll=0.0, pitch=math.radians(1.0), yaw=math.radians(90.0)))
-        if mount:
-            link._consume(SimpleNamespace(
-                get_type=lambda: "MOUNT_STATUS", target_system=1, target_component=1, mount_mode=2,
-                pointing_a=-4500, pointing_b=0, pointing_c=0,
-            ))
+        if gimbal_reports:
+            gimbal._consume(gimbal_status)
 
     scene = _Scene()
 
     def frame(**feed_args):
         feed(**feed_args)
         clock[0] += 0.1
-        scene.frame(round(scene.now + 0.1, 3), pose=camera_pose_from_telemetry(link.telemetry(), now=clock[0]))
+        pose = camera_pose_from_telemetry(link.telemetry(), gimbal.attitude(), now=clock[0])
+        scene.frame(round(scene.now + 0.1, 3), pose=pose)
 
     frame()
     scene.monitor.watch_region("gate", BOX)
@@ -559,10 +566,10 @@ def test_wall_clock_steps_do_not_change_camera_state_freshness_for_watches(monke
     assert scene.take() == []
     assert scene.monitor.list_region_watches()["watches"][0]["status"] == "active"
 
-    # MOUNT_STATUS stops while UTC jumps back again: monotonic age makes the gimbal stale.
+    # The gimbal stops reporting while UTC jumps back again: monotonic age makes it stale.
     utc[0] -= timedelta(hours=3)
     for _ in range(20):
-        frame(mount=False)
+        frame(gimbal_reports=False)
     [(kind, data)] = scene.take()
     assert kind == "region_watch_paused" and data["detail"] == {"camera_state": "gimbal_stale"}
 

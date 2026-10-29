@@ -115,18 +115,9 @@ class ForestLayout:
     clearing: Point
     clearing_radius: float
     camp: Point
-    missing_hiker: PersonPlacement
-    missing_canopy_tree: Point
-    injured_person: PersonPlacement
     hiker_routes: tuple[PersonPlacement, ...]
     ranger_routes: tuple[PersonPlacement, ...]
     family_positions: tuple[PersonPlacement, ...]
-    follow_hiker: PersonPlacement
-    follow_occluder_xy: Point
-    follow_speed: float
-    follower_altitude_m: float
-    follower_horizontal_m: float
-    expected_occlusion_s: float
     tree_count: int
     tree_height_range: tuple[float, float]
     fallen_logs: tuple[tuple[float, float, float, float], ...]
@@ -135,20 +126,14 @@ class ForestLayout:
     terrain_phases: tuple[float, float, float]
     terrain_frequencies: tuple[float, float, float, float, float]
     attempts: int = 1
-    follow_occluder_radius_m: float = 1.8
-    # A prone casualty in the open: the approach test targets a lying person, and a person under
-    # a canopy (the missing hiker) is not observable from the transit-altitude vantages.
-    casualty: PersonPlacement | None = None
     map: MapSpec = CANONICAL_MAP
     # --- procedural 1.2 km forest (empty / default on canonical worlds) ---
-    # Full trail network (``trail`` is the main trail the mission content uses); ``trails``
-    # holds every polyline, including ``trail`` itself. ``creeks`` likewise includes ``creek``.
+    # Full trail network (``trail`` is the main trail through home); ``trails`` holds every
+    # polyline, including ``trail`` itself. ``creeks`` likewise includes ``creek``.
     trails: tuple[tuple[Point, ...], ...] = ()
     creeks: tuple[tuple[Point, ...], ...] = ()
     clearings: tuple[tuple[Point, float], ...] = ()
     camps: tuple[Point, ...] = ()
-    # Mission-relevant locations: (name, kind, x, y, radius).
-    sites: tuple[tuple[str, str, float, float, float], ...] = ()
     # Static scenery handed to ``scenery.emit_scenery`` (instanced assets + merged meshes).
     scenery_instances: tuple[object, ...] = ()
     scenery_meshes: tuple[object, ...] = ()
@@ -166,9 +151,7 @@ class ForestLayout:
 
     @property
     def people(self) -> tuple[PersonPlacement, ...]:
-        return (*self.hiker_routes, *self.ranger_routes, *self.family_positions,
-                self.missing_hiker, self.injured_person, self.follow_hiker,
-                *((self.casualty,) if self.casualty is not None else ()))
+        return (*self.hiker_routes, *self.ranger_routes, *self.family_positions)
 
 
 @dataclass(frozen=True)
@@ -210,22 +193,22 @@ class ParkedCar:
 # ``UrbanLayout.city`` as ``None`` and keeps using the flat fields above byte-for-byte.
 @dataclass(frozen=True)
 class PlazaSpec:
-    """One paved plaza; ``mission`` marks the crowd/red-shirt plaza the manifest exposes."""
+    """One paved plaza; ``crowd`` marks the plaza that hosts the standing crowd."""
 
     x: float
     y: float
     half_size: float
-    mission: bool = False
+    crowd: bool = False
 
 
 @dataclass(frozen=True)
 class ParkSpec:
-    """One park block; ``mission`` marks the park that hosts the sitting group."""
+    """One park block; ``sitters`` marks the park that hosts the sitting group."""
 
     x: float
     y: float
     half_size: float
-    mission: bool = False
+    sitters: bool = False
 
 
 @dataclass(frozen=True)
@@ -258,7 +241,6 @@ class CitySpec:
     parks: tuple[ParkSpec, ...]
     trees: tuple[TreeSpec, ...]
     bus_stops: tuple[BusStopSpec, ...]
-    sites: tuple[tuple[str, str, float, float, float], ...]
     lamps: tuple[tuple[float, float, float], ...] = ()
 
 
@@ -279,26 +261,15 @@ class UrbanLayout:
     utility_poles: tuple[Point, ...]
     trash_bins: tuple[Point, ...]
     bus_shelter_center: Point
-    jogger_shelter_center: Point
-    jogger_shelter_size: tuple[float, float]
     parked_cars: tuple[ParkedCar, ...]
     commuters: tuple[PersonPlacement, ...]
     crossings: tuple[PersonPlacement, ...]
     bus_waiting: tuple[PersonPlacement, ...]
     joggers: tuple[PersonPlacement, ...]
-    follow_jogger: PersonPlacement
     park_sitting: tuple[PersonPlacement, ...]
     plaza_crowd: tuple[PersonPlacement, ...]
-    red_shirt: PersonPlacement
-    collapsed: PersonPlacement
     vehicles: tuple[VehiclePlacement, ...]
-    follow_speed: float
-    follower_altitude_m: float
-    follower_horizontal_m: float
-    expected_occlusion_s: float
     attempts: int = 1
-    follow_occluder_kind: str = "shelter"
-    follow_occluder_yaw: float = 0.0
     lamp_height_m: float = 8.6
     map: MapSpec = CANONICAL_MAP
     # Procedural 1.2 km cities: actor geofence half-extent (inside the profile polygon) and the
@@ -311,13 +282,7 @@ class UrbanLayout:
     @property
     def people(self) -> tuple[PersonPlacement, ...]:
         return (*self.commuters, *self.crossings, *self.bus_waiting, *self.joggers,
-                self.follow_jogger, *self.park_sitting, *self.plaza_crowd,
-                *((self.red_shirt,) if self.canonical else ()), self.collapsed)
-
-    @property
-    def sites(self) -> tuple[tuple[str, str, float, float, float], ...]:
-        """Mission/site table ``(name, kind, x, y, radius)``; canonical worlds have none."""
-        return self.city.sites if self.city is not None else ()
+                *self.park_sitting, *self.plaza_crowd)
 
 
 _FOREST_TRAIL = (
@@ -365,30 +330,11 @@ def canonical_forest_layout(seed: int = 2027) -> ForestLayout:
         person_placement("civ_family_03", "family", "person_green_kinematic", (31.4, 36.2), 2.7),
         person_placement("civ_family_04", "family", "person_dark", (32.2, 33.6), 2.9),
     )
-    follow_route = tuple(_FOREST_TRAIL[5:10])
     return ForestLayout(
         seed=seed, canonical=True, trail=_FOREST_TRAIL, creek=_FOREST_CREEK,
         clearing=(-7.0, 31.0), clearing_radius=17.0, camp=(29.0, 35.0),
-        missing_hiker=person_placement("civ_missing_hiker_01", "missing_hiker",
-                              "person_laying_kinematic", (-42.0, 20.0), 0.4),
-        missing_canopy_tree=(-45.2, 20.5),
-        # The injured hiker rests in the open clearing: the campaign's scan test measures
-        # detection coverage over the clearing scan rectangle, and an empty meadow can never
-        # score. The canopy-covered spot (13, -43) offered no clear descent column.
-        injured_person=person_placement("civ_injured_01", "injured", "person_sitting",
-                               (-6.0, 30.0), 1.2),
-        casualty=person_placement("civ_casualty_01", "casualty", "person_laying_kinematic",
-                         (-9.5, 33.5), 2.4),
         hiker_routes=hiker_routes, ranger_routes=ranger, family_positions=family,
-        follow_hiker=person_placement("civ_hiker_04", "hiker", "person_green_kinematic",
-                             follow_route[0], 0.5, "route", "follow_hiker",
-                             follow_route, 1.25, "once"),
-        follow_occluder_xy=(-13.42, -16.164), follow_speed=1.25,
-        # 8 m / 3 m frames the target inside the 84 deg / -45 deg camera and lets the enlarged
-        # bush occlude the pursuit; a steeper, closer follower (6.8 m / 1.66 m looks 77 deg down)
-        # leaves the target out of frame unless the bush sits in the follower lane.
-        follower_altitude_m=8.0, follower_horizontal_m=3.0,
-        expected_occlusion_s=2.2, tree_count=280, tree_height_range=(10.0, 20.0),
+        tree_count=280, tree_height_range=(10.0, 20.0),
         fallen_logs=((-43, 4, 5.4, 0.7), (4, -34, 4.6, -0.2),
                      (54, 12, 6.0, 1.1), (-14, 50, 4.2, -0.5),
                      (42, -49, 5.0, 0.4)),
@@ -475,7 +421,7 @@ def forest_height(x: float, y: float, layout: ForestLayout) -> float:
     return value if layout.canonical else max(-1.5, min(3.2, value))
 
 
-# The terrain grid is a pure function of the terrain fields, not of the mission content or
+# The terrain grid is a pure function of the terrain fields, not of the people or
 # scenery (which the sampler changes on every attempt). Keying the cache on those fields lets
 # the sampler build a 301 x 301 grid once and reuse it for the validated layout, instead of
 # recomputing it after every `dataclasses.replace`.
@@ -509,53 +455,6 @@ def forest_surface(layout: ForestLayout) -> TriangulatedGrid:
     """The physical/rendered forest ground that actors stand on (see ``sim.worldgen.surface``)."""
     spec = layout.map
     return TriangulatedGrid(forest_ground_rows(layout), spec.min, spec.min, spec.cell_m)
-
-
-CLEARING_SCAN_ALTITUDE_M = 10.0
-# The scan needs 2.0 m clearance; the extra 0.6 m drone radius and sampling slack are folded
-# into this margin so canopies closer than this can put a scan leg inside its safety margin.
-CLEARING_SCAN_MARGIN_M = 3.0
-# People the forest planner must frame from a vantage: no canopy may cover their descent
-# column, and every walker route keeps body clearance from canopy envelopes.
-# Roles whose descent column must stay canopy-free: each needs a vantage the planner can use.
-FOREST_VANTAGE_ROLES = ("missing_hiker", "injured", "casualty")
-
-
-def clearing_scan_rectangle(centre: Point, clearing_radius: float) -> tuple[float, float, float]:
-    """(centre x, centre y, half extent) of the largest clearing scan rectangle; mirrors the
-    campaign scan plan's square inscribed in the clearing circle."""
-    return centre[0], centre[1], min(12.0, clearing_radius / math.sqrt(2.0) - 1.0)
-
-
-def clears_clearing_scan(x: float, y: float, z_low: float, z_high: float, radius: float,
-                         centre: Point, clearing_radius: float) -> bool:
-    """True when a canopy (vertical span ``z_low..z_high`` at ``x, y`` with horizontal
-    ``radius``) keeps the scan margin from the clearing raster at ``CLEARING_SCAN_ALTITUDE_M``."""
-    centre_x, centre_y, half = clearing_scan_rectangle(centre, clearing_radius)
-    dx = max(abs(x - centre_x) - half, 0.0)
-    dy = max(abs(y - centre_y) - half, 0.0)
-    vertical = max(0.0, z_low - CLEARING_SCAN_ALTITUDE_M, CLEARING_SCAN_ALTITUDE_M - z_high)
-    return math.hypot(dx, dy, vertical) - radius >= CLEARING_SCAN_MARGIN_M
-
-
-def clears_actor_columns(x: float, y: float, z_low: float, z_high: float, radius: float,
-                         columns: Sequence[tuple[float, ...]], margin: float) -> bool:
-    """True when a canopy envelope (vertical span ``z_low..z_high`` at ``x, y`` with horizontal
-    ``radius``) keeps ``margin`` from every actor column in ``columns``.
-
-    A column is ``(x, y)`` (body/route clearance) or ``(x, y, torso_z)``, in which case it
-    extends upward from ``torso_z``: the descent corridor a vantage must use. Canopies sit
-    above every torso, so a footprint that covers a column blocks it.
-    """
-    for column in columns:
-        px, py = column[0], column[1]
-        horizontal = math.hypot(px - x, py - y)
-        if len(column) < 3 or z_high >= column[2]:
-            if horizontal - radius < margin:
-                return False
-        elif math.hypot(horizontal, column[2] - z_high) - radius < margin:
-            return False
-    return True
 
 
 def clears_actor_routes(x: float, y: float, radius: float, people: Sequence[Any],
@@ -615,9 +514,6 @@ def canonical_urban_layout(seed: int = 2028) -> UrbanLayout:
     joggers = tuple(person_placement(f"civ_jogger_{i:02d}", "jogger", asset, (x, y), 1.57, "route",
                             route=((x, y), (x, y + 17), (x, y + 30), (x, y + 17)), speed=2.5, mode="pingpong")
                     for i, (asset, x, y) in enumerate((("person_orange", -42, -31), ("person_blue_kinematic", 43, 27)), 1))
-    follow_route = ((21.65, -43), (21.65, -21.65), (18, -21.65), (18, -10.35), (21.65, -10.35), (21.65, 10))
-    follow = person_placement("civ_jogger_03", "jogger", "person_red_kinematic", follow_route[0], math.pi / 2,
-                     "route", "follow_jogger", follow_route, 2.5, "once")
     park_sitting = tuple(person_placement(f"civ_park_sitting_{i:02d}", "park_sitting", "person_sitting", (x, y), yaw)
                          for i, (x, y, yaw) in enumerate(((28, -1, 0), (34, 1.5, math.pi / 2),
                                                          (29, 4, 0), (35, 4, math.pi)), 1))
@@ -628,9 +524,8 @@ def canonical_urban_layout(seed: int = 2028) -> UrbanLayout:
                             ("person_orange", 3.8, 2.8, 1.1), ("person_blue_kinematic", 5.3, 0.8, 3.0),
                             ("person_green_kinematic", 4.2, -1.6, -0.6), ("person_dark", 2, -3.7, 0.5),
                             ("person_blue_kinematic", -0.5, -4.2, 1.8), ("person_orange", -3, -3.6, -2.1),
-                            ("person_green_kinematic", -5.3, -1.8, 2.8), ("person_dark", -3.7, 0.3, -1.5)), 1))
-    red = person_placement("civ_red_shirt_01", "red_shirt", "person_red_kinematic", (0.2, 5.6), -0.8)
-    collapsed = person_placement("civ_collapsed_01", "collapsed", "person_collapsed_kinematic", (-8, 22), 0.2)
+                            ("person_green_kinematic", -5.3, -1.8, 2.8), ("person_dark", -3.7, 0.3, -1.5),
+                            ("person_red_kinematic", 0.2, 5.6, -0.8)), 1))
     # Right-hand traffic: vehicles circulate around blocks (clockwise loops use the inner lanes,
     # anticlockwise loops the outer lanes) instead of reversing in place at a route end.
     vehicles = (
@@ -662,13 +557,10 @@ def canonical_urban_layout(seed: int = 2028) -> UrbanLayout:
             (16, -45), (16, 45), (48, -45), (48, 0), (48, 45))),
         utility_poles=tuple((x, y) for x in (-65, 65) for y in (-46, -17, 18, 49)),
         trash_bins=((-43.0, 16.0), (-21, -43), (20, 42.0), (44, -21), (5, -10.0), (44, 7), (-7, 42.0), (9, -44)),
-        bus_shelter_center=(8.5, -9.8), jogger_shelter_center=(21.65, -5.0),
-        jogger_shelter_size=(3.6, 8.0), parked_cars=parked,
+        bus_shelter_center=(8.5, -9.8), parked_cars=parked,
         commuters=commuters, crossings=crossings, bus_waiting=bus_waiting,
-        joggers=joggers, follow_jogger=follow, park_sitting=park_sitting,
-        plaza_crowd=plaza_crowd, red_shirt=red, collapsed=collapsed,
-        vehicles=vehicles, follow_speed=2.5, follower_altitude_m=10.0,
-        follower_horizontal_m=5.0, expected_occlusion_s=8.0 / 2.5)
+        joggers=joggers, park_sitting=park_sitting, plaza_crowd=plaza_crowd,
+        vehicles=vehicles)
 
 
 

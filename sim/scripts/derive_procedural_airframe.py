@@ -3,8 +3,8 @@
 
 The outdoor airframe (``horus_iris_with_gimbal_outdoor``) collides through triangle meshes: the Iris
 body (``iris_collision.stl``) and three gimbal arms. Against a generated world's large terrain
-mesh those mesh-vs-mesh contacts stall dartsim (RTF 0.00 on Koko), while the same world with box
-proxies runs at RTF ~0.47. This script writes procedural copies whose mesh collisions are replaced
+mesh those mesh-vs-mesh contacts stall dartsim, while the same world with box proxies runs at
+the host's normal real-time factor. This script writes procedural copies whose mesh collisions are replaced
 by their mesh-bound boxes; visuals, joints, plugins and include names are unchanged, so camera
 topic paths stay identical to the outdoor chain. It also writes
 ``horus_sensor_payload_procedural``: the ToF payload with its six single-beam proximity sensors
@@ -89,10 +89,10 @@ def _replace_once(text: str, old: str, new: str) -> str:
     return text.replace(old, new)
 
 
-# Generated worlds render camera and ToF at 5 Hz instead of 10: measured live on Koko (1.2 km
-# forest, civilians moving) the drone's render sensors bound the world at RTF 0.14 at 10 Hz and
-# 0.28 at 5 Hz. Perception already processes at most 5 fps (perception.max_fps), ArduPilot's
-# proximity timeout is 500 ms of sim time, and HORUS's 1.5 s telemetry age holds above RTF 0.14.
+# Generated worlds render camera and ToF at 5 Hz instead of 10: on a 1.2 km world with civilians
+# moving, the drone's render sensors bound the real-time factor, and halving their rate roughly
+# doubles it. Perception already processes at most 5 fps (perception.max_fps), ArduPilot's
+# proximity timeout is 500 ms of sim time, and HORUS's 1.5 s telemetry age holds at low RTF.
 SENSOR_RATE_HZ = 5
 
 

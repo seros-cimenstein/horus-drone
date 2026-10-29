@@ -2,11 +2,13 @@
 # GTA modes (gta/horus_mod/README.md), started by `sim/run.sh start --gta [--json-physics]` inside the
 # horus-sim container; `sim/run.sh stop` ends them. No Gazebo.
 # Pose mode (default): ArduCopter SITL with its built-in quad physics, plus horus-gta-bridge
-# streaming the camera pose to HorusGta.dll in GTA V.
+# streaming the camera pose to HorusGta.dll in GTA V. The bridge is also HORUS's camera gimbal
+# device (udpout:127.0.0.1:14600 -> HORUS's gimbal.connection), an ideal self-levelling gimbal.
 #   serial0 tcp:5760  HORUS (single flight client; free once sim.ready exists)
 #   serial1 tcp:5762  horus-gta-bridge -> udp HORUS_GTA_TARGET (default 127.0.0.1:5611)
 # Physics mode (HORUS_GTA_PHYSICS=json): SITL on its JSON backend; HorusGta.dll in GTA answers on
 # udp HORUS_GTA_PHYSICS_ADDRESS:9002 with the quad's state, and SITL derives its sensors from it.
+# No gimbal device answers HORUS: the camera follows ArduPilot's servo mount (temporary stand-in).
 #   serial0 tcp:5760  HORUS
 #   serial2 tcp:5763  horus.tof_bridge.gta <- udp 127.0.0.1:5612: HorusGta's emulated ToF payload
 #                     (seven beams cast into the GTA world) as DISTANCE_SENSOR, as in the Gazebo sims
@@ -51,14 +53,20 @@ log_dir="${run_dir}/logs"
 mkdir -p "${log_dir}"
 printf '%s\n' "${run_id}" > "${run_root}/.active"
 
-# The gimbal is the servo mount every HORUS profile uses (config/ardupilot/common.parm). The fence
-# fragments describe Gazebo worlds and are left out; in physics mode the proximity and rangefinder
-# lines are taken too, because HorusGta.dll emulates the ToF payload there.
+# No mount in pose mode: horus-gta-bridge is HORUS's gimbal device there. The Gazebo fence
+# fragments are left out; config/ardupilot/gta.parm is GTA's own ArduPilot fence, in both modes. In
+# physics mode the proximity and rangefinder lines are taken from config/ardupilot/common.parm,
+# because HorusGta.dll emulates the ToF payload there.
 param_file="${run_dir}/sitl-overrides.parm"
 {
-  printf 'LOG_DISARMED 0\n\n# Mount from /horus/config/ardupilot/common.parm\n'
-  grep -E '^(MNT1_[A-Z_]+|SERVO(9|10|11)_FUNCTION)[[:space:]]' /horus/config/ardupilot/common.parm
+  printf 'LOG_DISARMED 0\n'
+  printf '\n# ArduPilot fence from /horus/config/ardupilot/gta.parm\n'
+  grep -v '^#' /horus/config/ardupilot/gta.parm
   if [[ "${physics}" == json ]]; then
+    # Temporary stand-in until HorusGta.dll takes gimbal setpoints from HORUS: ArduPilot's servo
+    # mount drives the camera through SERVO9-11 (PhysicsLink.cs GimbalServo). HORUS never commands
+    # it; without RC input it rests at the middle of its ranges, pitch -45 and yaw 0.
+    printf '\n# Servo mount (temporary, physics mode only)\nMNT1_TYPE 1\nMNT1_PITCH_MIN -135\nMNT1_PITCH_MAX 45\nMNT1_YAW_MIN -160\nMNT1_YAW_MAX 160\nSERVO9_FUNCTION 8\nSERVO10_FUNCTION 7\nSERVO11_FUNCTION 6\n'
     # HorusGta's quad (gta/horus_mod/src/Core/QuadPhysics.cs) is an X frame in ArduPilot's motor
     # order; copter.parm's default is +. SITL waits for GTA's answer to every servo frame, and GTA
     # answers inside its ~30 Hz script ticks, so the frame rate is kept at 800 Hz instead of SITL's
@@ -69,8 +77,7 @@ param_file="${run_dir}/sitl-overrides.parm"
     grep -E '^(PRX1_TYPE|AVOID_ENABLE|AVOID_MARGIN|RNGFND1_[A-Z]+)[[:space:]]' /horus/config/ardupilot/common.parm
     # ArduPilot low-pass filters each proximity face (PRX_FILT, default 0.25 Hz: a 0.64 s time
     # constant), so a wall approached at the profile's 3 m/s reads about 2 m farther than it is.
-    # On 2026-10-22 a goto into the sculpture face that way braked only from 3.0 to 2.36 m/s before
-    # contact. HorusGta's beams are exact ray casts, with nothing to smooth: 0 turns the filter off.
+    # HorusGta's beams are exact ray casts, with nothing to smooth: 0 turns the filter off.
     printf 'PRX_FILT 0\n'
   fi
 } > "${param_file}"

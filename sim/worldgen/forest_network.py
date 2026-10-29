@@ -1,10 +1,9 @@
 """Trail/creek network and the people placed on it, for the 1.2 km procedural forest.
 
 Catmull-Rom trails (a main trail within 15 m of home plus one loop per quadrant), one or two
-creeks, clearings and campsites; then the people sampled against that network: the follow
-route and its walker's speed, three ambient hikers in different quadrants, and the mission
-people (the canopy-hidden missing hiker, the injured person and casualty in the mission
-clearing, and the ranger). :mod:`sim.worldgen.forest_procedural` assembles them into a layout.
+creeks, clearings and campsites; then the people sampled against that network: three ambient
+hikers in different quadrants and the ranger. :mod:`sim.worldgen.forest_procedural`
+assembles them into a layout.
 """
 
 from __future__ import annotations
@@ -12,17 +11,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 import math
 import random
-from typing import NamedTuple
 
-from sim.worldgen.layout import (
-    PersonPlacement, distance_to_path, distance_to_paths, person_placement, resample_path,
-)
+from sim.worldgen.layout import PersonPlacement, distance_to_paths, person_placement, resample_path
 from sim.worldgen.validation import SampleRejected
 
 
-MISSION_CLEARING_MIN_M = 120.0        # injured + casualty clearing distance from home
-MISSING_HIKER_MIN_M = 150.0           # missing hiker distance from home
-FOLLOW_START_MIN_M = 100.0            # follow route start distance from home
 TERRAIN_HALF_M = 560.0                # trail/creek/clearing/camp generation half extent
 
 
@@ -194,54 +187,8 @@ def _route_candidates(rng: random.Random, trails: Sequence[Sequence[tuple[float,
     return candidates
 
 
-def _missing_hiker(rng: random.Random, trails: Sequence[Sequence[tuple[float, float]]],
-                   creeks: Sequence[Sequence[tuple[float, float]]],
-                   clearings: Sequence[tuple[float, float, float]],
-                   camps: Sequence[tuple[float, float]],
-                   follow_route: Sequence[tuple[float, float]],
-                   inset: float) -> tuple[tuple[float, float], tuple[float, float]] | None:
-    for _ in range(240):
-        trail = rng.choice(trails)
-        total = path_length(trail)
-        along = rng.uniform(40.0, max(41.0, total - 40.0))
-        node, direction = point_at_distance(trail, along)
-        side = rng.choice((-1.0, 1.0))
-        normal = (-direction[1], direction[0])
-        offset = rng.uniform(6.0, 15.0) * side
-        hiker = (node[0] + normal[0] * offset, node[1] + normal[1] * offset)
-        if math.hypot(*hiker) < MISSING_HIKER_MIN_M:
-            continue
-        if not 6.0 <= distance_to_paths(hiker, trails) <= 15.0:
-            continue
-        if distance_to_paths(hiker, creeks) < 14.0:
-            continue
-        if any(math.hypot(hiker[0] - cx, hiker[1] - cy) < cr + 15.0 for cx, cy, cr in clearings):
-            continue
-        if any(math.hypot(hiker[0] - cx, hiker[1] - cy) < 25.0 for cx, cy in camps):
-            continue
-        if distance_to_path(hiker, follow_route) < 25.0:
-            continue
-        if max(abs(hiker[0]), abs(hiker[1])) > inset - 25.0:
-            continue
-        canopy_distance = rng.uniform(2.4, 3.0)
-        canopy = (hiker[0] + normal[0] * math.copysign(canopy_distance, side),
-                  hiker[1] + normal[1] * math.copysign(canopy_distance, side))
-        return hiker, canopy
-    return None
-
-
-class MissionPeople(NamedTuple):
-    missing: PersonPlacement
-    canopy_xy: tuple[float, float]
-    canopy_scale: float
-    clearing: tuple[float, float, float]
-    injured: PersonPlacement
-    casualty: PersonPlacement
-    ranger: PersonPlacement
-
-
 def sample_network(rng: random.Random):
-    """Trails, creeks, clearings and camps, rejected when the mission layout cannot fit."""
+    """Trails, creeks, clearings and camps."""
     trails = _trail_network(rng)
     if min(math.hypot(x, y) for x, y in trails[0]) > 15.0:
         raise SampleRejected("main trail misses home")
@@ -255,24 +202,6 @@ def sample_network(rng: random.Random):
     if not camps:
         raise SampleRejected("camp placement")
     return trails, creeks, clearings, camps
-
-
-def sample_follow_route(rng: random.Random, trails, inset: float
-                        ) -> tuple[tuple[tuple[float, float], ...], float]:
-    """A long trail slice whose start is at least 100 m from home, and the hiker's speed."""
-    for _ in range(120):
-        trail = rng.choice(trails)
-        total = path_length(trail)
-        start = rng.uniform(FOLLOW_START_MIN_M + 5.0, max(FOLLOW_START_MIN_M + 6.0, total - 220.0))
-        route = _slice_path(trail, start, rng.uniform(140.0, 210.0))
-        if len(route) < 3 or path_length(route) < 130.0:
-            continue
-        if math.hypot(*route[0]) < FOLLOW_START_MIN_M:
-            continue
-        if max(max(abs(x), abs(y)) for x, y in route) > inset - 5.0:
-            continue
-        return route, rng.uniform(1.1, 1.35)
-    raise SampleRejected("follow route placement")
 
 
 def sample_hikers(rng: random.Random, trails, inset: float) -> tuple[PersonPlacement, ...]:
@@ -297,42 +226,10 @@ def sample_hikers(rng: random.Random, trails, inset: float) -> tuple[PersonPlace
     return tuple(hikers)
 
 
-def sample_mission_people(rng: random.Random, trails, creeks, clearings, camps, follow_route,
-                          inset: float) -> MissionPeople:
-    """The canopy-hidden missing hiker, the injured person and casualty in the mission
-    clearing (at least 120 m from home, big enough for the scan rectangle) and the ranger."""
-    missing = _missing_hiker(rng, trails, creeks, clearings, camps, follow_route, inset)
-    if missing is None:
-        raise SampleRejected("missing hiker placement")
-    missing_xy, canopy_xy = missing
-    canopy_scale = rng.uniform(1.5, 1.7)
-    mission = next(((cx, cy, radius) for cx, cy, radius in clearings
-                    if math.hypot(cx, cy) >= 150.0 and radius >= 16.0), None)
-    if mission is None:
-        mission = next(((cx, cy, radius) for cx, cy, radius in clearings
-                        if math.hypot(cx, cy) >= MISSION_CLEARING_MIN_M), None)
-    if mission is None:
-        raise SampleRejected("mission clearing distance")
-    injured_xy = (mission[0] + rng.uniform(-3.5, 3.5), mission[1] + rng.uniform(-3.5, 3.5))
-    casualty_angle = rng.uniform(-math.pi, math.pi)
-    casualty_distance = rng.uniform(4.0, 8.0)
-    casualty_xy = (injured_xy[0] + casualty_distance * math.cos(casualty_angle),
-                   injured_xy[1] + casualty_distance * math.sin(casualty_angle))
-    if (math.hypot(*injured_xy) < MISSION_CLEARING_MIN_M
-            or math.hypot(*casualty_xy) < MISSION_CLEARING_MIN_M):
-        raise SampleRejected("mission people too close to home")
+def sample_ranger(rng: random.Random, trails, inset: float) -> PersonPlacement:
+    """The ranger patrolling a slice of the main trail."""
     ranger_route = _slice_path(trails[0], rng.uniform(0.2, 0.4) * path_length(trails[0]), 90.0)
     if len(ranger_route) < 3 or max(max(abs(x), abs(y)) for x, y in ranger_route) > inset - 5.0:
         raise SampleRejected("ranger route placement")
-    # Yaws are drawn in this order: missing hiker, injured person, casualty.
-    missing_person = person_placement("civ_missing_hiker_01", "missing_hiker",
-                                      "person_laying_kinematic", missing_xy,
-                                      rng.uniform(-math.pi, math.pi))
-    injured = person_placement("civ_injured_01", "injured", "person_sitting", injured_xy,
-                               rng.uniform(-math.pi, math.pi))
-    casualty = person_placement("civ_casualty_01", "casualty", "person_laying_kinematic",
-                                casualty_xy, rng.uniform(-math.pi, math.pi))
-    ranger = person_placement("civ_ranger_01", "ranger", "person_hivis", ranger_route[0], 0.0,
-                              "route", route=ranger_route, speed=1.0, mode="pingpong")
-    return MissionPeople(missing_person, canopy_xy, canopy_scale, mission, injured, casualty,
-                         ranger)
+    return person_placement("civ_ranger_01", "ranger", "person_hivis", ranger_route[0], 0.0,
+                            "route", route=ranger_route, speed=1.0, mode="pingpong")

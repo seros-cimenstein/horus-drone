@@ -2,11 +2,10 @@
 
 ``sample_urban_layout(seed, validate=...)`` draws an irregular road grid across the whole
 :data:`~sim.worldgen.surface.PROCEDURAL_MAP` (blocks ~60-120 m with wider arterials), places
-400-900 textured buildings, several plazas and parks, street furniture and the mission content
-(crowd plaza with the red shirt, collapsed sidewalk person, bus-stop group, park sitters and
-the follow-jogger route with its bus-shelter occluder), then hands the layout to the shared
-validator exactly like the canonical sampler does. Standard-library only and deterministic in
-the seed.
+400-900 textured buildings, several plazas and parks, street furniture and the city's people
+(plaza crowd, bus-stop group, park sitters, commuters, zebra crossers and joggers), then hands
+the layout to the shared validator exactly like the canonical sampler does. Standard-library
+only and deterministic in the seed.
 """
 
 from __future__ import annotations
@@ -16,20 +15,19 @@ import math
 import random
 
 from sim.worldgen.layout import (
-    SIDEWALK_OFFSET_M, Bench, BuildingSpec, CitySpec, ParkSpec, ParkTree, ParkedCar, PlazaSpec,
-    TreeSpec, UrbanLayout, VehiclePlacement, block_loop, distance_to_path, person_placement,
-    road_half_width,
+    Bench, BuildingSpec, CitySpec, ParkSpec, ParkTree, ParkedCar, PlazaSpec, TreeSpec,
+    UrbanLayout, VehiclePlacement, block_loop, distance_to_path, road_half_width,
 )
 from sim.worldgen.seeding import substream
 from sim.worldgen.surface import PROCEDURAL_MAP
 from sim.worldgen.urban_grid import (
-    ACTOR_INSET_M, SHELTER_LENGTH_M, Block, BlockPicker, Point, city_blocks, home_block,
-    junction_crossing_arms, lamp_offset_for, near_junction, polyline_clear_of, road_axis,
-    sample_arterials, segment_clear_of, tree_offset_for,
+    ACTOR_INSET_M, Block, BlockPicker, Point, city_blocks, home_block, junction_crossing_arms,
+    lamp_offset_for, near_junction, polyline_clear_of, road_axis, sample_arterials,
+    tree_offset_for,
 )
 from sim.worldgen.urban_people import (
-    bus_stop_at, mission_crossings, sample_bus_waiting, sample_collapsed, sample_commuters,
-    sample_crossings, sample_crowd, sample_follow, sample_joggers, sample_sitters,
+    bus_stop_at, crossing_arms_near, sample_bus_waiting, sample_commuters, sample_crossings,
+    sample_crowd, sample_joggers, sample_sitters,
 )
 from sim.worldgen.validation import SampleRejected, retry_sample
 from sim.worldgen.vehicles import PARKED_TYPES, SAMPLED_TYPES, vehicle_type
@@ -37,9 +35,6 @@ from sim.worldgen.vehicles import PARKED_TYPES, SAMPLED_TYPES, vehicle_type
 
 PARKING_INSET_M = 0.15
 HOME_PLAZA_MAX_HALF_M = 16.0
-FOLLOW_SPEED_M_S = 2.5
-FOLLOWER_ALTITUDE_M = 10.0
-FOLLOWER_HORIZONTAL_M = 5.0
 MAX_ATTEMPTS = 16
 
 
@@ -99,22 +94,19 @@ def _crown_radius(species: str, height: float) -> float:
 
 def _sample_street_furniture(rng: random.Random, roads_x: tuple[float, ...],
                              roads_y: tuple[float, ...], arterials_x: tuple[float, ...],
-                             arterials_y: tuple[float, ...], follow_route: tuple[Point, Point],
-                             targets: list[Point], structures: list[tuple[float, float, float]],
+                             arterials_y: tuple[float, ...], people_points: list[Point],
+                             structures: list[tuple[float, float, float]],
                              person_paths: list[list[Point]], traffic_paths: list[list[Point]],
-                             parked_points: list[Point], scan_zone: tuple[float, float, float]
+                             parked_points: list[Point]
                              ) -> tuple[list[tuple[float, float, float]], list[TreeSpec]]:
     """Lamps along the sidewalks and street trees on some segments.
 
-    Mission targets keep 3 m from lamps and their crown radius plus 2.8 m from trees; the
-    follow route (drone path at 10 m) keeps 6 m from lamps and the crown radius plus 2.8 m
-    from trees; circulating vehicle lanes keep the crown plus 2.8 m, parked cars the crown
-    plus 2.6 m and every person route the crown plus the walker envelope away from trees.
-    ``scan_zone`` (the campaign's plaza scan rectangle) stays completely clear.
+    People who stay in place keep 3 m from lamps and their crown radius plus 2.8 m from trees;
+    circulating vehicle lanes keep the crown plus 2.8 m, parked cars the crown plus 2.6 m and
+    every person route the crown plus the walker envelope away from trees.
     """
     lamps: list[tuple[float, float, float]] = []
     trees: list[TreeSpec] = []
-    zone_x, zone_y, zone_r = scan_zone
     for vertical, roads, arterials, perpendicular in (
         (True, roads_x, arterials_x, roads_y), (False, roads_y, arterials_y, roads_x),
     ):
@@ -125,7 +117,7 @@ def _sample_street_furniture(rng: random.Random, roads_x: tuple[float, ...],
                 along = -ACTOR_INSET_M + 12.0
                 while along < ACTOR_INSET_M - 12.0:
                     near_site = min((math.hypot(road + side * lamp_offset - x, along - y)
-                                     for x, y in targets), default=1e9)
+                                     for x, y in people_points), default=1e9)
                     spacing = 26.0 if near_site < 120.0 else 46.0
                     along += rng.uniform(spacing * 0.7, spacing * 1.3)
                     if along >= ACTOR_INSET_M - 12.0:
@@ -134,13 +126,9 @@ def _sample_street_furniture(rng: random.Random, roads_x: tuple[float, ...],
                     ly = along if vertical else road + side * lamp_offset
                     if near_junction(lx, ly, perpendicular, 10.0):
                         continue
-                    if math.hypot(lx - zone_x, ly - zone_y) < zone_r + 2.8:
-                        continue
-                    if any(math.hypot(lx - x, ly - y) < 3.0 for x, y in targets):
+                    if any(math.hypot(lx - x, ly - y) < 3.0 for x, y in people_points):
                         continue
                     if any(math.hypot(lx - x, ly - y) < keep for x, y, keep in structures):
-                        continue
-                    if not segment_clear_of((lx, ly), [follow_route], 6.0):
                         continue
                     if any(math.hypot(lx - other[0], ly - other[1]) < 6.0 for other in lamps):
                         continue
@@ -158,9 +146,8 @@ def _sample_street_furniture(rng: random.Random, roads_x: tuple[float, ...],
                         species = "oak" if rng.random() < 0.7 else "pine"
                         height = rng.uniform(5.0, 7.6) if species == "oak" else rng.uniform(6.5, 9.5)
                         crown = _crown_radius(species, height)
-                        if not _tree_clear((tx, ty), crown, follow_route, targets, structures,
-                                           person_paths, traffic_paths, parked_points,
-                                           scan_zone):
+                        if not _tree_clear((tx, ty), crown, people_points, structures,
+                                           person_paths, traffic_paths, parked_points):
                             continue
                         if any(math.hypot(tx - lamp[0], ty - lamp[1]) < 3.0 for lamp in lamps):
                             continue
@@ -173,17 +160,12 @@ def _sample_street_furniture(rng: random.Random, roads_x: tuple[float, ...],
     return lamps, trees
 
 
-def _tree_clear(point: Point, crown: float, follow_route: tuple[Point, Point],
-                targets: list[Point], structures: list[tuple[float, float, float]],
+def _tree_clear(point: Point, crown: float, people_points: list[Point],
+                structures: list[tuple[float, float, float]],
                 person_paths: list[list[Point]], traffic_paths: list[list[Point]],
-                parked_points: list[Point], scan_zone: tuple[float, float, float]) -> bool:
+                parked_points: list[Point]) -> bool:
     """Every static clearance a placed tree must keep (see ``_sample_street_furniture``)."""
-    if math.hypot(point[0] - scan_zone[0], point[1] - scan_zone[1]) < scan_zone[2] + crown:
-        return False  # the campaign's plaza scan rectangle stays canopy-free
-    if not segment_clear_of(point, [follow_route], crown + 2.8):
-        return False
-    # 2.8 m keeps the crown clear of the target's 0.6 m vantage column (2.0 m clearance).
-    if any(math.hypot(point[0] - x, point[1] - y) < crown + 2.8 for x, y in targets):
+    if any(math.hypot(point[0] - x, point[1] - y) < crown + 2.8 for x, y in people_points):
         return False
     if any(math.hypot(point[0] - x, point[1] - y) < crown + keep for x, y, keep in structures):
         return False
@@ -198,8 +180,7 @@ def _tree_clear(point: Point, crown: float, follow_route: tuple[Point, Point],
 
 def _sample_park_trees(rng: random.Random, park: ParkSpec, benches: list[Bench],
                        person_paths: list[list[Point]], traffic_paths: list[list[Point]],
-                       parked_points: list[Point], scan_zone: tuple[float, float, float]
-                       ) -> list[TreeSpec]:
+                       parked_points: list[Point]) -> list[TreeSpec]:
     trees: list[TreeSpec] = []
     target_count = max(4, min(16, int(park.half_size * park.half_size / 22.0)))
     for _ in range(target_count * 40):
@@ -212,8 +193,6 @@ def _sample_park_trees(rng: random.Random, park: ParkSpec, benches: list[Bench],
         species = "oak" if rng.random() < 0.6 else "pine"
         height = rng.uniform(6.5, 10.0) if species == "oak" else rng.uniform(8.0, 12.0)
         crown = _crown_radius(species, height)
-        if math.hypot(x - scan_zone[0], y - scan_zone[1]) < scan_zone[2] + crown:
-            continue
         if any(math.hypot(x - bench.x, y - bench.y) < crown * 0.6 + 1.5 for bench in benches):
             continue
         if not polyline_clear_of((x, y), person_paths, crown + 1.2):
@@ -226,27 +205,6 @@ def _sample_park_trees(rng: random.Random, park: ParkSpec, benches: list[Bench],
             continue
         trees.append(TreeSpec(round(x, 3), round(y, 3), round(height, 3), species, False))
     return trees
-
-
-def _sites_list(plazas: tuple[PlazaSpec, ...], parks: tuple[ParkSpec, ...], downtown: Point,
-                bus_stop: Point, collapsed: Point, follow: dict, home_half: float
-                ) -> tuple[tuple[str, str, float, float, float], ...]:
-    entries: list[tuple[str, str, float, float, float]] = [
-        ("home_plaza", "plaza", 0.0, 0.0, round(home_half, 3)),
-        ("downtown", "district", round(downtown[0], 3), round(downtown[1], 3), 150.0),
-        ("bus_stop", "bus_stop", round(bus_stop[0], 3), round(bus_stop[1], 3), 8.0),
-        ("collapse", "casualty", round(collapsed[0], 3), round(collapsed[1], 3), 3.0),
-        ("follow_start", "follow", round(follow["start"][0], 3), round(follow["start"][1], 3), 5.0),
-        ("follow_occluder", "follow", round(follow["shelter"][0], 3), round(follow["shelter"][1], 3),
-         5.0),
-    ]
-    for index, plaza in enumerate(plazas):
-        entries.append(("mission_plaza" if plaza.mission else f"plaza_{index:02d}", "plaza",
-                        round(plaza.x, 3), round(plaza.y, 3), round(plaza.half_size, 3)))
-    for index, park in enumerate(parks):
-        entries.append(("mission_park" if park.mission else f"park_{index:02d}", "park",
-                        round(park.x, 3), round(park.y, 3), round(park.half_size, 3)))
-    return tuple(entries)
 
 
 def _sample_traffic(seed: int, attempt: int, blocks: list[Block], sites: list[Point]
@@ -358,12 +316,12 @@ def _actor_inside_geofence(layout: UrbanLayout, inset: float) -> bool:
 
 def _sample_open_spaces(rng: random.Random, picker: BlockPicker, home_half: float
                         ) -> tuple[tuple[PlazaSpec, ...], tuple[ParkSpec, ...]]:
-    """The mission plaza (180-480 m out), 1-3 more plazas, 3-6 parks (the first one hosts the
+    """The crowd plaza (180-480 m out), 1-3 more plazas, 3-6 parks (the first one hosts the
     sitters) and, last, the landing-pad plaza at home."""
-    mission_block = picker.choose(180.0, 480.0)
-    mission_half = min(mission_block.extent[0] / 2 - 0.5, mission_block.extent[1] / 2 - 0.5,
-                       rng.uniform(9.0, 15.0))
-    plazas = [PlazaSpec(mission_block.center[0], mission_block.center[1], mission_half, True)]
+    crowd_block = picker.choose(180.0, 480.0)
+    crowd_half = min(crowd_block.extent[0] / 2 - 0.5, crowd_block.extent[1] / 2 - 0.5,
+                     rng.uniform(9.0, 15.0))
+    plazas = [PlazaSpec(crowd_block.center[0], crowd_block.center[1], crowd_half, True)]
     for _ in range(rng.randint(1, 3)):
         block = picker.choose(70.0)
         half = min(block.extent[0] / 2 - 0.5, block.extent[1] / 2 - 0.5, rng.uniform(7.0, 13.0))
@@ -378,12 +336,12 @@ def _sample_open_spaces(rng: random.Random, picker: BlockPicker, home_half: floa
 
 
 def _sample_street_scenery(seed: int, attempt: int, rng: random.Random, roads, blocks,
-                           scene_points: list[Point], follow_route: tuple[Point, Point],
-                           targets: list[Point], structures: list[tuple[float, float, float]],
+                           scene_points: list[Point], people_points: list[Point],
+                           structures: list[tuple[float, float, float]],
                            person_paths: list[list[Point]], parks: tuple[ParkSpec, ...],
-                           benches: list[Bench], scan_zone: tuple[float, float, float]):
+                           benches: list[Bench]):
     """Traffic, parked cars, lamps, street trees and park trees, each clear of the others and
-    of the mission content; returns ``(vehicles, parked, lamps, street_trees, park_trees)``."""
+    of the city's people; returns ``(vehicles, parked, lamps, street_trees, park_trees)``."""
     roads_x, roads_y, arterials_x, arterials_y = roads
     vehicles = _sample_traffic(seed, attempt, blocks, scene_points)
     parked = _sample_parked(seed, attempt, roads_x, roads_y, arterials_x, arterials_y,
@@ -392,14 +350,14 @@ def _sample_street_scenery(seed: int, attempt: int, rng: random.Random, roads, b
                      + [tuple(vehicle.waypoints[0][:2])] for vehicle in vehicles]
     parked_points = [(car.x, car.y) for car in parked]
     lamps, street_trees = _sample_street_furniture(
-        rng, roads_x, roads_y, arterials_x, arterials_y, follow_route, targets, structures,
-        person_paths, traffic_paths, parked_points, scan_zone)
+        rng, roads_x, roads_y, arterials_x, arterials_y, people_points, structures,
+        person_paths, traffic_paths, parked_points)
     park_trees: list[TreeSpec] = []
     for park in parks:
         in_park = [bench for bench in benches
                    if math.hypot(bench.x - park.x, bench.y - park.y) <= park.half_size + 2.0]
         park_trees.extend(_sample_park_trees(rng, park, in_park, person_paths, traffic_paths,
-                                             parked_points, scan_zone))
+                                             parked_points))
     return vehicles, parked, lamps, street_trees, park_trees
 
 
@@ -417,74 +375,50 @@ def _sample_attempt(seed: int, attempt: int, rng: random.Random) -> UrbanLayout:
         raise SampleRejected("home block too small")
     picker = BlockPicker(rng, blocks, home)
     plazas, parks = _sample_open_spaces(rng, picker, home_half)
-    mission_park = parks[0]
+    crowd_plaza, sitter_park = plazas[0], parks[0]
 
     downtown = picker.choose(200.0, 520.0, min_extent=24.0).center
     palette = ((0.66, 0.57, 0.48), (0.58, 0.62, 0.65), (0.70, 0.64, 0.55),
                (0.56, 0.63, 0.67), (0.62, 0.67, 0.68), (0.71, 0.66, 0.58))
     buildings = _sample_buildings(rng, blocks, picker.used, downtown, palette)
 
-    follow = sample_follow(rng, roads_x, roads_y, arterials_x, arterials_y)
-    follow_route = (follow["start"], follow["route"][1])
-    collapsed = sample_collapsed(rng, roads_x, roads_y, arterials_x, arterials_y, follow_route)
-
-    avoid_targets = [collapsed.position, follow["shelter"]]
     bus_stops = [bus_stop_at(rng, picker.choose(90.0, 420.0), roads_x, arterials_x,
-                             roads_y, arterials_y, avoid_targets)]
+                             roads_y, arterials_y)]
     for _ in range(rng.randint(1, 2)):
         bus_stops.append(bus_stop_at(rng, picker.choose(80.0), roads_x, arterials_x,
-                                     roads_y, arterials_y, avoid_targets))
+                                     roads_y, arterials_y))
     bus_stops = tuple(bus_stops)
 
     arms = junction_crossing_arms(roads_x, arterials_x, roads_y, arterials_y)
-    mission_sites = [(plazas[0].x, plazas[0].y), (mission_park.x, mission_park.y),
-                     (bus_stops[0].x, bus_stops[0].y), collapsed.position]
-    crossing_arms = mission_crossings(rng, arms, mission_sites)
+    populated = [(crowd_plaza.x, crowd_plaza.y), (sitter_park.x, sitter_park.y),
+                 (bus_stops[0].x, bus_stops[0].y)]
+    crossing_arms = crossing_arms_near(rng, arms, populated)
 
-    crowd_count = rng.randint(8, 16)
-    crowd = list(sample_crowd(rng, plazas[0], crowd_count))
-    red_index = rng.randrange(crowd_count)
-    red_shirt = person_placement("civ_red_shirt_01", "red_shirt", "person_red_kinematic",
-                                 crowd[red_index].position, rng.uniform(-math.pi, math.pi))
-    crowd[red_index] = red_shirt
-
+    crowd = list(sample_crowd(rng, crowd_plaza, rng.randint(8, 16)))
     bus_waiting = sample_bus_waiting(rng, bus_stops[0])
-    sitters, benches = sample_sitters(rng, mission_park, parks)
-    commuters = sample_commuters(rng, roads_x, roads_y, arterials_x, arterials_y, mission_sites)
+    sitters, benches = sample_sitters(rng, sitter_park, parks)
+    commuters = sample_commuters(rng, roads_x, roads_y, arterials_x, arterials_y, populated)
     crossings = sample_crossings(rng, crossing_arms)
     joggers = sample_joggers(rng, roads_x, roads_y, arterials_x, arterials_y)
-    follow_yaw = math.atan2(follow_route[1][1] - follow_route[0][1],
-                            follow_route[1][0] - follow_route[0][0])
-    follow_person = person_placement("civ_jogger_03", "jogger", "person_red_kinematic",
-                                     follow_route[0], follow_yaw, "route", "follow_jogger",
-                                     follow_route, FOLLOW_SPEED_M_S, "once")
 
-    if math.dist(red_shirt.position, follow_person.position) < 25.0 \
-            or distance_to_path(red_shirt.position, follow_route) < 15.0:
-        raise SampleRejected("red shirt too close to the follow route")
-
-    total = (len(commuters) + len(crossings) + len(bus_waiting) + len(joggers) + 1
-             + len(sitters) + len(crowd) + 1)
+    total = (len(commuters) + len(crossings) + len(bus_waiting) + len(joggers)
+             + len(sitters) + len(crowd))
     if total > 40:
         trim = total - 40
         if len(crowd) - trim < 8:
             raise SampleRejected("too many people")
-        crowd = [person for person in crowd if person is not red_shirt][:len(crowd) - trim]
-        crowd.append(red_shirt)
+        crowd = crowd[:len(crowd) - trim]
 
-    targets = [person.position for person in (*crowd, *bus_waiting, *sitters, collapsed)]
+    people_points = [person.position for person in (*crowd, *bus_waiting, *sitters)]
     structures = [(stop.x, stop.y, 5.5) for stop in bus_stops]
-    structures.append((follow["shelter"][0], follow["shelter"][1], 5.5))
     person_paths = [[(float(p[0]), float(p[1])) for p in person.waypoints]
-                    for person in (*commuters, *crossings, *joggers, follow_person)
+                    for person in (*commuters, *crossings, *joggers)
                     if person.waypoints]
-    scene_points = [*mission_sites, follow["shelter"], downtown]
-    scan_zone = (plazas[0].x, plazas[0].y, plazas[0].half_size + SIDEWALK_OFFSET_M + 1.0)
+    scene_points = [*populated, downtown]
     vehicles, parked, lamps, street_trees, park_trees = _sample_street_scenery(
-        seed, attempt, rng, roads, blocks, scene_points, follow_route, targets, structures,
-        person_paths, parks, benches, scan_zone)
+        seed, attempt, rng, roads, blocks, scene_points, people_points, structures,
+        person_paths, parks, benches)
     trees = tuple([*street_trees, *park_trees])
-
     # Rooftop equipment sits on the 0.45 m parapet ring, so the collision top of the tallest
     # building is height + 0.45 + equipment; the transit rule clears every proxy top.
     building_tops = [building.height + 0.45 + (1.2 if building.height > 18.0 else 0.9)
@@ -493,32 +427,26 @@ def _sample_attempt(seed: int, attempt: int, rng: random.Random) -> UrbanLayout:
     if max_top + 5.9 > 48.0:
         raise SampleRejected("scenery too tall for the flight profile")
 
-    sites = _sites_list(plazas, parks, downtown, (bus_stops[0].x, bus_stops[0].y),
-                        collapsed.position, follow, home_half)
     city = CitySpec(arterial_roads_x=arterials_x, arterial_roads_y=arterials_y,
-                    plazas=plazas, parks=parks, trees=trees, bus_stops=bus_stops, sites=sites,
+                    plazas=plazas, parks=parks, trees=trees, bus_stops=bus_stops,
                     lamps=tuple(lamps))
     return UrbanLayout(
         seed=seed, canonical=False, roads_x=roads_x, roads_y=roads_y,
         crosswalk_centres=tuple(arm["center"] for arm in crossing_arms), buildings=buildings,
-        plaza_half_size=home_half, park_center=(mission_park.x, mission_park.y),
-        park_half_size=mission_park.half_size,
+        plaza_half_size=home_half, park_center=(sitter_park.x, sitter_park.y),
+        park_half_size=sitter_park.half_size,
         park_trees=tuple(ParkTree(tree.x, tree.y, tree.height) for tree in park_trees),
         benches=tuple(benches), lamp_positions=tuple((lamp[0], lamp[1]) for lamp in lamps),
         utility_poles=(), trash_bins=(), bus_shelter_center=(bus_stops[0].x, bus_stops[0].y),
-        jogger_shelter_center=follow["shelter"], jogger_shelter_size=(3.3, SHELTER_LENGTH_M),
         parked_cars=tuple(parked), commuters=commuters, crossings=crossings,
-        bus_waiting=bus_waiting, joggers=joggers, follow_jogger=follow_person,
-        park_sitting=sitters, plaza_crowd=tuple(crowd), red_shirt=red_shirt, collapsed=collapsed,
-        vehicles=vehicles, follow_speed=FOLLOW_SPEED_M_S, follower_altitude_m=FOLLOWER_ALTITUDE_M,
-        follower_horizontal_m=FOLLOWER_HORIZONTAL_M, expected_occlusion_s=0.0, attempts=attempt,
-        follow_occluder_kind="shelter", follow_occluder_yaw=follow["shelter_yaw"],
+        bus_waiting=bus_waiting, joggers=joggers, park_sitting=sitters,
+        plaza_crowd=tuple(crowd), vehicles=vehicles, attempts=attempt,
         lamp_height_m=9.27, map=PROCEDURAL_MAP, actor_inset_m=ACTOR_INSET_M,
         scenery_max_top_m=max_top, city=city)
 
 
 def sample_urban_layout(seed: int, *,
-                        validate: Callable[[UrbanLayout], tuple[float, list[str]]]
+                        validate: Callable[[UrbanLayout], list[str]]
                         ) -> UrbanLayout:
     """Sample and validate one procedural 1.2 km city layout (plain ``random.Random(seed)``)."""
     rng = random.Random(seed)

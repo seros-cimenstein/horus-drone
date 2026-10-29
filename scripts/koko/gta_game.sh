@@ -5,9 +5,9 @@
 #   scripts/koko/gta_game.sh stop     # close GTA and every Rockstar/Social Club process
 #   scripts/koko/gta_game.sh status
 #
-# start refuses when Koko has less than GTA_MIN_AVAILABLE_MIB (default 9728: a HORUS mission in
-# GTA took available memory down by up to 8658 MiB, plus 1 GiB of headroom; gta/hook/README.md
-# "Memory"; the refusal lists the largest processes), while Gazebo runs (a HORUS campaign or
+# start refuses when Koko has less than GTA_MIN_AVAILABLE_MIB (default 9728: HORUS flying in
+# GTA can take available memory down by about 8.5 GiB, plus 1 GiB of headroom; gta/hook/README.md
+# "Memory"; the refusal lists the largest processes), while Gazebo runs (a HORUS
 # simulation), while the running Steam client is not signed in (it would queue the launch and run it
 # later, unguarded), with no display output enabled, or while a screen lock covers the desktop.
 # On GTA's landing page it presses Enter only after a pixel check shows the STORY tab selected and
@@ -41,9 +41,9 @@ running() { pgrep -f "[G]TA5_Enhanced.exe" >/dev/null; }
 available_mib() { free -m | awk '/^Mem:/ {print $7}'; }
 
 # Which landing-page tab is selected: prints story, online, gtaplus or none. While story mode loads
-# GTA replaces its window, so the window found by name can be gone a moment later
-# (2026-10-20 22:50: X BadWindow from getwindowgeometry, then an empty screen grab); any failure
-# here reads as none, which only makes the caller wait.
+# GTA replaces its window, so the window found by name can be gone a moment later (X BadWindow
+# from getwindowgeometry, then an empty screen grab); any failure here reads as none, which only
+# makes the caller wait.
 landing_tab() {
   local window geometry
   window="$(xdotool search --name '^Grand Theft Auto V$' 2>/dev/null | head -1)" || true
@@ -105,8 +105,8 @@ stamp() { printf '%s %s\n' "$(date +%T)" "$*"; }
 # no state line since the client started) prints the reason and fails. This must hold before the
 # launch URL is sent: while Steam waits at its account picker, `steam steam://…` writes the URL into
 # ~/.steam/steam.pipe and exits, and the client runs it once someone signs in, outside these checks
-# (2026-10-21: a launch sent at the picker started the Rockstar launcher 5 min later, with memory
-# below the guard by then). Nothing on this side can withdraw a URL the client has queued.
+# (possibly minutes later, with memory below the guard by then). Nothing on this side can
+# withdraw a URL the client has queued.
 steam_signed_in() {
   python3 - "${HOME}/.steam/steam.pid" "${HOME}/.steam/steam/logs/connection_log.txt" <<'PY'
 import os, re, sys, time
@@ -173,7 +173,7 @@ case "${action}" in
     ;;
   start)
     if running; then echo "GTA is already running; stop it first" >&2; exit 1; fi
-    if pgrep -f "[g]z sim" >/dev/null; then echo "Gazebo is running (a HORUS campaign or simulation); not starting GTA" >&2; exit 1; fi
+    if pgrep -f "[g]z sim" >/dev/null; then echo "Gazebo is running (a HORUS simulation); not starting GTA" >&2; exit 1; fi
     steam_signed_in >&2 || exit 1
     # With every display output off (DPMS off, kernel connector disabled), the GTA swap chain only
     # presents once a second, so scripts and frames crawl at 1 Hz.
@@ -182,8 +182,8 @@ case "${action}" in
       exit 1
     fi
     # A screen lock covers GTA's window: the STORY-tab check and the Enter press need it focused,
-    # and on 2026-10-22 the Rockstar launcher stalled at start-up under the lock until the 180 s
-    # timeout. dark-screenlock is the lock in use on Koko; Cinnamon's own screensaver is the other.
+    # and the Rockstar launcher can stall at start-up under the lock until the 180 s timeout.
+    # dark-screenlock is the lock in use on Koko; Cinnamon's own screensaver is the other.
     if xdotool search --onlyvisible --name '^dark-screenlock$' >/dev/null 2>&1 \
       || XDG_RUNTIME_DIR="/run/user/$(id -u)" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
         gdbus call --session --dest org.cinnamon.ScreenSaver --object-path /org/cinnamon/ScreenSaver \
@@ -194,8 +194,8 @@ case "${action}" in
     available="$(available_mib)"
     if (( available < min_available_mib )); then
       echo "only ${available} MiB available, need ${min_available_mib} MiB; not starting GTA. Largest processes (RSS MiB):" >&2
-      # Steam's web helpers grow over a long session (2026-10-22: +550 MiB after one launch);
-      # restarting Steam frees them, but it then asks which account to sign in.
+      # Steam's web helpers grow over a long session (hundreds of MiB per launch); restarting
+      # Steam frees them, but it then asks which account to sign in.
       { ps -eo rss=,comm= --sort=-rss | head -6 | awk '{printf "  %6d %s\n", $1 / 1024, $2}' >&2; } || true
       exit 1
     fi
@@ -213,8 +213,8 @@ case "${action}" in
     wait_for_log "INIT: success" 240
     wait_for_log "keyboard: hooked" 240
     # Enter on STORY, then confirm that loading began: the landing page goes away, or the scripts
-    # start. GTA sometimes drops the first Enter (2026-10-20 19:54: STORY stayed highlighted for
-    # 5 min; a second Enter loaded story mode), so Enter is pressed again only after the page is
+    # start. GTA sometimes drops the first Enter (STORY stays highlighted; a second Enter loads
+    # story mode), so Enter is pressed again only after the page is
     # freshly seen still on STORY, LEAVE_CHECK_S after the last press, with the game thread ticking.
     deadline=$((SECONDS + 180))
     presses=0

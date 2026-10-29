@@ -22,8 +22,8 @@ def render_live_view(
 ) -> Any:
     """Draw every tracked candidate and detector/tracker timings on a BGR copy of the frame.
 
-    Human-facing debug view: boxes carry tracker ID, detector class and confidence, and the
-    shirt-colour attribute; shaded ignore regions show where detections are discarded.
+    Human-facing debug view: boxes carry tracker ID, detector class and confidence; shaded
+    ignore regions show where detections are discarded.
     """
     import cv2
 
@@ -57,14 +57,6 @@ def render_live_view(
             f"#{candidate.id} {candidate.class_name} {candidate.confidence:.2f}",
             f"source {candidate.source}",
         ]
-        shirt = candidate.attributes.get("shirt_colour")
-        if shirt is not None:
-            shirt_confidence = candidate.attributes.get("shirt_colour_confidence")
-            lines.append(
-                f"shirt {shirt} {shirt_confidence:.2f}"
-                if isinstance(shirt_confidence, (int, float))
-                else f"shirt {shirt}"
-            )
         _label_block(cv2, rendered, lines, (x1, y1), color)
 
     fps = stats.get("fps")
@@ -208,3 +200,21 @@ def render_set_of_marks(
         width=width,
         height=height,
     )
+
+
+def render_raw_jpeg(frame: Frame, *, jpeg_quality: int = 90) -> bytes:
+    """Encode the frame's camera image as a JPEG at source resolution with nothing drawn on it."""
+    if not 0 <= jpeg_quality <= 100:
+        raise ValueError("jpeg_quality must be in [0, 100]")
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError("OpenCV is required to encode raw JPEG frames") from exc
+
+    image = frame.image
+    if image is None or len(image.shape) < 2 or image.shape[0] < 1 or image.shape[1] < 1:
+        raise ValueError("frame.image must be a non-empty image array")
+    ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality])
+    if not ok:
+        raise RuntimeError("OpenCV failed to encode the raw JPEG")
+    return encoded.tobytes()

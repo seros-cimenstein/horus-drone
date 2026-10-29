@@ -10,9 +10,6 @@ Pick-up notes for the next session. Delete this file once its items are done.
 - Koko: stopped (no `horus-sim` container). **Koko sysctls were loosened for profiling and must be
   restored** by the user: `sudo sysctl kernel.perf_event_paranoid=4 kernel.yama.ptrace_scope=1`
   (resets on reboot anyway).
-- Procedural campaign is paused; relaunch when wanted:
-  `HORUS_SIM_IMAGE=horus-sim:local-s1s2-gui HORUS_REMOTE_SIM_IMAGE=horus-sim:local-s1s2-gui ./scripts/koko/procedural_campaign.sh --kinds forest urban --seeds 21 --ttl-scale 2 --timeout-minutes 120`
-  (earlier failure "goto ended expired" came from phantom ToF obstacles capping speed; fixed in `f394bb5`).
 
 ## RTF optimisation task (live stack on Koko, civilians + grounder + MCP + camera RTP)
 Measure with `scripts/koko/profiling/measure.sh horus_forest_p21:forest horus_urban_p21:urban`

@@ -1,8 +1,15 @@
 # Indoor room (horus_indoor): loaded after common.parm.
 
-# The mount holds its MAVLink-targeted angle.
-MNT1_DEFLT_MODE 2
-
 # Indoor return altitude (m): RTL returns at max(2 m, current altitude) instead of the 15 m default,
 # staying below the 2.5 m room walls.
 RTL_ALT_M 2
+
+# ArduPilot's altitude fence is the indoor ceiling: 2.2 m keeps the airframe below the 2.5 m walls,
+# and a breach lands. The room has no horizontal fence; ToF proximity avoidance (common.parm)
+# holds the walls. AVOID_ENABLE's fence bit stops a climb FENCE_MARGIN below FENCE_ALT_MAX, so the
+# 2 m default margin would cap climbs at 0.2 m; 0.2 m stops them at 2.0 m.
+FENCE_ENABLE 1
+FENCE_TYPE 1
+FENCE_ACTION 2
+FENCE_ALT_MAX 2.2
+FENCE_MARGIN 0.2
