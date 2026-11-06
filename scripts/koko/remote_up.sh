@@ -58,6 +58,9 @@ local_mcp_port="${HORUS_MCP_LOCAL_PORT}"
 control_socket="${state_dir}/ssh-control"
 token_file="${state_dir}/mcp-token"
 started_file="${state_dir}/started"
+# Koko's clock at session start; remote_down.sh keeps it so remote_fetch_logs.sh can select this
+# session's logs and runs after the stack is stopped. The next remote_up.sh replaces it.
+session_start_file="${state_dir}/session-start"
 tunnel_log="${state_dir}/tunnel.log"
 if [[ -e "${started_file}" || -S "${control_socket}" ]]; then
   printf 'A managed %s session already exists; run scripts/koko/remote_down.sh first.\n' \
@@ -66,6 +69,7 @@ if [[ -e "${started_file}" || -S "${control_socket}" ]]; then
 fi
 mkdir -p -- "${state_dir}"
 chmod 700 "${state_dir}"
+rm -f -- "${session_start_file}"
 
 if python3 -c 'import socket, sys; s=socket.socket(); s.settimeout(0.2); r=s.connect_ex(("127.0.0.1", int(sys.argv[1]))); s.close(); sys.exit(r != 0)' "${local_mcp_port}"; then
   printf 'Local 127.0.0.1:%s is already in use; choose another HORUS_MCP_LOCAL_PORT before opening the Koko tunnel.\n' \
@@ -145,6 +149,7 @@ if ssh -T "${HORUS_REMOTE}" docker container inspect "${remote_container}" >/dev
     "${remote_container}" "${HORUS_REMOTE}" >&2
   exit 1
 fi
+ssh -T "${HORUS_REMOTE}" date +%s > "${session_start_file}"
 
 rsync --archive --compress --delete \
   --exclude='/.git/***' \

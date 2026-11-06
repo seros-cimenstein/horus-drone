@@ -54,6 +54,23 @@ namespace HorusGta
         public string Target => Host + ":" + Port.ToString(CultureInfo.InvariantCulture);
     }
 
+    /// <summary>The camera gimbal HORUS points (README "Gimbal", <see cref="GimbalMount"/>).</summary>
+    public struct GimbalSettings
+    {
+        /// <summary>UDP endpoint HORUS's gimbal device (horus-gta-gimbal) sends setpoints to.</summary>
+        public string Bind;
+        public int Port;
+        /// <summary>UDP destination of the gimbal status datagrams (IPv4 host and port).</summary>
+        public string TargetHost;
+        public int TargetPort;
+        /// <summary>Heartbeat per second of physics sim time while no reported angle moves, 20..100 (every changing step also reports).</summary>
+        public double RateHz;
+        /// <summary>Speed toward a new setpoint per axis (deg/s), 1..1000.</summary>
+        public double SlewDegS;
+
+        public string Target => TargetHost + ":" + TargetPort.ToString(CultureInfo.InvariantCulture);
+    }
+
     /// <summary>What the screen shows while the drone flies ([view], README "Shared view").</summary>
     public enum ViewMode
     {
@@ -71,9 +88,10 @@ namespace HorusGta
     }
 
     /// <summary>
-    /// HorusGta.ini: [pose] bind, port, timeout_s; [origin] x, y, heading_deg, optional z;
+    /// HorusGta.ini: [pose] timeout_s; [origin] x, y, heading_deg, optional z;
     /// [scene] weather, hour, freeze_time (empty = leave the game's); [physics] bind, port,
-    /// budget_ms, hfov_deg, trace_hz; [sensors] enabled, target, rate_hz; [view] mode, drone_every.
+    /// budget_ms, hfov_deg, trace_hz; [sensors] enabled, target, rate_hz; [gimbal] bind, port,
+    /// target, rate_hz, slew_deg_s; [view] mode, drone_every.
     /// </summary>
     public sealed class ModConfig
     {
@@ -84,13 +102,11 @@ namespace HorusGta
             "THUNDER", "SNOW", "BLIZZARD", "SNOWLIGHT", "XMAS", "HALLOWEEN", "RAIN_HALLOWEEN", "SNOW_HALLOWEEN",
         };
 
-        public string Bind = "127.0.0.1";
-        public int Port = 5611;
         /// <summary>
-        /// Release after this long without a valid pose. Below 2 s on purpose: the release happens on
-        /// the first script tick past the timeout, and the packet's arrival waits for a tick too, so
-        /// the screen comes back up to about two ticks (30–40 ms each) after timeout_s. 1.9 s keeps
-        /// that within 2 s of the bridge's last packet (gta/horus_mod/README.md "Mod").
+        /// Release the camera after this long without a SITL frame ([pose] timeout_s, named after the
+        /// pose receiver it was written for). Below 2 s on purpose: the release happens on the first
+        /// script tick past the timeout, up to about two ticks (30–40 ms each) after timeout_s, so
+        /// 1.9 s keeps it within 2 s of the last frame (gta/horus_mod/README.md "Mod").
         /// </summary>
         public double TimeoutS = 1.9;
         /// <summary>Legion Square, Los Santos.</summary>
@@ -104,6 +120,12 @@ namespace HorusGta
         public PhysicsSettings Physics = new PhysicsSettings { Bind = "127.0.0.1", Port = 9002, BudgetMs = 10, HfovDeg = 84, TraceHz = 0 };
         /// <summary>On, to the HORUS range bridge (horus.tof_bridge.gta) on loopback, 20 sweeps per sim second.</summary>
         public SensorSettings Sensors = new SensorSettings { Enabled = true, Host = "127.0.0.1", Port = 5612, RateHz = RangeSensors.DefaultRateHz };
+        /// <summary>Setpoints from horus-gta-gimbal on loopback udp 5613, status to it on 5614 (each changing step, else a 50 Hz heartbeat of sim time), 90 deg/s.</summary>
+        public GimbalSettings Gimbal = new GimbalSettings
+        {
+            Bind = "127.0.0.1", Port = 5613, TargetHost = "127.0.0.1", TargetPort = 5614,
+            RateHz = GimbalMount.DefaultRateHz, SlewDegS = GimbalMount.DefaultSlewDegS,
+        };
         /// <summary>The drone camera on screen, as before the shared view existed.</summary>
         public ViewSettings View = new ViewSettings { Mode = ViewMode.Drone, DroneEvery = SharedView.DefaultDroneEvery };
         /// <summary>Problems found while parsing; each falls back to the default.</summary>
@@ -138,14 +160,6 @@ namespace HorusGta
         {
             switch (section + "." + key)
             {
-                case "pose.bind":
-                    if (IPAddress.TryParse(value, out var ip) && ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork) Bind = value;
-                    else Warn(n, $"pose.bind '{value}' is not an IPv4 address");
-                    break;
-                case "pose.port":
-                    if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int port) && port >= 1 && port <= 65535) Port = port;
-                    else Warn(n, $"pose.port '{value}' is not 1..65535");
-                    break;
                 case "pose.timeout_s":
                     if (TryNumber(value, out double t) && t > 0) TimeoutS = t;
                     else Warn(n, $"pose.timeout_s '{value}' is not a positive number");
@@ -205,20 +219,32 @@ namespace HorusGta
                     else Warn(n, $"sensors.enabled '{value}' is not 1 or 0");
                     break;
                 case "sensors.target":
-                    {
-                        int colon = value.LastIndexOf(':');
-                        if (colon > 0 && IPAddress.TryParse(value.Substring(0, colon), out var sip) && sip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
-                            && int.TryParse(value.Substring(colon + 1), NumberStyles.None, CultureInfo.InvariantCulture, out int sport) && sport >= 1 && sport <= 65535)
-                        {
-                            Sensors.Host = value.Substring(0, colon);
-                            Sensors.Port = sport;
-                        }
-                        else Warn(n, $"sensors.target '{value}' is not an IPv4 host:port");
-                    }
+                    if (TryEndpoint(value, out string sensorHost, out int sensorPort)) { Sensors.Host = sensorHost; Sensors.Port = sensorPort; }
+                    else Warn(n, $"sensors.target '{value}' is not an IPv4 host:port");
                     break;
                 case "sensors.rate_hz":
                     if (TryNumber(value, out double rate) && rate >= RangeSensors.MinRateHz && rate <= RangeSensors.MaxRateHz) Sensors.RateHz = rate;
                     else Warn(n, $"sensors.rate_hz '{value}' is not 10..20");
+                    break;
+                case "gimbal.bind":
+                    if (IsIPv4(value)) Gimbal.Bind = value;
+                    else Warn(n, $"gimbal.bind '{value}' is not an IPv4 address");
+                    break;
+                case "gimbal.port":
+                    if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int gport) && gport >= 1 && gport <= 65535) Gimbal.Port = gport;
+                    else Warn(n, $"gimbal.port '{value}' is not 1..65535");
+                    break;
+                case "gimbal.target":
+                    if (TryEndpoint(value, out string gimbalHost, out int gimbalPort)) { Gimbal.TargetHost = gimbalHost; Gimbal.TargetPort = gimbalPort; }
+                    else Warn(n, $"gimbal.target '{value}' is not an IPv4 host:port");
+                    break;
+                case "gimbal.rate_hz":
+                    if (TryNumber(value, out double grate) && grate >= GimbalMount.MinRateHz && grate <= GimbalMount.MaxRateHz) Gimbal.RateHz = grate;
+                    else Warn(n, $"gimbal.rate_hz '{value}' is not {GimbalMount.MinRateHz:g}..{GimbalMount.MaxRateHz:g}");
+                    break;
+                case "gimbal.slew_deg_s":
+                    if (TryNumber(value, out double slew) && slew >= GimbalMount.MinSlewDegS && slew <= GimbalMount.MaxSlewDegS) Gimbal.SlewDegS = slew;
+                    else Warn(n, $"gimbal.slew_deg_s '{value}' is not {GimbalMount.MinSlewDegS:g}..{GimbalMount.MaxSlewDegS:g}");
                     break;
                 case "view.mode":
                     if (value.Equals("drone", StringComparison.OrdinalIgnoreCase)) View.Mode = ViewMode.Drone;
@@ -244,6 +270,19 @@ namespace HorusGta
 
         static bool TryNumber(string v, out double d) =>
             double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out d) && !double.IsNaN(d) && !double.IsInfinity(d);
+
+        static bool IsIPv4(string v) => IPAddress.TryParse(v, out var ip) && ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork;
+
+        /// <summary>An IPv4 "host:port" with port 1..65535.</summary>
+        static bool TryEndpoint(string v, out string host, out int port)
+        {
+            host = null; port = 0;
+            int colon = v.LastIndexOf(':');
+            if (colon <= 0 || !IsIPv4(v.Substring(0, colon))) return false;
+            if (!int.TryParse(v.Substring(colon + 1), NumberStyles.None, CultureInfo.InvariantCulture, out port) || port < 1 || port > 65535) return false;
+            host = v.Substring(0, colon);
+            return true;
+        }
 
         void Warn(int n, string message, bool usesDefault = true) =>
             Warnings.Add($"HorusGta.ini line {n + 1}: {message}{(usesDefault ? "; using the default" : "; ignored")}");

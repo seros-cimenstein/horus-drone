@@ -88,6 +88,20 @@ def test_gta_container_gets_no_gazebo_environment_and_gazebo_keeps_it(tmp_path):
     assert "GZ_SIM_RESOURCE_PATH=" in gazebo_run
 
 
+def test_gta_always_starts_the_physics_world(tmp_path):
+    result, calls = _run(tmp_path, "start", "--gta", HORUS_GTA_PHYSICS_ADDRESS="192.168.1.20")
+    assert result.returncode == DOCKER_RUN_REACHED, result.stderr
+    (gta_run,) = _docker_runs(calls)
+    assert "--env HORUS_GTA_PHYSICS_ADDRESS=192.168.1.20" in gta_run
+    assert gta_run.endswith("/horus/sim/scripts/start_gta_sitl.sh")
+
+    # The camera-only mode is gone: the help shows only the physics start.
+    help_text = subprocess.run(
+        ["bash", str(ROOT / "sim" / "run.sh"), "--help"], capture_output=True, text=True, timeout=60,
+    ).stdout
+    assert "physical object" in help_text and "bridge" not in help_text
+
+
 @pytest.mark.parametrize(("label", "refused"), [("gta", True), ("gazebo", False)])
 def test_frame_is_refused_on_a_gta_container(tmp_path, label, refused):
     result, calls = _run(tmp_path, "frame", STUB_RUNNING="true", STUB_WORLD_LABEL=label)
@@ -172,7 +186,7 @@ def test_gui_client_is_not_blocked_by_a_running_world(tmp_path):
         pgrep_match=GTA_GAME,
         docker_ps='horus-sim|gazebo|"/horus/sim/scripts/start_sim.sh horus_indoor.sdf"\\n',
         HORUS_REMOTE_IP="10.0.0.2", HORUS_LOCAL_IP="10.0.0.1",
-        HORUS_MCP_TOKEN="mcp", HORUS_COMMANDER_TOKEN="commander", XAUTHORITY=str(xauthority),
+        XAUTHORITY=str(xauthority),
     )
 
     # The client only observes a remote world: the guard never runs. Without an X11 socket it

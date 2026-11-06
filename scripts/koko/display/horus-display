@@ -1,0 +1,85 @@
+#!/bin/bash
+# HORUS display switch for Koko. install.sh installs this file root-owned as
+# /usr/local/sbin/horus-display, and a sudoers rule lets the Koko user run it without a password.
+# It can only switch Koko's X server between two fixed layouts and restart the display manager:
+#
+#   two-screens  X screen :0.0 is the laptop panel (eDP, the Cinnamon desktop) and :0.1 the HDMI
+#                dummy plug, where simulations run; a window on one never reaches the other.
+#   one-screen   the old layout: one desktop spanning both outputs.
+#   restart      restart the display manager (closes every window on Koko's screens).
+#   status       print the layout and whether the display manager runs.
+#
+# Switching or restarting closes every window on Koko's screens (GTA, the Gazebo window); SSH,
+# Tailscale, Docker and the drone board keep running. LightDM logs the user back in by itself
+# (install.sh turns on autologin).
+set -euo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+conf=/etc/X11/xorg.conf.d/90-horus-two-screens.conf
+
+# The amdgpu driver drives one X screen per output with ZaphodHeads. BusID is Koko's Barcelo GPU
+# (lspci 04:00.0); the output names are the ones xrandr shows.
+write_two_screens() {
+  mkdir -p /etc/X11/xorg.conf.d
+  cat >"${conf}.new" <<'EOF'
+# Written by /usr/local/sbin/horus-display two-screens; `horus-display one-screen` removes it.
+Section "Device"
+    Identifier "horus-panel-gpu"
+    Driver     "amdgpu"
+    BusID      "PCI:4:0:0"
+    Screen     0
+    Option     "ZaphodHeads" "eDP"
+EndSection
+
+Section "Device"
+    Identifier "horus-sim-gpu"
+    Driver     "amdgpu"
+    BusID      "PCI:4:0:0"
+    Screen     1
+    Option     "ZaphodHeads" "HDMI-A-0"
+EndSection
+
+Section "Screen"
+    Identifier "horus-panel"
+    Device     "horus-panel-gpu"
+EndSection
+
+Section "Screen"
+    Identifier "horus-sim"
+    Device     "horus-sim-gpu"
+EndSection
+
+Section "ServerLayout"
+    Identifier "horus-two-screens"
+    Screen     0 "horus-panel"
+    Screen     1 "horus-sim" RightOf "horus-panel"
+EndSection
+EOF
+  chmod 0644 "${conf}.new"
+  mv -f "${conf}.new" "${conf}"
+}
+
+case "${1:-}" in
+  two-screens)
+    write_two_screens
+    systemctl restart lightdm
+    echo "two screens: :0.0 laptop panel, :0.1 HDMI dummy (display manager restarted)"
+    ;;
+  one-screen)
+    rm -f "${conf}"
+    systemctl restart lightdm
+    echo "one screen: one desktop on both outputs (display manager restarted)"
+    ;;
+  restart)
+    systemctl restart lightdm
+    echo "display manager restarted"
+    ;;
+  status)
+    if [[ -e "${conf}" ]]; then echo "layout: two-screens"; else echo "layout: one-screen"; fi
+    echo "lightdm: $(systemctl is-active lightdm || true)"
+    ;;
+  *)
+    echo "usage: horus-display two-screens|one-screen|restart|status" >&2
+    exit 2
+    ;;
+esac

@@ -304,17 +304,15 @@ class CommanderSettings:
 
 @dataclass(frozen=True, slots=True)
 class MapSettings:
-    # none (no third-party map), gta (common-schema JSON at data_path) or osm (an Overpass JSON
-    # extract at data_path, converted at start-up); see horus/maps.
+    # none (no third-party map), gta (the whole-map tile directory at data_path, built by
+    # scripts/maps/build_gta_tiles.py) or osm (an Overpass JSON extract at data_path, converted at
+    # start-up); see horus/maps.
     provider: str = "none"
     data_path: str | None = None
     # osm: the latitude/longitude of local NED (0, 0), which must be the vehicle's EKF origin.
     # None takes flight.global_origin_latitude_deg/longitude_deg (SITL's home).
     origin_latitude_deg: float | None = None
     origin_longitude_deg: float | None = None
-    # Optional common-schema JSON whose walkable layer is added to data_path's (GTA's ped navmesh,
-    # scripts/maps/fetch_gta_walkable.py).
-    walkable_path: str | None = None
 
     def __post_init__(self) -> None:
         if self.provider not in {"none", "gta", "osm"}:
@@ -323,8 +321,6 @@ class MapSettings:
             raise ValueError("map origin_latitude_deg and origin_longitude_deg go together")
         if self.provider != "none" and (not isinstance(self.data_path, str) or not self.data_path.strip()):
             raise ValueError(f"map provider {self.provider!r} needs a data_path")
-        if self.walkable_path is not None and self.provider == "none":
-            raise ValueError("map walkable_path needs a provider")
 
 
 @dataclass(frozen=True, slots=True)

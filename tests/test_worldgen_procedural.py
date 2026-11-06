@@ -44,8 +44,7 @@ def _profile(kind: str) -> dict:
 
 
 PROFILES = {kind: _profile(kind) for kind in ("forest", "urban")}
-# The generators' transit-altitude ceilings (sim/worldgen/*: checked_transit_altitude), below
-# ArduPilot's outdoor FENCE_ALT_MAX 55 (config/ardupilot/outdoor.parm).
+# The generators' transit-altitude ceilings (sim/worldgen/*: checked_transit_altitude).
 MAX_ALTITUDE = {"forest": 36.0, "urban": 48.0}
 TRANSIT_MIN_M = {kind: float(PROFILES[kind]["cruise_min_altitude_m"]) for kind in PROFILES}
 TREE_TOP_LIMIT_M = 23.0  # config comment: forest trees stay below 23 m (transit ceiling 36 m)

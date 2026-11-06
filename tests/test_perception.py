@@ -700,6 +700,45 @@ def test_camera_yaw_between_frames_keeps_a_narrow_box_on_its_track():
     assert run(114.59155902616465) == [1] * 6
 
 
+def test_a_panning_gimbal_is_compensated_like_a_turning_vehicle():
+    # The camera's yaw is the heading plus the gimbal's nose-relative pan (look yaw_deg).
+    from horus.perception.tracker import PersistentTracker, TrackerConfig
+
+    np = pytest.importorskip("numpy")
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    hfov = 114.59155902616465
+    focal = 320 / math.tan(math.radians(hfov) / 2)
+    person = lambda centre: Detection((centre - 15, 240, centre + 15, 380), class_name="person", class_id=0)
+
+    class NoAppearance:
+        def embed(self, image, bbox):
+            return None
+
+    def run(heading_step, pan_step, *, report_pan=True):
+        tracker = PersistentTracker(TrackerConfig(camera_horizontal_fov_deg=hfov), embedder=NoAppearance())
+        ids, heading, pan, centre = [], 350.0, 0.0, 320.0
+        for frame_id in range(1, 7):
+            step = (heading_step + pan_step) if frame_id > 1 else 0.0
+            # The camera yaws by heading + pan per frame; a static person drifts the other way.
+            angle = math.atan((centre - 320) / focal) - math.radians(step)
+            centre = 320 + focal * math.tan(angle)
+            if frame_id > 1:
+                heading, pan = (heading + heading_step) % 360.0, pan + pan_step
+            pose = {"heading_deg": heading, "heading_age_s": 0.05}
+            if report_pan:
+                pose |= {"gimbal_pitch_deg": -10.0, "gimbal_yaw_deg": pan, "gimbal_age_s": 0.05}
+            [candidate] = tracker.update([person(centre)], Frame(frame_id, 10.0 + 0.2 * frame_id, image, pose=pose))
+            ids.append(candidate.id)
+        return ids
+
+    # The gimbal pans 8 deg right per frame while the vehicle holds its heading.
+    assert run(0.0, 8.0) == [1] * 6
+    # Heading alone (the pan unknown to the tracker) misses the image jump.
+    assert len(set(run(0.0, 8.0, report_pan=False))) > 1
+    # The vehicle turns 8 deg left while the gimbal pans 8 deg right: the view holds still.
+    assert run(-8.0, 8.0) == [1] * 6
+
+
 class _SceneByBox:
     """A 1280x720 frame whose embedder answers per box: one appearance vector per person."""
 

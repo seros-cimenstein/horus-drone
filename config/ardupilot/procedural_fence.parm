@@ -1,5 +1,0 @@
-# Generated 1.2 km worlds (horus_<kind>_p<seed>): loaded after outdoor.parm. The fence is the
-# operating area and covers the map: map half extent 600 m -> corner distance 600*sqrt(2) = 848.5 m;
-# 870 m leaves ~21 m of margin beyond the corners (plus FENCE_MARGIN 5 m), so every point of the
-# map stays reachable. HORUS sends targets unclamped; a target beyond it is ArduPilot's to stop.
-FENCE_RADIUS 870

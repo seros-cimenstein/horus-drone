@@ -72,10 +72,10 @@ def take_off(
 ) -> str:
     """Queue a take-off to ``altitude_m`` above home and return its asynchronous task ID.
 
-    The altitude is flown as given; at or below 0 it is rejected. ArduPilot's fence and failsafes
-    hold the flight limits. Optional ``heading_deg`` (0 = north, clockwise) turns the vehicle in
-    place after reaching altitude, before the task succeeds. ``ttl_s`` is the optional task
-    lifetime in seconds; inspect get_task_status for completion and expiry.
+    The altitude is flown as given, with no ceiling; at or below 0 it is rejected. Optional
+    ``heading_deg`` (0 = north, clockwise) turns the vehicle in place after reaching altitude,
+    before the task succeeds. ``ttl_s`` is the optional task lifetime in seconds; inspect
+    get_task_status for completion and expiry.
     """
     arguments: dict[str, float] = {"altitude_m": altitude_m}
     if heading_deg is not None:
@@ -88,10 +88,11 @@ def goto(
 ) -> str:
     """Queue closed-loop motion to a local N/E/altitude pose, flown as given.
 
-    A target at or below home altitude (``up_m`` <= 0) is rejected; ArduPilot's fence, altitude
-    limits and proximity avoidance hold the flight limits. Optional ``heading_deg`` (0 = north,
-    clockwise) turns the vehicle in place after arrival. ``ttl_s`` optionally limits task lifetime
-    in seconds; use its task ID with get_task_status to observe completion and expiry.
+    A target at or below home altitude (``up_m`` <= 0) is rejected; there is no boundary or
+    ceiling, and ArduPilot's proximity avoidance stops horizontal motion short of obstacles its
+    range sensors see. Optional ``heading_deg`` (0 = north, clockwise) turns the vehicle in place
+    after arrival. ``ttl_s`` optionally limits task lifetime in seconds; use its task ID with
+    get_task_status to observe completion and expiry.
     """
     arguments: dict[str, Any] = {"pose": pose}
     if heading_deg is not None:
@@ -139,39 +140,64 @@ def turn(
     return ctx.submit("turn", arguments, ttl_s)
 
 
-def look(ctx: ToolContext, pitch_deg: float) -> str:
-    """Tilt the gimbal camera: earth-frame ``pitch_deg``, 0 = level, negative = down,
-    -90 = straight down (allowed -90..45).
+def look(ctx: ToolContext, pitch_deg: float, yaw_deg: float = 0.0) -> str:
+    """Point the gimbal camera: earth-frame ``pitch_deg``, 0 = level, negative = down,
+    -90 = straight down (allowed -90..45), and ``yaw_deg`` relative to the nose, positive =
+    right, 0 = straight ahead (allowed within the gimbal's yaw travel, ±160 by default; beyond it
+    the camera stops at the limit and clamp_reason says so).
 
-    Takes effect at once and holds through later skills and take-off until changed;
-    get_state reports ``camera_pitch_deg``. Tilt down to inspect the ground or a landing
-    spot below, toward level to see far ahead; ranges and ground positions use the
-    measured gimbal pitch. The camera always faces the nose: turn the vehicle to look
-    sideways. Refused on a fixed camera (no gimbal attitude reported) and while RTH/LAND
-    point it down for precision landing.
+    Takes effect at once and holds through later skills and take-off until changed; get_state
+    reports ``camera_pitch_deg``/``camera_yaw_deg`` (commanded) and ``gimbal`` (measured). Tilt
+    down to inspect the ground or a landing spot below, toward level to see far ahead; pan to look
+    sideways without turning the vehicle (a move or turn still follows the nose, not the camera).
+    Refused on a fixed camera (no gimbal attitude reported) and while RTH/LAND point it straight
+    down for precision landing.
     """
-    return to_json(ctx.executor.look(pitch_deg))
+    return to_json(ctx.executor.look(pitch_deg, yaw_deg))
 
 
 def hold(ctx: ToolContext) -> str:
-    """Preempt queued work and hold position in GUIDED mode (an emergency stop)."""
+    """Preempt queued work and hold position in GUIDED mode (an emergency stop).
+
+    Refused while an operator emergency is in effect (get_state ``operator_lock``)."""
     return to_json(ctx.executor.hold(source="mcp"))  # the executor publishes the event
 
 
 def rth(ctx: ToolContext) -> str:
-    """Preempt queued work and return home; within 3 m of home it centres on the AprilTag pad."""
+    """Preempt queued work and return home; within 3 m of home it centres on the AprilTag pad.
+
+    Refused while an operator emergency is in effect (get_state ``operator_lock``)."""
     return to_json(ctx.executor.rth(source="mcp"))  # the executor publishes the event
 
 
 def land(ctx: ToolContext) -> str:
     """Preempt queued work and LAND. Beyond 3 m from home it descends in place; within 3 m it
-    re-centres over the home AprilTag pad before touchdown (precision landing)."""
+    re-centres over the home AprilTag pad before touchdown (precision landing).
+
+    Refused while an operator emergency is in effect (get_state ``operator_lock``)."""
     return to_json(ctx.executor.land(source="mcp"))  # the executor publishes the event
+
+
+def operator_emergency(ctx: ToolContext, action: str) -> str:
+    """For control apps only, never offered to the AI: the operator's hold, rth or land.
+
+    Preempts all work like hold/rth/land and locks out the AI's flight tools (take_off, goto,
+    move, turn, hold, rth, land) until operator_release, so the AI cannot undo the operator.
+    """
+    if action not in ("hold", "rth", "land"):
+        raise ValueError("action must be hold, rth or land")
+    return to_json(getattr(ctx.executor, action)(source="operator"))
+
+
+def operator_release(ctx: ToolContext) -> str:
+    """For control apps only, never offered to the AI: end an operator emergency's lock when the
+    operator gives the next mission. Returns the released action, or null if none was in effect."""
+    return to_json(ctx.executor.release_operator_lock())
 
 
 def register(mcp: Any, ctx: ToolContext) -> None:
     for function in (
         get_state, get_map, get_link_status, take_off, goto, move, turn, look,
-        hold, rth, land,
+        hold, rth, land, operator_emergency, operator_release,
     ):
         ctx.tool(function)

@@ -1,6 +1,6 @@
 """GTA V map data (DurtyFree ``gta-v-data-dumps``) converted to the common schema in local NED.
 
-Setup-time only (``scripts/maps/fetch_gta_map.py``); the runtime reads the JSON it writes.
+Setup-time only (``scripts/maps/build_gta_tiles.py``); the runtime reads the tiles it writes.
 
 GTA's world frame has X east, Y north and Z up, and headings turn counter-clockwise. The mod
 places NED (north, east) at ``x = ox - north*sin(h) + east*cos(h)``, ``y = oy + north*cos(h) +
@@ -13,13 +13,14 @@ Layers built:
   nodes, and props from the object dumps (bus stops, ATMs, seats);
 - areas: districts (zones, one rectangle per bound box).
 
-Everything is cropped to a circle around the origin with the runtime's own clipping.
+The whole map is converted (Los Santos and Blaine County); ``overview_rule`` picks the freeways
+and main roads the overview tiles keep.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from horus.maps.model import Area, MapData, Place, Way
@@ -43,7 +44,6 @@ def build_gta_map(
     zones: Iterable[Mapping[str, Any]],
     pois: Mapping[str, Iterable[Mapping[str, Any]]],
     origin: tuple[float, float, float],
-    radius_m: float,
     attribution: str,
     sources: dict[str, Any],
 ) -> MapData:
@@ -53,17 +53,11 @@ def build_gta_map(
     def ned(position: Mapping[str, Any]) -> tuple[float, float]:
         return game_to_ned(float(position["X"]), float(position["Y"]), ox, oy, heading)
 
-    # Only what can reach the crop: a road edge is at most a few hundred metres long.
-    reach = radius_m + 500.0
-
-    def near(position: Mapping[str, Any]) -> bool:
-        return math.hypot(float(position["X"]) - ox, float(position["Y"]) - oy) <= reach
-
     ways: dict[frozenset, Way] = {}
     places: list[Place] = []
     for area in node_areas:
         for node in area["Nodes"]:
-            if node.get("IsOnWater") or not near(node["Position"]):
+            if node.get("IsOnWater"):
                 continue
             here, name = ned(node["Position"]), _street(node)
             neighbour_names = set()
@@ -87,7 +81,7 @@ def build_gta_map(
                 places.append(Place(f"Traffic lights on {name}" if name else "Traffic lights", "traffic_light", *here))
     for stem, objects in pois.items():
         kind, label = POI_KINDS[stem]
-        places.extend(Place(label, kind, *ned(o["Position"])) for o in objects if near(o["Position"]))
+        places.extend(Place(label, kind, *ned(o["Position"])) for o in objects)
     areas = []
     for zone in zones:
         for bound in zone.get("Bounds") or ():
@@ -98,7 +92,23 @@ def build_gta_map(
     return MapData(
         places=tuple(places), ways=_chain(tuple(ways.values())), areas=tuple(areas),
         attribution=attribution, sources=sources,
-    ).area(0.0, 0.0, radius_m)
+    )
+
+
+def overview_rule(node_areas: Iterable[Mapping[str, Any]], origin: tuple[float, float, float]) -> Callable[[Way], bool]:
+    """The overview tiles' rule: freeways, and roads at least half of whose points are main-road
+    nodes (neither back road nor gravel)."""
+    ox, oy, heading = origin
+    main = frozenset(
+        _key(game_to_ned(float(node["Position"]["X"]), float(node["Position"]["Y"]), ox, oy, heading))
+        for area in node_areas for node in area["Nodes"]
+        if not node.get("IsBackroad") and not node.get("IsGravelRoad")
+    )
+
+    def keep(way: Way) -> bool:
+        return way.kind == "freeway" or 2 * sum(_key(p) in main for p in way.points) >= len(way.points)
+
+    return keep
 
 
 def _chain(edges: tuple[Way, ...]) -> tuple[Way, ...]:

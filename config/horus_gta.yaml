@@ -1,20 +1,18 @@
-# GTA V renderer mode (sim/run.sh start --gta [--json-physics], gta/horus_mod/README.md): GTA V
-# draws the camera view at HorusGta.ini's origin (Legion Square, GTA x=195, y=-933). With
-# --json-physics the quad flies in GTA and collides with it; without, SITL flies over its own flat
-# plane and the camera passes through walls. As config/horus_urban.yaml except the source;
-# ArduPilot's fence is config/ardupilot/gta.parm.
+# GTA V world (sim/run.sh start --gta, gta/horus_mod/README.md "Physics"): GTA V draws the
+# camera view at HorusGta.ini's origin (Legion Square, GTA x=195, y=-933), and the quad flies in
+# GTA as a physical object and collides with it. As config/horus_urban.yaml except the source.
+# The camera rides on HorusGta.dll's gimbal, which HORUS points through horus-gta-gimbal
+# (horus/gimbal/gta.py, started by sim/scripts/start_gta_sitl.sh; gta/horus_mod/README.md "Gimbal").
 gimbal:
-  # Simulated gimbal device; see config/horus.yaml.
+  # The GTA gimbal device sends to this port; HORUS drives it directly, not through ArduPilot.
   connection: udpin:127.0.0.1:14600
 executor:
   speed_m_s: 3.0
   vertical_speed_m_s: 1.5
-  # Obstacles are left to the emulated ToF payload (--json-physics: HorusGta.dll casts the seven
+  # Obstacles are left to the emulated ToF payload (HorusGta.dll casts the seven
   # beams into the game, sim/scripts/start_gta_sitl.sh) and ArduPilot's proximity avoidance, which
-  # stops guided velocity 1 m (AVOID_MARGIN) before what a beam sees within 4 m. ArduPilot's fence
-  # (config/ardupilot/gta.parm) is the operating area: 40 m around home, the plaza and its edges,
-  # a 48 m ceiling and a 6 m floor once the vehicle has climbed above it, because the plane sweeps
-  # below found the air clear from 6 m up while the kiosk roof (4.4 m) and unmapped low objects
+  # stops guided velocity 1 m (AVOID_MARGIN) before what a beam sees within 4 m. The plane sweeps
+  # below found the air clear from 6 m up, while the kiosk roof (4.4 m) and unmapped low objects
   # stand below. The beams are level and 45 deg apart, so they miss what is above or below the
   # drone and a thin pole between two beams; the mapped obstacles below include such cases (the
   # colonnade's overhanging slabs, tree canopies).
@@ -27,11 +25,11 @@ executor:
   # kiosk there, and plane sweeps at 6, 8, 10 and 12 m above home over north -16..20, east -20..10
   # crossed nothing; below 6 m stand the kiosk and unmapped low objects (planters, benches, lamps).
   arrival_tolerance_m: 0.4
-  # horus-gta-bridge sends this value to HorusGta.dll as the camera's horizontal FOV, so the
-  # rendered view and HORUS's camera model agree.
+  # HorusGta.ini [physics] hfov_deg must equal this value, so the rendered view and HORUS's
+  # camera model agree.
   camera_horizontal_fov_deg: 84.0
-  # Pose mode: horus-gta-bridge's gimbal starts here. --json-physics: the camera stays on SITL's
-  # temporary servo mount, which rests at -45 deg and is never commanded (sim/scripts/start_gta_sitl.sh).
+  # Until HORUS points it (and while the gimbal reports nothing), HorusGta.dll's gimbal rests
+  # at -45 deg; geometry uses this pitch then.
   default_gimbal_pitch_deg: -45.0
 perception:
   # Frames from horus_capture.asi (gta/capture/README.md) in the game on the same host.
@@ -47,13 +45,17 @@ perception:
     - person sitting on the ground
   ring_buffer_s: 30.0
 commander:
+  # The whole GTA map is kilometres across: a flight there is many minutes of goto and
+  # wait_for_task calls in one response (2026-11-02: a 2.3 km flight to P1 ran out of the
+  # default 40 tool-call turns twice). timeout_s is how long Claude Code may write nothing.
+  max_turns: 200
   timeout_s: 900.0
   claude_model: opus
   claude_effort: high
-# GTA's road graph, districts and street furniture around the origin, and its ped navmesh's
-# footpaths and roads, for find_place/get_area_map (horus/maps). Built once per machine with
-# scripts/maps/fetch_gta_map.py and fetch_gta_walkable.py; the server refuses to start without them.
+# The whole GTA map (Los Santos and Blaine County): road graph, districts, street furniture and
+# GTA's ped navmesh as walkable ground, for find_place/get_area_map and the control apps' map
+# tiles (horus/maps). Built once per machine into this tile directory with
+# scripts/maps/build_gta_tiles.py; the server refuses to start without it.
 map:
   provider: gta
-  data_path: data/maps/gta/map.json
-  walkable_path: data/maps/gta/walkable.json
+  data_path: data/maps/gta/tiles

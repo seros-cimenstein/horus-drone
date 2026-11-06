@@ -428,6 +428,24 @@ def test_operator_hold_restores_the_camera_turned_nadir_for_precision_landing():
         executor.close()
 
 
+def test_precision_landing_points_straight_down_facing_the_nose_and_gives_the_panned_camera_back():
+    flight = FakeFlight(Pose(0.0, 0.0, 2.0), armed=True)
+    gimbal = FakeGimbal(pitch_deg=-45.0)
+    perception = _FakePerception(_tag_image())
+    executor = HorusExecutor(flight, _executor_settings(), perception, gimbal=gimbal, autostart=False)
+    try:
+        executor.look(-30.0, 60.0)
+        executor.rth()
+        executor.tick()
+        assert gimbal.points[-1] == (-90.0, 0.0)  # nadir and facing the nose, whatever look set
+
+        executor.hold()
+
+        assert gimbal.points[-1] == (-30.0, 60.0)
+    finally:
+        executor.close()
+
+
 def test_next_skill_after_a_pilot_override_restores_the_nadir_camera():
     # The override ends precision control but keeps the nadir-camera record for the next skill.
     flight = FakeFlight(Pose(0.0, 0.0, 2.0), armed=True)

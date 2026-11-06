@@ -14,9 +14,9 @@ using GTA.UI;
 namespace HorusGta
 {
     /// <summary>
-    /// Renders the HORUS drone camera: a scripted camera follows the poses horus-gta-bridge sends
-    /// from ArduPilot SITL over UDP. Active while valid packets arrive; idle (normal game) otherwise.
-    /// Every tick it publishes its state to the shared camera block read by horus_capture.asi.
+    /// Flies the HORUS quad in GTA from ArduPilot SITL's JSON backend (README "Physics") and renders
+    /// the drone camera on it. Active while SITL frames arrive; idle (normal game) otherwise. Every
+    /// tick it publishes its state to the shared camera block read by horus_capture.asi.
     /// Configured by scripts\HorusGta.ini; logs to scripts\HorusGta.log.
     /// </summary>
     public class HorusGtaScript : Script
@@ -25,15 +25,10 @@ namespace HorusGta
         // GET_GROUND_Z_FOR_3D_COORD returns the first surface below this height.
         const float GroundProbeTopZ = 1000f;
         const double ProgressLogIntervalS = 5.0;
-        // Per-tick time budget for draining the pose socket (PoseLink.Drain).
-        const double DrainBudgetS = 0.002;
 
         readonly ModConfig cfg;
-        readonly PoseLink link;
         readonly StreamWriter log;
-        readonly Socket socket;
         readonly CameraBlock camera;
-        readonly byte[] buffer = new byte[2048];
         readonly Stopwatch clock = Stopwatch.StartNew();
         string pendingNotice;
 
@@ -53,11 +48,8 @@ namespace HorusGta
         bool prevFrozen, prevInvincible;
         int prevMaxWanted = 5;
 
-        long loggedBadPackets;
-        double nextBadLogS;
-        double nextBacklogLogS;
         bool appliedThisTick;
-        // SITL flies over a flat plane, so the camera can pass through GTA's buildings.
+        // The camera's path is shape-tested too (README "Mod", Intersections).
         readonly CameraPath path = new CameraPath();
 
         // ArduPilot's JSON SITL backend; while its frames arrive they drive the camera.
@@ -95,6 +87,11 @@ namespace HorusGta
         RangeSensors sensors;
         bool sensorSendFailed;
         long sensorRaysLogged;
+        // The camera gimbal (README "Gimbal"): HORUS's setpoints arrive on [gimbal] bind:port, the
+        // attitude the motors hold goes to [gimbal] target on the physics clock.
+        readonly GimbalChannel gimbalChannel;
+        bool gimbalSendFailed;
+        long gimbalRejectedLogged;
         // Shared view ([view] mode=shared, README "Shared view"): the player keeps his gameplay camera
         // and control; the drone camera renders one tick in drone_every, and a corner marker drawn
         // every tick tells horus_capture.asi which camera each frame used.
@@ -115,6 +112,19 @@ namespace HorusGta
         readonly StreamAnchor streamAnchor = new StreamAnchor();
         int streamVolume;
         bool streamVolumeHeld, streamVolumeLogged, streamVolumeFailedLogged;
+
+        // The height survey (README "Survey"): runs while scripts\HorusGtaSurvey.request.json exists
+        // and SITL is not connected; progress in scripts\HorusGtaSurvey.progress.json.
+        const string SurveyRequestFile = "HorusGtaSurvey.request.json", SurveyProgressFile = "HorusGtaSurvey.progress.json";
+        const double SurveyPollS = 1.0, SurveyLogIntervalS = 30.0;
+        // Top surfaces only: the map, objects, foliage and glass; no vehicles, peds or water.
+        const IntersectFlags SurveyFlags = IntersectFlags.Map | IntersectFlags.Objects | IntersectFlags.Foliage | IntersectFlags.Glass;
+        // Extra collision requests at the tile's quadrant centres (a quarter tile from the centre).
+        const float SurveyQuadrantM = (float)(SurveyGrid.TileM / 4);
+        SurveyRequest surveyRequest;   // read, waiting for the home ground height
+        SurveyRun survey;
+        double nextSurveyPollS, nextSurveyLogS;
+        bool surveyHolding;   // the survey holds the player and the streaming focus
 
         public HorusGtaScript()
         {
@@ -138,26 +148,11 @@ namespace HorusGta
             shared = cfg.View.Mode == ViewMode.Shared;
             schedule = shared ? new ViewSchedule(cfg.View.DroneEvery) : null;
             Log(string.Format(CultureInfo.InvariantCulture,
-                "origin x={0:F2} y={1:F2} heading_deg={2:F1} z={3}; pose timeout {4:g} s; scene weather={5} hour={6} freeze_time={7}",
+                "origin x={0:F2} y={1:F2} heading_deg={2:F1} z={3}; release after {4:g} s without SITL frames; scene weather={5} hour={6} freeze_time={7}",
                 cfg.Origin.X, cfg.Origin.Y, cfg.Origin.HeadingDeg,
                 originZ.HasValue ? originZ.Value.ToString("F2", CultureInfo.InvariantCulture) : "probe ground", cfg.TimeoutS,
                 cfg.Scene.Weather ?? "(game)", cfg.Scene.Hour?.ToString(CultureInfo.InvariantCulture) ?? "(game)",
                 cfg.Scene.FreezeTime ? "true" : "false"));
-
-            link = new PoseLink(cfg.TimeoutS);
-            try
-            {
-                socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp) { Blocking = false };
-                socket.Bind(new IPEndPoint(IPAddress.Parse(cfg.Bind), cfg.Port));
-                Log($"listening for poses on udp {cfg.Bind}:{cfg.Port}");
-            }
-            catch (Exception e)
-            {
-                socket?.Close();
-                socket = null;
-                Log($"cannot listen on udp {cfg.Bind}:{cfg.Port}: {e.Message}");
-                pendingNotice = $"HORUS GTA: cannot listen on udp {cfg.Bind}:{cfg.Port} (see HorusGta.log)";
-            }
 
             try
             {
@@ -171,6 +166,7 @@ namespace HorusGta
                 physicsSocket?.Close();
                 physicsSocket = null;
                 Log($"physics: cannot listen on udp {cfg.Physics.Bind}:{cfg.Physics.Port}: {e.Message}");
+                pendingNotice = $"HORUS GTA: cannot listen on udp {cfg.Physics.Bind}:{cfg.Physics.Port} (see HorusGta.log)";
             }
 
             if (cfg.Sensors.Enabled)
@@ -190,6 +186,18 @@ namespace HorusGta
                 }
             }
             else Log("range sensors: off");
+
+            try
+            {
+                gimbalChannel = new GimbalChannel(cfg.Gimbal);
+                Log(string.Format(CultureInfo.InvariantCulture, "gimbal: setpoints on udp {0}:{1}, status -> udp {2} at {3:g} Hz, slew {4:g} deg/s; resting at pitch {5:g} until HORUS points it",
+                    cfg.Gimbal.Bind, cfg.Gimbal.Port, cfg.Gimbal.Target, cfg.Gimbal.RateHz, cfg.Gimbal.SlewDegS, GimbalMount.RestPitchDeg));
+            }
+            catch (Exception e)
+            {
+                gimbalChannel = null;
+                Log($"gimbal: cannot listen on udp {cfg.Gimbal.Bind}:{cfg.Gimbal.Port} ({e.Message}); the camera stays at rest and HORUS sees no gimbal");
+            }
 
             try
             {
@@ -215,7 +223,10 @@ namespace HorusGta
         {
             appliedThisTick = false;
             rayIgnore = Game.Player.Character;
-            Step(clock.Elapsed.TotalSeconds);
+            double now = clock.Elapsed.TotalSeconds;
+            // Before the physics: on the tick SITL's first frame arrives the survey gives the player and the focus back.
+            SurveyTick(now);
+            Step(now);
             PublishCamera(shared ? CameraBlock.ViewShared : CameraBlock.ViewDrone);
             if (shared) DrawMarker();
         }
@@ -253,38 +264,20 @@ namespace HorusGta
                 Notification.PostTicker(pendingNotice, true);
                 pendingNotice = null;
             }
-            Receive(now);
-            LogBadPackets(now, false);
-            if (PhysicsStep(now)) return;
-
-            if (!link.IsFresh(now))
-            {
-                // HasLatest: the stream timed out. active without HasLatest: the link was reset
-                // after a tick gap (PoseLink.Drain), so the camera waits for a pose sent after it.
-                if (link.HasLatest || active)
-                {
-                    Release(link.HasLatest ? $"no valid pose for {cfg.TimeoutS:g} s" : "pose stream restarted after a tick gap");
-                    link.Reset();
-                }
-                return;
-            }
-            if (!originZ.HasValue && !ResolveGround(now)) return;
-            if (!active) Activate(link.Latest);
-            appliedThisTick = Apply(link.Latest, now);
+            PhysicsStep(now);
         }
 
         /// <summary>
         /// Answer SITL's servo frames for up to the tick budget, pacing the sim to real time, and put
-        /// the camera on the quad. True while the physics link drives the camera (pose packets are
-        /// then ignored).
+        /// the camera on the quad while frames arrive.
         /// </summary>
-        bool PhysicsStep(double now)
+        void PhysicsStep(double now)
         {
-            if (physicsSocket == null) return false;
+            if (physicsSocket == null) return;
             if (physics == null)
             {
-                if (physicsSocket.Available <= 0) return false;
-                if (!originZ.HasValue && !ResolveGround(now)) return true;
+                if (physicsSocket.Available <= 0) return;
+                if (!originZ.HasValue && !ResolveGround(now)) return;
                 var frame = new Airframe();
                 var body = new QuadBody(frame)
                 {
@@ -294,13 +287,14 @@ namespace HorusGta
                 };
                 var ned = new NedFrame
                 {
-                    Origin = new Vec3(cfg.Origin.X, cfg.Origin.Y, originZ.Value + frame.RadiusM + 0.001),
+                    Origin = new Vec3(cfg.Origin.X, cfg.Origin.Y, originZ.Value + frame.RestHeightM),
                     HeadingDeg = cfg.Origin.HeadingDeg,
                 };
-                physics = new PhysicsLink(body, ned, new GimbalServo(), ned.Origin, ned.GtaHeadingRad(0));
-                // The sweep runs after each step, inside the tick budget: 7 rays at 20 Hz of sim time.
+                physics = new PhysicsLink(body, ned, GimbalMount.Create(cfg.Gimbal), ned.Origin, ned.GtaHeadingRad(0));
+                // After each step, inside the tick budget: the sensor sweep (7 rays at 20 Hz of sim
+                // time) and the gimbal report ([gimbal] rate_hz of sim time).
                 sensors = sensorSocket != null ? RangeSensors.Create(cfg.Sensors, frame, SensorRay) : null;
-                if (sensors != null) physics.Advanced = SweepSensors;
+                physics.Advanced = AfterStep;
                 physicsLastRealS = now;
                 Log(string.Format(CultureInfo.InvariantCulture,
                     "physics: SITL frames arriving; quad {0} kg, {1}x{2}x{3} props, {4} Kv {5}S, max {6:F0} rpm, hover throttle {7:F3}, resting at ({8:F2}, {9:F2}, {10:F2})",
@@ -308,6 +302,7 @@ namespace HorusGta
                     frame.MaxRpm, frame.HoverThrottle(), ned.Origin.X, ned.Origin.Y, ned.Origin.Z));
             }
 
+            DrainGimbal();
             // Pace: the sim may run up to the wall time since the last tick, at most 0.1 s ahead of
             // where it is, so a slow tick costs real-time factor instead of a burst afterwards.
             physicsTargetS = Math.Min(physicsTargetS + (now - physicsLastRealS), physics.SimTimeS + 0.1);
@@ -332,7 +327,7 @@ namespace HorusGta
                     RemoveDrone();
                     Release($"physics: no SITL frame for {cfg.TimeoutS:g} s");
                 }
-                return false;
+                return;
             }
             if (!physicsDriving)
             {
@@ -344,16 +339,15 @@ namespace HorusGta
             }
             LogPhysics(now);
 
-            var packet = physics.CameraPose(originZ.Value, cfg.Physics.HfovDeg);
-            if (!active) Activate(packet);
-            bool droneTick = Apply(packet, now);
+            var camPose = physics.CameraPose(originZ.Value, cfg.Physics.HfovDeg);
+            if (!active) Activate(camPose);
+            bool droneTick = Apply(camPose, now);
             ShowDrone();
             if (outsideView) ShowOutsideView();
             else StopOutsideView();
             Trace(now, droneTick);
             // Frames rendered from the outside view (or, in the shared view, from the player's camera) are not the drone camera's.
             appliedThisTick = droneTick && !outsideView;
-            return true;
         }
 
         static Vector3 V3(Vec3 v) => new Vector3((float)v.X, (float)v.Y, (float)v.Z);
@@ -497,7 +491,7 @@ namespace HorusGta
                 outsideView ? "outside" : droneTick ? "drone" : "player",
                 c.X, c.Y, c.Z, cr.X, cr.Y, cr.Z, d.X, d.Y, d.Z, qx, qy, qz, qw,
                 p.X, p.Y, p.Z, roll * Deg, pitch * Deg, yaw * Deg,
-                physics.GimbalRollDeg ?? double.NaN, physics.GimbalPitchDeg ?? double.NaN, physics.GimbalYawDeg ?? double.NaN,
+                physics.Gimbal.RollDeg, physics.Gimbal.TiltDeg, physics.Gimbal.PanDeg,
                 f.Origin.X, f.Origin.Y, f.Origin.Z, f.HeadingDeg,
                 camSet.X, camSet.Y, camSet.Z, camSet.RotX, camSet.RotY, camSet.RotZ));
         }
@@ -535,12 +529,12 @@ namespace HorusGta
             physics.Frame.Euler(body, out double roll, out double pitch, out double yaw);
             Vec3 p = physics.Frame.ToNed(body.P - physics.Frame.Origin);
             Log(string.Format(CultureInfo.InvariantCulture,
-                "physics: sim {0:F1} s, real-time factor {1:F3}, {2:F0} steps/s at {3} Hz, {4} budget hits, {5} idle ticks, {18:F0} world rays/s{22}; ned ({6:F2}, {7:F2}, {8:F2}) rpy ({9:F1}, {10:F1}, {11:F1}) gimbal rpy ({20:F1}, {12:F1}, {21:F1}); rpm {13:F0} {14:F0} {15:F0} {16:F0}{17}{19}{23}",
+                "physics: sim {0:F1} s, real-time factor {1:F3}, {2:F0} steps/s at {3} Hz, {4} budget hits, {5} idle ticks, {18:F0} world rays/s{22}; ned ({6:F2}, {7:F2}, {8:F2}) rpy ({9:F1}, {10:F1}, {11:F1}) gimbal motors rpy ({20:F1}, {12:F1}, {21:F1}){24}; rpm {13:F0} {14:F0} {15:F0} {16:F0}{17}{19}{23}",
                 physics.SimTimeS, sim / real, (physics.TotalSteps - physicsLogSteps) / real, physics.FrameRate, physicsBudgetHits, physicsTimeouts,
-                p.X, p.Y, p.Z, roll * 180 / Math.PI, pitch * 180 / Math.PI, yaw * 180 / Math.PI, physics.GimbalPitchDeg ?? double.NaN,
+                p.X, p.Y, p.Z, roll * 180 / Math.PI, pitch * 180 / Math.PI, yaw * 180 / Math.PI, physics.Gimbal.TiltDeg,
                 body.Rpm[0], body.Rpm[1], body.Rpm[2], body.Rpm[3],
                 body.InContact ? (body.LastContact.Value.Normal.Z > 0.7 ? ", on ground" : ", against a wall") : "", (probe.Rays - probeRaysLogged) / real,
-                DroneRayCheck(body), physics.GimbalRollDeg ?? double.NaN, physics.GimbalYawDeg ?? double.NaN, SensorStats(real), ViewStats()));
+                DroneRayCheck(body), physics.Gimbal.RollDeg, physics.Gimbal.PanDeg, SensorStats(real), ViewStats(), GimbalStats()));
             physicsLogRealS = now; physicsLogSimS = physics.SimTimeS; physicsLogSteps = physics.TotalSteps;
             physicsBudgetHits = 0; physicsTimeouts = 0; probeRaysLogged = probe.Rays;
             if (sensors != null) sensorRaysLogged = sensors.Rays;
@@ -566,16 +560,53 @@ namespace HorusGta
             return s;
         }
 
-        /// <summary>After each physics step: sweep the range sensors when due and send the datagram (a failed send is logged once).</summary>
-        void SweepSensors()
+        /// <summary>For the 5 s log: the gimbal's target and the camera attitude its motors hold.</summary>
+        string GimbalStats()
         {
-            if (!sensors.Update(physics.SimTimeS, physics.Body)) return;
-            try { sensorSocket.SendTo(sensors.Datagram, 0, RangeProtocol.Size, SocketFlags.None, sensorTarget); }
-            catch (Exception e)
+            var g = physics.Gimbal;
+            g.Measure(physics.Body, physics.Frame, out double cr, out double cp, out double cy, out _, out _);
+            return string.Format(CultureInfo.InvariantCulture, ", camera pitch {0:F1} yaw {1:F1} roll {2:F1} (target pitch {3:F1} yaw {4:F1}{5})",
+                cp, cy, cr, g.TargetPitchDeg, g.TargetYawDeg, g.HasSetpoint ? "" : ", at rest: no setpoint yet");
+        }
+
+        /// <summary>After each physics step: sweep the range sensors and report the gimbal when due (a failed send is logged once each).</summary>
+        void AfterStep()
+        {
+            if (sensors != null && sensors.Update(physics.SimTimeS, physics.Body))
             {
-                if (sensorSendFailed) return;
-                sensorSendFailed = true;
-                Log($"range sensors: udp send to {cfg.Sensors.Target} failed ({(e is SocketException se ? se.SocketErrorCode.ToString() : e.Message)}); further failures are not logged");
+                try { sensorSocket.SendTo(sensors.Datagram, 0, RangeProtocol.Size, SocketFlags.None, sensorTarget); }
+                catch (Exception e)
+                {
+                    if (!sensorSendFailed)
+                        Log($"range sensors: udp send to {cfg.Sensors.Target} failed ({(e is SocketException se ? se.SocketErrorCode.ToString() : e.Message)}); further failures are not logged");
+                    sensorSendFailed = true;
+                }
+            }
+            if (gimbalChannel != null && physics.Gimbal.Report(physics.SimTimeS, physics.Body, physics.Frame))
+            {
+                try { gimbalChannel.Send(physics.Gimbal); }
+                catch (Exception e)
+                {
+                    if (!gimbalSendFailed)
+                        Log($"gimbal: udp send to {cfg.Gimbal.Target} failed ({(e is SocketException se ? se.SocketErrorCode.ToString() : e.Message)}); further failures are not logged");
+                    gimbalSendFailed = true;
+                }
+            }
+        }
+
+        /// <summary>Once per tick: hand HORUS's waiting gimbal setpoints to the mount; log each new target and rejected datagrams.</summary>
+        void DrainGimbal()
+        {
+            if (gimbalChannel == null) return;
+            var g = physics.Gimbal;
+            double pitch = g.TargetPitchDeg, yaw = g.TargetYawDeg;
+            bool had = g.HasSetpoint;
+            if (gimbalChannel.Drain(g) > 0 && (!had || g.TargetPitchDeg != pitch || g.TargetYawDeg != yaw))
+                Log(string.Format(CultureInfo.InvariantCulture, "gimbal: setpoint pitch {0:F1} yaw {1:F1}", g.TargetPitchDeg, g.TargetYawDeg));
+            if (gimbalChannel.Rejected > gimbalRejectedLogged)
+            {
+                Log($"gimbal: {gimbalChannel.Rejected - gimbalRejectedLogged} datagram(s) rejected (not a version 1 HGIM setpoint of {GimbalProtocol.SetpointSize} bytes with finite angles)");
+                gimbalRejectedLogged = gimbalChannel.Rejected;
             }
         }
 
@@ -598,66 +629,151 @@ namespace HorusGta
             catch (Exception e) { Log($"camera block write failed: {e.Message}"); }
         }
 
+        /// <summary>
+        /// Once per tick, before the physics: start the survey when its request file appears (polled
+        /// every second), stop it when the file goes, suspend it while SITL is connected (frames
+        /// waiting or the physics link driving), and otherwise run one survey step within
+        /// [physics] budget_ms, holding the player like the drone view does.
+        /// </summary>
+        void SurveyTick(double now)
+        {
+            string dir = BaseDirectory ?? "scripts";
+            string requestPath = Path.Combine(dir, SurveyRequestFile);
+            if (now >= nextSurveyPollS)
+            {
+                nextSurveyPollS = now + SurveyPollS;
+                bool requested = File.Exists(requestPath);
+                if (requested && surveyRequest == null && survey == null) ReadSurveyRequest(requestPath, dir);
+                else if (!requested && (surveyRequest != null || survey != null)) EndSurvey(now, "the request file was removed");
+            }
+            if (surveyRequest == null && survey == null) return;
+            if (physicsDriving || (physicsSocket != null && physicsSocket.Available > 0))
+            {
+                ReleaseSurveyHold();
+                survey?.Suspend(now, "SITL connected");
+                return;
+            }
+            if (survey == null)
+            {
+                if (!originZ.HasValue && !ResolveGround(now)) return;
+                StartSurvey(now, dir, requestPath);
+                if (survey == null) return;
+            }
+            survey.Resume(now);
+            surveyHolding = true;
+            HoldPlayer();
+            bool going = survey.Step(now, cfg.Physics.BudgetMs / 1000.0);
+            if (now >= nextSurveyLogS)
+            {
+                Log("survey: " + survey.Summary());
+                nextSurveyLogS = now + SurveyLogIntervalS;
+            }
+            if (!going) EndSurvey(now, null);
+        }
+
+        void ReadSurveyRequest(string requestPath, string dir)
+        {
+            string text, error;
+            try { text = File.ReadAllText(requestPath); }
+            catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { Log($"survey: cannot read {SurveyRequestFile} yet ({e.Message})"); return; }
+            if (SurveyRequest.TryParse(text, out surveyRequest, out error))
+            {
+                Log($"survey: request {text.Trim()}");
+                return;
+            }
+            Log($"survey: {SurveyRequestFile} refused: {error}");
+            try
+            {
+                SurveyRun.WriteRejected(Path.Combine(dir, SurveyProgressFile), $"{SurveyRequestFile} refused: {error}");
+                File.Delete(requestPath);
+            }
+            catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { Log($"survey: cannot report the refusal: {e.Message}"); }
+        }
+
+        void StartSurvey(double now, string dir, string requestPath)
+        {
+            var run = new SurveyRun(surveyRequest, cfg.Origin, originZ.Value, cfg.Origin.Z.HasValue ? "ini" : "probe", new Airframe().RestHeightM,
+                dir, Path.Combine(dir, SurveyProgressFile))
+            {
+                CastDown = SurveyRay,
+                IsWater = SurveyWater,
+                KeepLoaded = KeepTileLoaded,
+                Clock = () => clock.Elapsed.TotalSeconds,
+                Log = Log,
+            };
+            surveyRequest = null;
+            if (!run.Begin(now))
+            {
+                try { File.Delete(requestPath); } catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
+                return;
+            }
+            survey = run;
+            nextSurveyLogS = now + SurveyLogIntervalS;
+        }
+
+        /// <summary>End the survey: stopped early when <paramref name="why"/> is given; a finished or failed run removes its request file so it does not start again.</summary>
+        void EndSurvey(double now, string why)
+        {
+            if (survey != null)
+            {
+                if (why != null) survey.Stop(now, why);
+                else
+                {
+                    try { File.Delete(Path.Combine(BaseDirectory ?? "scripts", SurveyRequestFile)); }
+                    catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { Log($"survey: cannot remove {SurveyRequestFile}: {e.Message}"); }
+                }
+            }
+            else if (why != null && surveyRequest != null) Log($"survey: request withdrawn ({why}) before it started");
+            survey = null;
+            surveyRequest = null;
+            ReleaseSurveyHold();
+        }
+
+        void ReleaseSurveyHold()
+        {
+            if (!surveyHolding) return;
+            RestorePed();
+            ClearFocus();
+            surveyHolding = false;
+        }
+
+        /// <summary>Survey ray: GTA z of the first map, object, foliage or glass surface straight down through (x, y), or null.</summary>
+        double? SurveyRay(double x, double y)
+        {
+            var hit = Cast(new Vector3((float)x, (float)y, (float)SurveyGrid.RayTopZ), new Vector3((float)x, (float)y, (float)SurveyGrid.RayBottomZ), SurveyFlags);
+            return hit.DidHit ? hit.HitPosition.Z : (double?)null;
+        }
+
+        bool SurveyWater(double x, double y) =>
+            Function.Call<bool>(Hash.GET_WATER_HEIGHT_NO_WAVES, (float)x, (float)y, (float)SurveyGrid.RayTopZ, new OutputArgument());
+
+        /// <summary>Focus the streaming on the tile centre and request its collision there and at the quadrant centres.</summary>
+        void KeepTileLoaded(double x, double y, double z)
+        {
+            float fx = (float)x, fy = (float)y, fz = (float)z;
+            Function.Call(Hash.SET_FOCUS_POS_AND_VEL, fx, fy, fz, 0f, 0f, 0f);
+            focusHeld = true;
+            Function.Call(Hash.REQUEST_COLLISION_AT_COORD, fx, fy, fz);
+            foreach (float dx in new[] { -SurveyQuadrantM, SurveyQuadrantM })
+                foreach (float dy in new[] { -SurveyQuadrantM, SurveyQuadrantM })
+                    Function.Call(Hash.REQUEST_ADDITIONAL_COLLISION_AT_COORD, fx + dx, fy + dy, fz);
+        }
+
         void OnAborted(object sender, EventArgs e)
         {
             RemoveDrone();
+            survey?.Stop(clock.Elapsed.TotalSeconds, "script aborted");
+            ReleaseSurveyHold();
             Release("script aborted");
             try { trace?.Dispose(); } catch { }
             appliedThisTick = false;
             // No marker is drawn after the abort, so the plugin goes back to the drone view's handling.
             PublishCamera(CameraBlock.ViewDrone);
             try { camera?.Dispose(); } catch { }
-            LogBadPackets(clock.Elapsed.TotalSeconds, true);
-            try { socket?.Close(); } catch { }
             try { physicsSocket?.Close(); } catch { }
             try { sensorSocket?.Close(); } catch { }
+            try { gimbalChannel?.Dispose(); } catch { }
             try { log?.Dispose(); } catch { }
-        }
-
-        void Receive(double now)
-        {
-            if (socket == null) return;
-            long started = Stopwatch.GetTimestamp();
-            long budget = (long)(Stopwatch.Frequency * DrainBudgetS);
-            var result = link.Drain(buffer, ReceiveOne, now, () => Stopwatch.GetTimestamp() - started >= budget);
-            if (result.Discarded > 0)
-                Log($"discarded {result.Discarded} pose datagrams queued while the script did not tick (game paused or stalled)");
-            if (result.BudgetHit && now >= nextBacklogLogS)
-            {
-                Log($"pose socket backlog: read {result.Datagrams} datagrams in the {DrainBudgetS * 1000:g} ms budget, more queued");
-                nextBacklogLogS = now + ProgressLogIntervalS;
-            }
-        }
-
-        /// <summary>One queued datagram into <paramref name="into"/>: its length, or -1 when none is queued.</summary>
-        int ReceiveOne(byte[] into)
-        {
-            try
-            {
-                if (socket.Available <= 0) return -1;
-                return socket.Receive(into);
-            }
-            catch (SocketException e) when (e.SocketErrorCode == SocketError.WouldBlock)
-            {
-                return -1;
-            }
-            catch (SocketException e) when (e.SocketErrorCode == SocketError.MessageSize)
-            {
-                return into.Length + 1;   // oversized datagram: counted as a size error
-            }
-            catch (SocketException e)
-            {
-                Log($"udp receive failed: {e.SocketErrorCode}");
-                return -1;
-            }
-        }
-
-        void LogBadPackets(double now, bool force)
-        {
-            if (link.BadPackets == loggedBadPackets || (!force && now < nextBadLogS)) return;
-            Log($"bad packets: {link.BadPackets} total (last: {link.LastError})");
-            loggedBadPackets = link.BadPackets;
-            nextBadLogS = now + ProgressLogIntervalS;
         }
 
         /// <summary>Stream the origin and probe its ground height; true once known.</summary>
@@ -696,7 +812,7 @@ namespace HorusGta
             return false;
         }
 
-        void Activate(PosePacket p)
+        void Activate(NedPose p)
         {
             Log(string.Format(CultureInfo.InvariantCulture,
                 "activated at seq {0}: ned=({1:F2}, {2:F2}, {3:F2}) rpy=({4:F1}, {5:F1}, {6:F1}) hfov={7:F1}",
@@ -771,17 +887,17 @@ namespace HorusGta
         }
 
         /// <summary>
-        /// Put the scripted camera at the packet's pose and on screen. In the shared view that happens
+        /// Put the scripted camera at the pose and on screen. In the shared view that happens
         /// on drone ticks only ([view] drone_every); the other ticks give the screen back to the
         /// gameplay camera, and the streaming focus stays with the player. True when this tick's
         /// frame renders the drone camera (every tick in the drone view; the F10 outside view aside).
         /// </summary>
-        bool Apply(PosePacket packet, double now)
+        bool Apply(NedPose ned, double now)
         {
             bool droneTick = !shared || schedule.Next();
-            if (droneTick) appliedSeq = packet.Seq;
+            if (droneTick) appliedSeq = ned.Seq;
             var resolution = Screen.Resolution;
-            var pose = PoseMapping.Map(packet, cfg.Origin, originZ.Value, resolution.Width, resolution.Height);
+            var pose = PoseMapping.Map(ned, cfg.Origin, originZ.Value, resolution.Width, resolution.Height);
             float x = (float)pose.X, y = (float)pose.Y, z = (float)pose.Z;
             var here = new Point3(x, y, z);
             if (path.NextSegment(here, out var from)) ProbeSegment(from, here, now);

@@ -67,8 +67,8 @@ gimbal_device=0
 case "${world_stem}" in
   horus_indoor|horus_forest*|horus_urban*) gimbal_device=1 ;;
 esac
-# The SITL parameter fragments follow the world (sim/scripts/world_profiles.py: indoor
-# proximity avoidance, canonical outdoor, or generated-world fence/speed). An explicit
+# The SITL parameter fragments follow the world (sim/scripts/world_profiles.py: proximity
+# avoidance, indoor return altitude, or outdoor return altitude and wind). An explicit
 # HORUS_SITL_PARAM_FILE (one file or a colon-separated list) always wins.
 param_files="${HORUS_SITL_PARAM_FILE:-}"
 if [[ -z "${param_files}" ]]; then

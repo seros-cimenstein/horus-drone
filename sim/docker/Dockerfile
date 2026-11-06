@@ -8,8 +8,6 @@ ARG ARDUCOPTER_SHA256=011627d41dd95640c3aca02d45283474be48721c8b1bb7a4b234d38b69
 ENV DEBIAN_FRONTEND=noninteractive \
     GZ_VERSION=harmonic \
     GZ_SIM_SYSTEM_PLUGIN_PATH=/opt/ardupilot_gazebo/build \
-    GZ_GUI_PLUGIN_PATH=/opt/horus-gui/lib \
-    HORUS_GUI_CONFIG=/opt/horus-gui/horus_demo.config \
     GZ_SIM_RESOURCE_PATH=/opt/ardupilot_gazebo/models:/opt/ardupilot_gazebo/worlds:/horus/sim/models:/horus/sim/worlds \
     PATH=/opt/horus-venv/bin:/opt/ardupilot/Tools/autotest:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     PYTHONPATH=/horus
@@ -103,14 +101,6 @@ RUN gz sim --version && command -v sim_vehicle.py
 RUN output="$(gz sim -s -r --headless-rendering -v4 --iterations 50 shapes.sdf 2>&1)" \
     && printf '%s\n' "$output" \
     && ! printf '%s\n' "$output" | grep -E 'Failed to (load|find plugin)'
-# The Qt GUI plugin depends only on sim/gui; build it before the HORUS source so README or
-# package edits rebuild only the pip layer below.
-COPY sim/gui/install_build_deps.sh /tmp/install_horus_gui_build_deps.sh
-RUN bash /tmp/install_horus_gui_build_deps.sh \
-    && rm /tmp/install_horus_gui_build_deps.sh
-COPY sim/gui /tmp/horus-gui-source
-RUN bash /tmp/horus-gui-source/build_plugin.sh /tmp/horus-gui-source \
-    && rm -rf /tmp/horus-gui-source
 COPY pyproject.toml README.md /tmp/horus-source/
 COPY horus /tmp/horus-source/horus
 RUN /opt/horus-venv/bin/pip install --no-cache-dir --no-build-isolation \

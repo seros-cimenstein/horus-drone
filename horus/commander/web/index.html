@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121212" media="(prefers-color-scheme: dark)">
+  <title>HORUS control app</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <h1>HORUS</h1>
+    <span id="link" class="pill pill-wait">connecting</span>
+    <p id="phone-state" class="phone-state" role="status" hidden></p>
+    <p id="phone-lock" class="phone-lock" role="alert" hidden></p>
+    <div class="emergency" role="group" aria-label="Emergency: goes straight to the drone, never through the AI">
+      <button type="button" class="stop" data-action="hold">HOLD</button>
+      <button type="button" class="stop" data-action="land">LAND</button>
+      <button type="button" class="stop" data-action="rth">HOME</button>
+      <span id="emergency-status" class="emergency-status" role="status"></span>
+    </div>
+  </header>
+  <p id="notice" class="notice" hidden></p>
+  <nav id="tabs" class="tabs" role="tablist" aria-label="Phone view" hidden>
+    <button type="button" id="tab-feed" class="tab" role="tab" aria-selected="true" aria-controls="feed-panel">Feed</button>
+    <button type="button" id="tab-map" class="tab" role="tab" aria-selected="false" aria-controls="map-panel">Map</button>
+    <button type="button" id="tab-camera" class="tab" role="tab" aria-selected="false" aria-controls="aiview-panel">Camera</button>
+  </nav>
+  <main class="grid">
+    <div class="column">
+      <section class="panel camera-panel" aria-labelledby="camera-title">
+        <h2 id="camera-title">Camera</h2>
+        <figure class="camera">
+          <img id="camera-image" alt="Drone camera with numbered objects" hidden>
+          <p id="camera-empty" class="camera-empty">Waiting for the camera…</p>
+          <figcaption id="camera-caption" class="camera-caption"></figcaption>
+        </figure>
+        <ul id="candidates" class="candidates" aria-label="Numbered objects"></ul>
+      </section>
+      <section class="panel state-panel" aria-labelledby="state-title">
+        <h2 id="state-title">Drone</h2>
+        <p id="state-empty" class="state-empty">Waiting for the drone…</p>
+        <dl id="state" class="state" hidden>
+          <dt>Height</dt><dd id="s-height"></dd>
+          <dt>Ground</dt><dd id="s-ground"></dd>
+          <dt>Battery</dt><dd id="s-battery"></dd>
+          <dt>Flight mode</dt><dd id="s-mode"></dd>
+          <dt>Doing</dt><dd id="s-executor"></dd>
+          <dt>Autopilot link</dt><dd id="s-link"></dd>
+          <dt>Data age</dt><dd id="s-age"></dd>
+        </dl>
+        <p id="s-override" class="state-warning" hidden></p>
+        <p id="s-operator" class="state-warning" hidden></p>
+      </section>
+      <section id="map-panel" class="panel map-panel" aria-labelledby="map-title">
+        <h2 id="map-title">Map</h2>
+        <div class="map-wrap">
+          <canvas id="map" class="map" width="600" height="400" role="img" aria-label="Map: drone, home, numbered objects, your selections and, where the world has one, the street map. Drag to move, pinch or scroll to zoom, long-press or right-click to drop a point."></canvas>
+          <div class="map-view" role="group" aria-label="Map view">
+            <button type="button" id="map-zoom-in" class="map-button" aria-label="Zoom in">+</button>
+            <button type="button" id="map-zoom-out" class="map-button" aria-label="Zoom out">&minus;</button>
+            <button type="button" id="map-centre" class="map-button" aria-label="Follow the drone" aria-pressed="true">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="currentColor"/><path d="M12 1v4M12 19v4M1 12h4M19 12h4" stroke="currentColor" stroke-width="2"/></svg>
+            </button>
+          </div>
+          <section id="offline-sheet" class="offline-sheet" aria-labelledby="offline-title" hidden>
+            <div class="offline-head">
+              <h3 id="offline-title">Offline map</h3>
+              <button type="button" id="offline-close" class="secondary" aria-label="Close">&times;</button>
+            </div>
+            <p id="offline-whole"></p>
+            <progress id="offline-progress" max="1" value="0" hidden></progress>
+            <p id="offline-status" class="offline-note" role="status"></p>
+            <div class="map-row">
+              <button type="button" id="offline-download">Download whole map</button>
+              <button type="button" id="offline-cancel" class="secondary" hidden>Cancel</button>
+              <button type="button" id="offline-remove" class="secondary" hidden>Remove download</button>
+            </div>
+            <p id="offline-kept" class="offline-note"></p>
+            <p id="offline-storage" class="offline-note"></p>
+          </section>
+        </div>
+        <div class="map-tools">
+          <div id="map-tool-pick" class="map-row" role="group" aria-label="Select on the map">
+            <button type="button" class="secondary" data-tool="point">Point</button>
+            <button type="button" class="secondary" data-tool="polygon">Polygon</button>
+            <button type="button" class="secondary" data-tool="rectangle">Rectangle</button>
+            <button type="button" id="map-offline" class="secondary map-offline" aria-expanded="false" aria-controls="offline-sheet" title="Offline map">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 20h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span class="sr-only">Offline map</span>
+            </button>
+          </div>
+          <div id="map-tool-draw" class="map-row" hidden>
+            <span id="map-tool-hint" class="map-text"></span>
+            <button type="button" id="map-undo" class="secondary">Undo</button>
+            <button type="button" id="map-done">Done</button>
+            <button type="button" id="map-cancel" class="secondary">Cancel</button>
+          </div>
+          <div id="map-selection" class="map-row" hidden>
+            <span id="map-selection-text" class="map-text"></span>
+            <button type="button" id="map-go">Fly here</button>
+            <button type="button" id="map-use" class="secondary">Use in mission</button>
+            <button type="button" id="map-delete" class="secondary">Delete</button>
+          </div>
+        </div>
+        <p id="map-caption" class="map-caption">Waiting for the map…</p>
+      </section>
+      <section id="aiview-panel" class="panel aiview-panel" aria-labelledby="aiview-title" hidden>
+        <h2 id="aiview-title">What the AI saw</h2>
+        <figure class="aiview">
+          <img id="aiview-image" alt="The camera picture the AI received" hidden>
+          <p id="aiview-empty" class="camera-empty">The AI has not looked at the camera yet.</p>
+        </figure>
+        <p id="aiview-caption" class="aiview-caption" role="status"></p>
+        <div id="aiview-nav-row" class="map-row aiview-nav" role="group" aria-label="Earlier AI views">
+          <button type="button" id="aiview-older" class="secondary" aria-label="Older view">&lsaquo; Older</button>
+          <span id="aiview-count" class="aiview-count"></span>
+          <button type="button" id="aiview-newer" class="secondary" aria-label="Newer view">Newer &rsaquo;</button>
+        </div>
+        <div class="map-row aiview-live">
+          <button type="button" id="live-toggle" class="secondary" aria-pressed="false">Live: off</button>
+          <span id="live-note" class="aiview-note">Live shows the drone camera now, 1 picture a second. It uses mobile data.</span>
+        </div>
+      </section>
+    </div>
+    <div class="column">
+      <section id="mission-panel" class="panel mission-panel" aria-labelledby="mission-title">
+        <h2 id="mission-title">Mission</h2>
+        <form id="mission" class="mission" autocomplete="off">
+          <label for="mission-text" class="sr-only">Mission for the AI pilot</label>
+          <textarea id="mission-text" rows="2" placeholder="e.g. take off to 1.5 m, look around and report what you see"></textarea>
+          <div class="mission-actions">
+            <button type="submit" id="send">Send</button>
+            <button type="button" id="new-mission" class="secondary">New mission</button>
+            <span id="mission-status" class="mission-status" role="status"></span>
+          </div>
+        </form>
+      </section>
+      <section id="feed-panel" class="panel feed-panel" aria-labelledby="feed-title">
+        <h2 id="feed-title">News feed</h2>
+        <ol id="feed" class="feed" aria-live="polite"></ol>
+      </section>
+    </div>
+  </main>
+  <div id="viewer" class="viewer" role="dialog" aria-modal="true" aria-label="What the AI saw" hidden>
+    <img id="viewer-image" alt="The camera picture the AI received">
+    <p id="viewer-caption" class="viewer-caption"></p>
+    <button type="button" id="viewer-close" class="viewer-close" aria-label="Close">&times;</button>
+  </div>
+</body>
+</html>

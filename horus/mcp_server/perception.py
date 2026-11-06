@@ -11,7 +11,7 @@ from horus.mcp_server.context import ToolContext, candidate_result, observation_
 _LOG = logging.getLogger(__name__)
 
 
-def _frame_tool_content(ctx: ToolContext, frame: Any) -> list[Any]:
+def _frame_tool_content(ctx: ToolContext, frame: Any, *, publish: bool = True) -> list[Any]:
     from mcp.server.fastmcp.utilities.types import Image
     from mcp.types import TextContent
 
@@ -22,7 +22,7 @@ def _frame_tool_content(ctx: ToolContext, frame: Any) -> list[Any]:
         raise RuntimeError("perception returned a frame in an unsupported format")
     render_limit = min(640, int(ctx.config.perception.render_width_px))
     payload = render_set_of_marks(frame, max_dimension=render_limit)
-    if ctx.image_publisher is not None:
+    if publish and ctx.image_publisher is not None:
         try:
             ctx.image_publisher.publish(payload)
         except Exception:
@@ -96,15 +96,17 @@ def get_raw_frame(ctx: ToolContext, frame_id: int | None = None) -> list[Any]:
     ]
 
 
-def list_candidates(ctx: ToolContext) -> list[Any]:
+def list_candidates(ctx: ToolContext, passive: bool = False) -> list[Any]:
     """Return a ≤640px set-of-mark JPEG and the latest tracker candidate table.
 
     Use current tracker IDs as the only target identities. Any object can become a
     target through set_vocabulary or point(frame_id, description|box), which seeds
     a new tracker ID when no current track matches. Candidate source identifies
-    detector, open-vocabulary, or point-created tracks.
+    detector, open-vocabulary, or point-created tracks. ``passive=True`` is for read-only
+    displays: such a call is not logged, does not count as supervisory-link contact and
+    does not replace the model's last set-of-mark view. Commanders leave it false.
     """
-    return _frame_tool_content(ctx, _require_frame(ctx))
+    return _frame_tool_content(ctx, _require_frame(ctx), publish=not passive)
 
 
 def point(
