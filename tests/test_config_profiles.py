@@ -129,6 +129,35 @@ def test_cruise_config_validation_goes_through_the_loader(tmp_path: Path) -> Non
     assert settings.cruise_min_altitude_m == 30.0
 
 
+def test_commander_model_config_goes_through_the_loader(tmp_path: Path) -> None:
+    path = tmp_path / "commander.yaml"
+    path.write_text(
+        "commander:\n"
+        "  provider: openai\n"
+        "  base_url: https://opencode.ai/zen/go/v1\n"
+        "  api_key_env: OPENCODE_API_KEY\n"
+        "  model: deepseek-v4.1-flash\n"
+        "  reasoning_effort: max\n"
+        "  extra_headers:\n"
+        "    x-opencode-session: horus-commander\n",
+        encoding="utf-8",
+    )
+    commander = load_config(path).commander
+    assert (commander.provider, commander.model, commander.reasoning_effort) == (
+        "openai",
+        "deepseek-v4.1-flash",
+        "max",
+    )
+    assert dict(commander.extra_headers) == {"x-opencode-session": "horus-commander"}
+    # A key that misses the effort list would be sent to the API as is: refuse it here.
+    path.write_text("commander:\n  reasoning_effort: maxx\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="commander reasoning_effort"):
+        load_config(path)
+    path.write_text("commander:\n  extra_headers:\n    x-opencode-session: 7\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="commander extra_headers"):
+        load_config(path)
+
+
 def test_gimbal_config_goes_through_the_loader(tmp_path: Path) -> None:
     path = tmp_path / "gimbal.yaml"
     path.write_text(

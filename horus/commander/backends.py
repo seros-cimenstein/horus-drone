@@ -518,7 +518,10 @@ class APICommanderBackend:
                 from openai import AsyncOpenAI
             except ImportError as exc:
                 raise RuntimeError("Install horus-drone[commander-openai] for OpenAI-compatible API mode") from exc
-            self._client = AsyncOpenAI(api_key=self.api_key, base_url=self.settings.base_url)
+            client: dict[str, Any] = {"api_key": self.api_key, "base_url": self.settings.base_url}
+            if self.settings.extra_headers:
+                client["default_headers"] = dict(self.settings.extra_headers)
+            self._client = AsyncOpenAI(**client)
         if not self._history:
             self._history.append({"role": "system", "content": self.system_prompt})
         self._history.append({"role": "user", "content": text})
@@ -534,12 +537,15 @@ class APICommanderBackend:
             for tool in self.mcp_tools
         ]
         for _ in range(self.settings.max_turns):
-            response = await self._client.chat.completions.create(
-                model=self.settings.model,
-                max_tokens=self.settings.max_tokens,
-                tools=tools,
-                messages=self._history,
-            )
+            request: dict[str, Any] = {
+                "model": self.settings.model,
+                "max_tokens": self.settings.max_tokens,
+                "tools": tools,
+                "messages": self._history,
+            }
+            if self.settings.reasoning_effort:
+                request["reasoning_effort"] = self.settings.reasoning_effort
+            response = await self._client.chat.completions.create(**request)
             message = response.choices[0].message
             self._history.append(message.model_dump(exclude_none=True))
             if not message.tool_calls:
