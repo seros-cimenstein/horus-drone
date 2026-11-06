@@ -270,11 +270,17 @@ class ServerSettings:
 
 @dataclass(frozen=True, slots=True)
 class CommanderSettings:
+    # The keyless Claude Code CLI stays the code default; every shipped profile on branch
+    # `chinkmaxxing` pins provider `openai` with DeepSeek 4.1 Flash at max effort instead (see
+    # config/horus*.yaml). The opencode gateway refuses a request without its session header, so
+    # those profiles set `extra_headers`, and its reasoning budget comes out of `max_tokens`.
     provider: str = "claude-code"
     model: str = "claude-3-5-sonnet-latest"
     base_url: str | None = None
     api_key_env: str = "ANTHROPIC_API_KEY"
-    max_tokens: int = 800
+    # Covers the model's thinking as well as its answer. A reasoning model that runs out of budget
+    # mid-thought answers with no text and no tool call, which reads as an empty mission result.
+    max_tokens: int = 8000
     timeout_s: float = 180.0
     # Claude's agentic tool-call budget per stream-json turn, not per mission.
     max_turns: int = 40
@@ -283,6 +289,10 @@ class CommanderSettings:
     # account) and reasoning effort (low, medium, high, xhigh, max). None keeps the CLI's own default.
     claude_model: str | None = None
     claude_effort: str | None = None
+    # OpenAI-compatible backend: reasoning effort sent as `reasoning_effort`; None sends nothing.
+    reasoning_effort: str | None = None
+    # OpenAI-compatible backend: headers the client sends on every request.
+    extra_headers: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.provider not in {"claude-code", "anthropic", "openai"}:
@@ -296,6 +306,13 @@ class CommanderSettings:
             raise ValueError("commander timeout_s must be a finite positive number")
         if self.claude_effort is not None and self.claude_effort not in {"low", "medium", "high", "xhigh", "max"}:
             raise ValueError("commander claude_effort must be low, medium, high, xhigh, or max")
+        if self.reasoning_effort is not None and self.reasoning_effort not in {"low", "medium", "high", "xhigh", "max"}:
+            raise ValueError("commander reasoning_effort must be low, medium, high, xhigh, or max")
+        if not isinstance(self.extra_headers, Mapping) or any(
+            not isinstance(name, str) or not name.strip() or not isinstance(value, str)
+            for name, value in self.extra_headers.items()
+        ):
+            raise ValueError("commander extra_headers must map non-empty header names to strings")
         if isinstance(self.max_turns, bool) or not isinstance(self.max_turns, int) or self.max_turns < 1:
             raise ValueError("commander max_turns must be a positive integer")
         if not isinstance(self.claude_command, str) or not self.claude_command.strip():

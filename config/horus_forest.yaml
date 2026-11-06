@@ -22,5 +22,13 @@ perception:
   ring_buffer_s: 30.0
 commander:
   timeout_s: 900.0
-  claude_model: opus
-  claude_effort: high
+  # Branch `chinkmaxxing`: every model in the commander and its crew runs DeepSeek 4.1 Flash at max
+  # effort through the opencode gateway (OpenAI-compatible). Needs OPENCODE_API_KEY in the
+  # environment and the `commander-openai` extra.
+  provider: openai
+  base_url: https://opencode.ai/zen/go/v1
+  api_key_env: OPENCODE_API_KEY
+  model: deepseek-v4.1-flash
+  reasoning_effort: max
+  extra_headers:
+    x-opencode-session: horus-commander

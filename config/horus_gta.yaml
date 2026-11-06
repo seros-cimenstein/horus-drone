@@ -47,11 +47,19 @@ perception:
 commander:
   # The whole GTA map is kilometres across: a flight there is many minutes of goto and
   # wait_for_task calls in one response (2026-11-02: a 2.3 km flight to P1 ran out of the
-  # default 40 tool-call turns twice). timeout_s is how long Claude Code may write nothing.
+  # default 40 tool-call turns twice). timeout_s is how long the model may write nothing.
   max_turns: 200
   timeout_s: 900.0
-  claude_model: opus
-  claude_effort: high
+  # Branch `chinkmaxxing`: every model in the commander and its crew runs DeepSeek 4.1 Flash at max
+  # effort through the opencode gateway (OpenAI-compatible). Needs OPENCODE_API_KEY in the
+  # environment and the `commander-openai` extra.
+  provider: openai
+  base_url: https://opencode.ai/zen/go/v1
+  api_key_env: OPENCODE_API_KEY
+  model: deepseek-v4.1-flash
+  reasoning_effort: max
+  extra_headers:
+    x-opencode-session: horus-commander
 # The whole GTA map (Los Santos and Blaine County): road graph, districts, street furniture and
 # GTA's ped navmesh as walkable ground, for find_place/get_area_map and the control apps' map
 # tiles (horus/maps). Built once per machine into this tile directory with

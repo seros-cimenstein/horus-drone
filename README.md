@@ -63,7 +63,7 @@ horus-mcp-call --help
 
 With Linux host networking, point the client/REPL at `http://127.0.0.1:8000/mcp`.
 
-The default commander backend is `claude-code`, which runs the authenticated Claude Code CLI and does not require `ANTHROPIC_API_KEY`. To use an optional API backend, set `commander.provider` to `anthropic` or `openai` in `config/horus.yaml` and install the matching extra:
+The commander's backend comes from the profile. The shipped profiles on branch `chinkmaxxing` use the OpenAI-compatible API: every model in the commander and its crew is DeepSeek 4.1 Flash at max reasoning effort through the opencode gateway (`commander.provider: openai`, `base_url: https://opencode.ai/zen/go/v1`, `model: deepseek-v4.1-flash`, `reasoning_effort: max`). It needs `OPENCODE_API_KEY` in the environment and the `commander-openai` extra. The authenticated Claude Code CLI (`commander.provider: claude-code`, no API key) and the Anthropic API stay available; set the provider and drop `base_url`, `model` and `extra_headers` when you switch.
 
 ```bash
 python -m pip install -e '.[commander,commander-anthropic,test]'
@@ -71,7 +71,7 @@ python -m pip install -e '.[commander,commander-anthropic,test]'
 python -m pip install -e '.[commander,commander-openai,test]'
 ```
 
-For OpenAI, also set `commander.api_key_env` to `OPENAI_API_KEY` and choose an OpenAI-compatible `commander.model`; configure `base_url` when using an API-compatible endpoint.
+For another OpenAI-compatible endpoint, set `commander.base_url`, `commander.api_key_env` and `commander.model`; leave `commander.extra_headers` empty unless the endpoint needs one. Keep `commander.max_tokens` above the model's thinking budget: a reasoning model that runs out mid-thought answers with nothing.
 
 `perception` installs NumPy and ONNX Runtime for CPU-only YOLO and appearance embedding; it does not install PyTorch, Ultralytics, or OpenCV. `bash scripts/fetch_models.sh` checks pinned SHA256 hashes and prepares the OSNet checkpoint with a flexible batch axis. That one-time conversion uses the small `model-tools` ONNX extra, not Torch. The optional `grounder` extra pins Python 3.10-compatible PyTorch 2.5.1, torchvision 0.20.1, Transformers 4.46.3, SciPy 1.10.1, and Pillow 10.4.0; `horus-grounder` serves `/detect` and `/health` on `127.0.0.1:8100` using Grounding DINO tiny by default, with a 320 px shortest-edge processor setting for CPU inference and source-pixel boxes.
 
@@ -87,7 +87,7 @@ The fetched YOLOv8n ONNX checkpoint is published by [Kalray/yolov8](https://hugg
 
 ## Demo: MCP manager
 
-HORUS exposes its flight moves, perception tools, the `horus_commander` MCP prompt, the `horus://mission/brief` resource, and camera JPEG frames over authenticated streamable HTTP: `get_frame`/`list_candidates` return a ≤640 px set-of-mark frame with its candidate table, and `get_raw_frame(frame_id=None)` returns the same camera frame at source resolution with nothing drawn on it (no boxes, IDs or labels; its pixels are the source-image geometry `point(frame_id, box)` takes). No provider API key is needed for the default Claude Code commander.
+HORUS exposes its flight moves, perception tools, the `horus_commander` MCP prompt, the `horus://mission/brief` resource, and camera JPEG frames over authenticated streamable HTTP: `get_frame`/`list_candidates` return a ≤640 px set-of-mark frame with its candidate table, and `get_raw_frame(frame_id=None)` returns the same camera frame at source resolution with nothing drawn on it (no boxes, IDs or labels; its pixels are the source-image geometry `point(frame_id, box)` takes). No provider API key is needed here: this section drives the drone board as a plain MCP client. Only the AI pilot itself needs one, and the shipped profiles read `OPENCODE_API_KEY`.
 
 In the server terminal, set these values and start the authenticated MCP service with `horus-mcp`. Export the same values in separate client/REPL terminals so server tool calls and Claude's streamed events share one JSONL file:
 
@@ -130,7 +130,7 @@ The `horus` REPL's free-text requests use `claude -p` with a generated config co
 horus --server-url "$HORUS_MCP_URL"
 ```
 
-Use `claude auth status` to check Claude Code login without printing credentials. The legacy API-backed commander remains available only when explicitly selected and requires its configured provider key.
+Use `claude auth status` to check Claude Code login without printing credentials. That login covers the `claude-code` provider; the shipped profiles run the API provider instead, which reads its key from the environment (`OPENCODE_API_KEY`).
 
 ## Connect to the simulation
 
