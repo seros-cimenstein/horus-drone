@@ -468,7 +468,9 @@ closes any Rockstar process the launch started.
 `start` deletes the old
 `ScriptHookV.log`, launches through Steam, waits for `INIT: success` and `keyboard: hooked`, then
 handles GTA's landing page: it presses E (next tab) until a pixel check of the tab bar shows STORY
-selected and ONLINE and GTA+ not, and only then presses Enter, so it never enters GTA Online. GTA
+selected and ONLINE and GTA+ not, and only then presses Enter, so it never enters GTA Online. The
+check reads the screen with PIL's `ImageGrab` (`python3-pil` on Koko): since 2026-11-01 `xwd -root`
+fails there with BadColor, which left the check reading "none" and Enter unpressed. GTA
 can drop that Enter. On 2026-10-20 at 19:54 STORY stayed highlighted for 5 minutes, and a second
 Enter loaded story mode. `start` therefore checks that the page leaves STORY after Enter. If STORY
 is still highlighted 30 s after a press, it presses Enter again, at most 3 times in all, and never

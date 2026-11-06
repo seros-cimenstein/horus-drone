@@ -2,6 +2,21 @@ using System;
 
 namespace HorusGta
 {
+    /// <summary>
+    /// The drone camera's pose relative to SITL home, from the physics link
+    /// (<see cref="PhysicsLink.CameraPose"/>).
+    /// </summary>
+    public struct NedPose
+    {
+        /// <summary>SITL frame count the pose belongs to (published in the camera block).</summary>
+        public ulong Seq;
+        /// <summary>Camera position, NED metres relative to SITL home.</summary>
+        public double NorthM, EastM, DownM;
+        /// <summary>Camera attitude in the NED world frame: yaw clockwise from north, pitch positive up.</summary>
+        public float RollDeg, PitchDeg, YawDeg;
+        public float HfovDeg;
+    }
+
     /// <summary>Scripted-camera pose in GTA world coordinates (X east, Y north, Z up, metres).</summary>
     public struct GtaCameraPose
     {
@@ -24,20 +39,31 @@ namespace HorusGta
         /// home (ini z, or the probed ground height). The origin heading is the GTA heading of NED
         /// north; GTA headings turn counter-clockwise from +Y.
         /// </summary>
-        public static GtaCameraPose Map(PosePacket p, Origin origin, double originZ, double screenWidth, double screenHeight)
+        public static GtaCameraPose Map(NedPose p, Origin origin, double originZ, double screenWidth, double screenHeight)
         {
-            double h = origin.HeadingDeg * Math.PI / 180.0;
-            double sin = Math.Sin(h), cos = Math.Cos(h);
+            NedToGta(p.NorthM, p.EastM, origin, out double x, out double y);
             return new GtaCameraPose
             {
-                X = origin.X - p.NorthM * sin + p.EastM * cos,
-                Y = origin.Y + p.NorthM * cos + p.EastM * sin,
+                X = x,
+                Y = y,
                 Z = originZ - p.DownM,
                 RotX = p.PitchDeg,
                 RotY = p.RollDeg,
                 RotZ = (float)WrapDeg(origin.HeadingDeg - p.YawDeg),
                 VfovDeg = (float)Clamp(VerticalFovDeg(p.HfovDeg, screenWidth, screenHeight), MinCamFovDeg, MaxCamFovDeg),
             };
+        }
+
+        /// <summary>
+        /// A NED position (metres from SITL home) to GTA world x, y: the same rotation by the
+        /// origin heading as <see cref="Map"/> (the camera) and <c>NedFrame</c> (the physics).
+        /// </summary>
+        public static void NedToGta(double northM, double eastM, Origin origin, out double x, out double y)
+        {
+            double h = origin.HeadingDeg * Math.PI / 180.0;
+            double sin = Math.Sin(h), cos = Math.Cos(h);
+            x = origin.X - northM * sin + eastM * cos;
+            y = origin.Y + northM * cos + eastM * sin;
         }
 
         /// <summary>GTA camera FOV is vertical: vfov = 2 atan(tan(hfov / 2) * h / w). 16:9 if the size is unknown.</summary>

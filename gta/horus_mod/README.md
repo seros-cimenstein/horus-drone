@@ -1,81 +1,31 @@
 # HorusGta.dll: GTA V as the drone camera renderer
 
-Two modes; both serve frames through `horus_capture.asi` (`gta/capture`) to HORUS perception
-(`perception.source: gta://127.0.0.1:5610`).
-
-- **Physics** (`sim/run.sh start --gta --json-physics`, section "Physics"): ArduPilot SITL runs its
-  JSON backend and HorusGta flies a physical quad in GTA from SITL's motor outputs. It sends back
-  the quad's state, and SITL derives its IMU, GPS, barometer and compass from it. The camera rides
-  on the quad, turned by ArduPilot's servo mount: a temporary stand-in until HorusGta.dll takes
-  gimbal setpoints from HORUS. HORUS has no gimbal device in this mode, so `look` is refused and
-  its geometry uses the -45° default pitch, where that mount rests.
-- **Pose** (`sim/run.sh start --gta`): SITL flies its built-in quad over a flat plane, and GTA only
-  draws the camera. `horus-gta-bridge` (`horus/gta_bridge.py`) reads the vehicle position and
-  heading from SITL over MAVLink and sends the camera pose over UDP. It is also the camera's gimbal
-  device: HORUS points it over the MAVLink gimbal-device protocol, without ArduPilot.
-  `HorusGta.dll`, a ScriptHookVDotNet v3 script, puts a scripted camera at that pose every frame.
+`sim/run.sh start --gta` always starts the physics world (section "Physics"): ArduPilot SITL runs
+its JSON backend and HorusGta flies a physical quad in GTA from SITL's motor outputs. It sends back
+the quad's state, and SITL derives its IMU, GPS, barometer and compass from it. The quad collides
+with GTA's world, and seven beams cast in the game feed ArduPilot's proximity avoidance (section
+"Range sensors"). The camera rides on the quad on a three-axis gimbal that HORUS points (section
+"Gimbal"): HORUS's GTA gimbal device sends setpoints over UDP and gets back the attitude the
+gimbal holds. Until a setpoint arrives the camera rests 45° down, facing the nose. Frames go
+through `horus_capture.asi` (`gta/capture`) to HORUS perception
+(`perception.source: gta://127.0.0.1:5610`). With no SITL connected, the mod can survey the
+world's top-surface heights for HORUS's route planner (section "Survey"). `HorusGta.dll` is a
+ScriptHookVDotNet v3 script.
 
 ```
-physics: SITL (JSON) <--UDP 9002: servo frames / JSON state--> HorusGta.dll (quad + camera)
-pose:    SITL --MAVLink tcp:5762--> horus-gta-bridge --UDP 5611--> HorusGta.dll (scripted camera)
-         HORUS gimbal.connection udpin:14600 <--MAVLink gimbal device--> horus-gta-bridge
-         GTA renders --> horus_capture.asi --TCP 5610--> HORUS
+SITL (JSON) <--UDP 9002: servo frames / JSON state--> HorusGta.dll (quad + camera)
+HorusGta.dll --UDP 5612: range sweeps--> horus.tof_bridge.gta --MAVLink tcp:5763--> SITL
+HORUS gimbal device --UDP 5613: HGIM setpoints--> HorusGta.dll --UDP 5614: HGAT attitude--> HORUS gimbal device
+GTA renders --> horus_capture.asi --TCP 5610--> HORUS
 ```
 
-## Pose packet
-
-UDP, one datagram per pose, little-endian, 56 bytes:
-
-| Field | Type |
-| --- | --- |
-| magic `HPOS` | 4 bytes |
-| version (1) | u32 |
-| sequence number | u64 |
-| camera north, east, down (m, NED, relative to SITL home) | 3 x f64 |
-| camera roll, pitch, yaw (deg, NED world frame; yaw clockwise from north, pitch positive up) | 3 x f32 |
-| horizontal field of view (deg) | f32 |
-
-The mod drops datagrams with a different size, magic or version, any non-finite field, or a field
-of view outside (0, 180), and keeps only the newest packet by sequence number. A sequence more than
-1000 below the newest one counts as a restarted bridge. `tests/pose_vector.json` is a test vector
-that both the C# tests and `tests/test_gta_bridge.py` check.
-
-## Bridge
-
-```bash
-horus-gta-bridge                        # SITL serial1 tcp:127.0.0.1:5762 -> udp 127.0.0.1:5611, 50 Hz
-horus-gta-bridge --mavlink tcp:127.0.0.1:5762 --target 192.168.1.20:5611 --rate-hz 50 --hfov-deg 84 \
-  --gimbal udpout:127.0.0.1:14600
-```
-
-`sim/run.sh start --gta` starts SITL without Gazebo and this bridge in the horus-sim container,
-and `sim/run.sh stop` stops both (`sim/README.md`, "GTA V renderer mode"). HORUS then flies on
-tcp:5760. `HORUS_GTA_TARGET` sets `--target`, and the container's `HORUS_CONFIG` defaults to
-`config/horus_gta.yaml`, so the bridge takes that profile's 84° FOV, -45° default pitch and gimbal
-limits. SITL loads no mount parameters in this mode.
-
-The bridge reads LOCAL_POSITION_NED and ATTITUDE through HORUS's own flight link
-(`horus/flight/link.py`) and asks for both at `--rate-hz`. Message rates are set per MAVLink
-channel, so HORUS's streams on serial0 do not change.
-
-It is also the camera's gimbal device (`horus/gimbal/device.py`): an ideal self-levelling gimbal
-on `--gimbal` (default `udpout:127.0.0.1:14600`, HORUS's `gimbal.connection`), as
-`gimbal.device_system`/`device_component`. It sends a gimbal HEARTBEAT at 1 Hz and takes HORUS's
-GIMBAL_DEVICE_SET_ATTITUDE setpoints (pitch relative to the horizon, yaw relative to the nose). The
-latest setpoint holds until the next one, clamped to the config's `gimbal` pitch and yaw limits
-(-90..45°, ±160° by default) as a mechanical stop would. At `--rate-hz` the bridge reports the
-attitude it holds as GIMBAL_DEVICE_ATTITUDE_STATUS, so HORUS reads the angle GTA renders.
-
-- Position: the vehicle's LOCAL_POSITION_NED.
-- Attitude: gimbal pitch relative to the horizon, roll 0, and camera yaw = vehicle heading +
-  gimbal yaw. Vehicle roll and pitch are not used: the gimbal is stabilised.
-- Before HORUS's first setpoint, the camera faces the nose at `executor.default_gimbal_pitch_deg`
-  (or `--default-pitch-deg`), and the bridge reports that attitude.
-- If no position or heading sample is under 1 s old, the bridge stops sending, and the mod hands
-  the screen back to the game after `timeout_s`. The gimbal keeps reporting.
-- `--hfov-deg` defaults to `executor.camera_horizontal_fov_deg` from the HORUS config
-  (`--config`, `HORUS_CONFIG` or `config/horus.yaml`), so the rendered view matches HORUS's camera
-  model. With no config it is 90.
+Pose mode was removed on 2026-11-02, so that no session starts GTA without collisions: SITL flew
+its built-in quad over a flat plane, and `horus-gta-bridge` streamed only the camera pose to the
+mod (and served as HORUS's gimbal device), so the drone passed through buildings. The mod's pose
+receiver (the 56-byte `HPOS` UDP packet on `[pose]` port 5611, `Core/PoseProtocol.cs`,
+`Core/PoseLink.cs`, `tests/pose_vector.json`) went in the same day's mod rebuild. `[pose]
+timeout_s` stays: the physics link releases the camera after it. A `bind` or `port` line left in
+`[pose]` now logs an unknown-setting warning.
 
 ## Mod
 
@@ -83,9 +33,7 @@ attitude it holds as GIMBAL_DEVICE_ATTITUDE_STATUS, so HORUS reads the angle GTA
 
 ```ini
 [pose]
-bind=127.0.0.1
-port=5611
-timeout_s=1.9   ; release this long after the last valid pose (see Release below)
+timeout_s=1.9   ; release the camera this long after the last SITL frame (see Release below)
 
 [origin]
 x=195            ; GTA world metres of SITL home (Legion Square)
@@ -103,7 +51,7 @@ freeze_time=false ; true: PAUSE_CLOCK while active
 [physics]
 bind=127.0.0.1    ; SITL's JSON backend sends servo frames here
 port=9002
-budget_ms=10      ; wall ms per script tick spent answering SITL (the game frame waits meanwhile)
+budget_ms=10      ; wall ms per script tick spent answering SITL, or casting survey rays (the game frame waits meanwhile)
 hfov_deg=84       ; drone camera horizontal FOV, as config/horus_gta.yaml
 trace_hz=0        ; rows/s of scripts/HorusGtaTrace.csv (camera and drone pose read back); 0 = off
 
@@ -111,6 +59,13 @@ trace_hz=0        ; rows/s of scripts/HorusGtaTrace.csv (camera and drone pose r
 enabled=1         ; 1 = cast and send the range sensors (see "Range sensors"), 0 = nothing
 target=127.0.0.1:5612 ; UDP host:port of the range datagrams
 rate_hz=20        ; sweeps per second of physics sim time, 10..20
+
+[gimbal]
+bind=127.0.0.1    ; setpoints arrive here (see "Gimbal")
+port=5613
+target=127.0.0.1:5614 ; UDP host:port of the status datagrams
+rate_hz=50        ; heartbeat per second of physics sim time while nothing moves, 20..100
+slew_deg_s=90     ; speed toward a new setpoint per axis, 1..1000 deg/s
 
 [view]
 mode=drone        ; drone: the drone camera on screen; shared: the player keeps his view (see "Shared view")
@@ -137,55 +92,45 @@ vertical FOV = 2*atan(tan(hfov/2) * screen_height / screen_width), clamped to GT
 
 Behaviour:
 
-- **Idle** until a valid packet arrives. If `z` is empty, the mod first streams the origin
-  (`SET_FOCUS_POS_AND_VEL`, `REQUEST_COLLISION_AT_COORD`) and retries `GET_GROUND_Z_FOR_3D_COORD`
-  every frame until it returns a height. Meanwhile it shows one notification and does not activate.
-- **Active** while packets keep arriving. Every frame it sets the scripted camera's position,
+- **Idle** until SITL frames arrive (see "Physics"). If `z` is empty, the mod first streams the
+  origin (`SET_FOCUS_POS_AND_VEL`, `REQUEST_COLLISION_AT_COORD`) and retries
+  `GET_GROUND_Z_FOR_3D_COORD` every frame until it returns a height. Meanwhile it shows one
+  notification and does not activate.
+- **Active** while frames keep arriving. Every frame it sets the scripted camera's position,
   rotation and vertical FOV and renders script cams. World streaming is focused on the camera, and
   the HUD and radar are hidden. The player is held frozen and invincible, with no wanted level.
   This is `[view] mode=drone`; for `shared` see "Shared view".
-- **Intersections**: SITL flies over a flat plane and does not know GTA's buildings, so nothing
-  stops the camera from passing through a wall. Every tick on which the camera moved, the mod runs
-  a synchronous shape test (`World.Raycast`, all collision types, the player's ped ignored) from
-  the previous camera position to the new one. Each hit is logged as `intersection #N: camera moved
-  through map|ped|vehicle|object 0x<model> at (x, y, z), normal (…); segment (…) -> (…)`. No hit means
-  no line. A hit within 1 m and 1 s of the previous hit counts as a repeat: a camera hovering at a
-  surface crosses it back and forth every tick. Repeats are counted, not logged (`Core/CameraPath.cs`).
-  The first pose after activation places the camera and is not tested. Nothing is sent back to
-  SITL; the log is for checking flights afterwards. The probe reports surfaces that face the
-  direction of travel. Flying through a building therefore logs its entry wall, not its exit wall,
-  and flying back through it logs the other side.
-- **Receive**: every tick drains the UDP socket until it is empty (`PoseLink.Drain`), with a 2 ms
-  budget per tick. The newest seq wins, and a backlog over budget continues on the next tick and
-  is logged at most every 5 s.
-- **After a tick gap** (the script did not tick for more than `timeout_s`, e.g. game paused): the
-  socket then holds the poses sent just after the pause began, because a full UDP queue drops the
-  newest datagrams. On loopback that is about 221 of the 56-byte packets: Linux charges about
-  960 B each against `rmem_default` 212992, which is the 213120 B recv-Q seen in the stall logs.
-  They are read and discarded (`discarded N pose datagrams …`), the camera is released ("pose
-  stream restarted after a tick gap"), and the next fresh packet reactivates it.
-- **Release** after `timeout_s` without a valid packet, or when the script is aborted: script cams
+- **Intersections**: every tick on which the camera moved, the mod runs a synchronous shape test
+  (`World.Raycast`, all collision types, the player's ped ignored) from the previous camera
+  position to the new one. Each hit is logged as `intersection #N: camera moved through
+  map|ped|vehicle|object 0x<model> at (x, y, z), normal (…); segment (…) -> (…)`. No hit means no
+  line. A hit within 1 m and 1 s of the previous hit counts as a repeat: a camera hovering at a
+  surface crosses it back and forth every tick. Repeats are counted, not logged
+  (`Core/CameraPath.cs`). The first pose after activation places the camera and is not tested.
+  The probe reports surfaces that face the direction of travel. The camera rides 0.076 m from the
+  body centre, inside the 0.12 m collision sphere, so a line here means the quad itself got
+  through a surface (as on 2026-11-02, see "Checked in game").
+- **Release** after `timeout_s` without a SITL frame, or when the script is aborted: script cams
   stop rendering, the camera is destroyed, focus is cleared, and the player's frozen/invincible
   state and the maximum wanted level are restored. The timeout is checked once per script tick
-  (30–40 ms), and a packet counts from the tick that received it, so the release lands up to about
-  two ticks after `timeout_s`. With the old 2 s default it came 2.039 s after the bridge's last
-  packet; the default 1.9 s keeps the release within 2 s.
+  (30–40 ms), so the release lands up to about two ticks after `timeout_s`; the default 1.9 s keeps
+  it within 2 s.
 - **Camera block**: at the end of every tick (and once more on abort, inactive) the mod writes
-  `Local\HorusGtaCamera` (`Core/CameraBlock.cs`): active, the seq of the packet it applied,
-  `Game.FrameCount` and the view mode (offset 40: 0 drone, 1 shared; 0 on abort). Active is 1
-  only on ticks that applied a received pose (in the shared view: drone ticks). `horus_capture.asi`
-  stamps these into each frame header, and marks frames inactive when the script stops ticking
-  (pause menu); see `gta/capture/README.md` "Camera block".
+  `Local\HorusGtaCamera` (`Core/CameraBlock.cs`): active, the seq of the pose it applied (the SITL
+  frame count), `Game.FrameCount` and the view mode (offset 40: 0 drone, 1 shared; 0 on abort).
+  Active is 1 only on ticks that rendered the drone camera (in the shared view: drone ticks).
+  `horus_capture.asi` stamps these into each frame header, and marks frames inactive when the
+  script stops ticking (pause menu); see `gta/capture/README.md` "Camera block".
 
-`scripts/HorusGta.log` records the configuration and any ini warnings, the listening socket, the
+`scripts/HorusGta.log` records the configuration and any ini warnings, the physics socket, the
 camera block, the ground height, each activation and release (with the intersection and repeat
-counts so far), each new intersection, discarded gap backlogs, drains that hit the budget, and the
-bad-packet count (at most every 5 s).
+counts so far), each new intersection, the physics lines listed under "Physics" > Log, and the
+survey lines (section "Survey").
 
 ## Shared view
 
 With `[view] mode=shared` the player plays on (gameplay camera, HUD, control) while the drone
-flies, possibly far away. Both the pose and the physics link work this way:
+flies, possibly far away. The physics link works this way:
 
 - **Ticks**: the ticks of an activation are counted from 0, and tick n is a drone tick when
   n % `drone_every` == 0 (`Core/SharedView.cs`). A drone tick poses the scripted camera, turns
@@ -223,9 +168,9 @@ the whole game.
 
 ## Physics
 
-With `sim/run.sh start --gta --json-physics`, SITL runs `--model JSON:127.0.0.1`
+With `sim/run.sh start --gta`, SITL runs `--model JSON:127.0.0.1`
 (`HORUS_GTA_PHYSICS_ADDRESS`) with `FRAME_CLASS 1`, `FRAME_TYPE 1` (quad X) and `SIM_RATE_HZ 800`
-(at 400, arming fails: `PreArm: Gyro 0 rate 400Hz < loop rate*1.8 720Hz`), and no bridge.
+(at 400, arming fails: `PreArm: Gyro 0 rate 400Hz < loop rate*1.8 720Hz`).
 HorusGta listens on `[physics]` udp 127.0.0.1:9002:
 
 - **Wire format** (`Core/SitlJson.cs`, ArduPilot `libraries/SITL/examples/JSON/readme.md`):
@@ -251,15 +196,20 @@ HorusGta listens on `[physics]` udp 127.0.0.1:9002:
   - GTA's only synchronous world test is a ray (`World.Raycast` = `START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE`;
     SHVDN marks the capsule test obsolete because its result may come a frame later). So
     `WorldProbe` casts one ray along each step's motion, extended by the 0.12 m radius plus a
-    2 mm skin. Ground support uses a ray down over the same reach, cast every step only within
+    2 mm skin. Ground support uses a ray down over twice that reach (on a slope the sphere touches
+    above the point straight under it: at 60° twice the reach up), cast every step only within
     1 m of the ground height cached by a 50 m ray down. That cache is refreshed every 100 steps
     or 0.5 m of horizontal travel. Casting the down ray every step had doubled the cost; each
     in-game ray costs about 0.25 ms.
   - The rays hit map, vehicles, peds, objects, glass and foliage, and ignore the player's ped,
     water and the drone prop (see Airframe).
-  - A contact puts the body one radius off the surface and removes the velocity into it, with no
-    bounce. Ground contact (normal up) stops the body; walls keep 30 % of the sliding speed. Body
-    rates are halved.
+  - A contact stops the body on its own step: the centre moves along the segment the ray found
+    clear only as far as it stays one radius plus 1 mm from the surface's plane (or no closer than
+    it already was), and never past the hit point of the motion ray. It is never moved sideways.
+    The velocity into the surface is removed, with no bounce. Ground contact (normal up) stops
+    the body; walls keep 30 % of the sliding speed. Body rates are halved. Until 2026-11-02 a
+    contact put the centre one radius off the hit point along the surface normal; that moved it
+    sideways, and far from home it took the quad through a hillside (see "Checked in game").
   - The step's change in velocity is what the accelerometer reads, saturated at ±16 g like a
     flight-controller IMU, with the gyro saturated at ±2000°/s. ArduPilot therefore sees an impact
     as a clipped acceleration spike, and sees the position stop at the wall.
@@ -269,7 +219,7 @@ HorusGta listens on `[physics]` udp 127.0.0.1:9002:
     previous one only count as repeats, as when resting on the ground or pressed against a wall.
   - The 5 s log adds world rays/s and `on ground` / `against a wall`.
 - **Frames**: NED (0, 0, 0) is the resting centre at `[origin]` (the probed ground plus the 0.12 m
-  body radius). `heading_deg` turns NED as in pose mode.
+  body radius). `heading_deg` turns NED as in the mapping under "Mod".
 - **Airframe**: `ch_prop_casino_drone_02a`, Los Santos FPV's drone, is spawned when SITL
   frames start (its model is requested without blocking the tick) and posed every tick at the
   body's position with `SET_ENTITY_QUATERNION` from the body axes. Its model box is right
@@ -283,18 +233,10 @@ HorusGta listens on `[physics]` udp 127.0.0.1:9002:
 - **Camera**: at the airframe's camera mount, 0.07 m forward and 0.03 m up from the body centre
   (Los Santos FPV's camera point on that prop; `Airframe.CameraMountM`), so it moves with the
   body's tilt and sits 0.15 m above the ground when landed. Its orientation is the body's turned
-  by the servo gimbal, chained like a three-axis gimbal from the body out: pan, then roll, then
-  tilt (`PhysicsLink.CameraAxes`). The angles are the servo outputs of ArduPilot's mount
-  (`MNT1_TYPE 1`, loaded by `sim/scripts/start_gta_sitl.sh` in physics mode only, a temporary
-  stand-in until HorusGta.dll takes gimbal setpoints from HORUS): SERVO9 roll over -30..30°
-  (`MNT1_ROLL_MIN`/`MAX` defaults), SERVO10 tilt over -135..45° (so 1500 µs is -45°), SERVO11 pan
-  over -160..160°, each 1100–1900 µs. HORUS never commands the mount, so without RC input it holds
-  the middle of each range: roll 0, tilt -45° from the horizon, facing the nose. ArduPilot's servo
-  mount subtracts the vehicle's roll and pitch from those outputs, which on this chain levels the
-  camera exactly; the servos are relative to the body (read as an angle from the horizon, the tilt
-  output would point the camera at -63.9° rather than -45° in a braking 18.9° nose-up pitch). The
-  FOV is `hfov_deg`. Activation, release after `timeout_s` without frames, the camera block and
-  the intersection log work as in pose mode. While SITL frames arrive, pose packets are ignored.
+  by the gimbal's motors, chained like a three-axis gimbal from the body out: pan, then roll, then
+  tilt (`PhysicsLink.CameraAxes`), which HORUS points (see "Gimbal"). The FOV is `hfov_deg`.
+  Activation, release after `timeout_s` without frames, the camera block and the intersection log
+  work as under "Mod".
 - **Outside view**: F10 while SITL frames arrive renders a camera 2.5 m behind and 0.8 m above
   the drone, pointed at it; F10 again returns to the drone camera. Frames captured meanwhile are
   marked as not the drone camera's, so HORUS skips them.
@@ -302,18 +244,45 @@ HorusGta listens on `[physics]` udp 127.0.0.1:9002:
   most one per tick): the wall time, sim time, the drone camera's coordinates and rotation as read
   back with `GET_CAM_COORD`/`GET_CAM_ROT` and as given to `SET_CAM_*` this tick (`cam_set_*`),
   the prop's coordinates and quaternion, the physics NED and attitude sent to ArduPilot, the
-  gimbal angles, and the origin. `GET_CAM_*` return the previous tick's values (in game, over 6410
+  gimbal's motor angles (`gimbal_roll`, `gimbal_pitch` = tilt, `gimbal_yaw` = pan, relative to the
+  body), and the origin. `GET_CAM_*` return the previous tick's values (in game, over 6410
   consecutive ticks the readback matched the previous tick's set rotation to 0.008° RMS and this
   tick's only to 1.06° RMS), so `cam_set_*` is the pose the frame renders with.
 - **Log**: `physics: SITL frames arriving`, `physics: driving the camera, SITL frame rate N Hz`,
-  the prop's spawn with its model box, each contact, and every 5 s the sim time, real-time
-  factor, steps/s, budget hits, idle ticks, world rays/s, sensor rays/s and the latest smallest
-  horizontal range (see "Range sensors"), NED, attitude, gimbal roll/pitch/yaw, motor rpm and the
-  prop's ray check.
+  the prop's spawn with its model box, each contact, each new gimbal setpoint, and every 5 s the
+  sim time, real-time factor, steps/s, budget hits, idle ticks, world rays/s, sensor rays/s and the
+  latest smallest horizontal range (see "Range sensors"), NED, attitude, the gimbal's motor angles
+  and the camera attitude they hold with the target, motor rpm and the prop's ray check.
 
 `build/physics_sim/horus-gta-physics-sim` (built by `build.sh` from `physics_sim/`) runs the same
-Core over flat ground without GTA, for testing the SITL side alone:
-`./horus-gta-physics-sim [--bind 127.0.0.1] [--port 9002] [--tick-ms 33] [--budget-ms 10]`.
+Core over flat ground without GTA, for testing the SITL side alone, gimbal included:
+`./horus-gta-physics-sim [--bind 127.0.0.1] [--port 9002] [--tick-ms 33] [--budget-ms 10] [--gimbal-port 5613] [--gimbal-target 127.0.0.1:5614]`.
+
+### Gimbal
+
+HORUS points the drone camera through a three-axis gimbal on the quad (`Core/Gimbal.cs`), as on
+the Gazebo drone, without ArduPilot (the placeholder servo mount, `MNT1_TYPE 1` on SERVO9–11, is
+gone from `sim/scripts/start_gta_sitl.sh`). HORUS's side is `horus-gta-gimbal`
+(`horus/gimbal/gta.py`), which `start_gta_sitl.sh` starts.
+
+- **Setpoint**: horizon pitch (negative down) and yaw relative to the nose (positive right), in a
+  20-byte little-endian datagram on `[gimbal] bind:port` (UDP 5613): `HGIM` | u32 version 1 | u32
+  seq | f32 pitch | f32 yaw. Pitch is clamped to -90..45°, yaw to ±160°; a datagram of another
+  size, magic or version, or with a non-finite angle, is rejected and counted in the log.
+- **Mount**: like a brushless gimbal with its own IMU it holds the setpoint against the quad's
+  lean on every physics step: camera pitch from the horizon, roll level, yaw from the nose. The
+  motors solve body-relative pan, roll and tilt (as `solve_mount` in `horus/gimbal/gazebo.py`)
+  and stop at Gazebo's travel: pan ±160°, roll ±30°, tilt -135..45°. A new setpoint is approached
+  at `slew_deg_s` (90°/s) per axis. Before the first setpoint, and after SITL restarts, it rests
+  at pitch -45°, yaw 0.
+- **Status**: on every physics step where any reported angle, as the float32 the datagram
+  carries, differs from the last report's (so on each step while the camera slews or the quad's
+  lean changes, however little), and otherwise as a
+  heartbeat `rate_hz` (50) times per second of physics time, a 36-byte datagram to `[gimbal]
+  target` (UDP 5614): `HGAT` | u32 version 1 | u32 seq | u32 time_ms (physics time) | f32 camera
+  roll | f32 camera pitch (both from the horizon) | f32 camera yaw (from the nose) | f32 vehicle
+  roll | f32 vehicle pitch, all in degrees. The camera angles are measured from the motor angles,
+  so a motor at its stop shows in them.
 
 ### Range sensors
 
@@ -347,11 +316,10 @@ obstacles (`Core/RangeSensors.cs`; `horus-gta-physics-sim` has no world and send
   (`PRX1_TYPE 2`, `AVOID_ENABLE 3`, `AVOID_MARGIN 1.0`) and the down rangefinder, plus
   `PRX_FILT 0`. ArduPilot's default 0.25 Hz filter on each proximity face makes a wall approached
   at 3 m/s read about 2 m farther than it is; the ray casts need no smoothing.
-- **Operating area**: ArduPilot's fence, `config/ardupilot/gta.parm` (appended by
-  `start_gta_sitl.sh` in both modes): a 40 m radius around home, a 48 m ceiling and a 6 m floor
-  (`FENCE_TYPE 11`). HORUS has no fence or obstacle-free box of its own. Obstacles are left to
-  these beams. The level beams, 45° apart, miss what is above or below the drone and a thin pole
-  between two beams.
+- **Operating area**: none. There is no geofence (no boundary around home, no ceiling, no floor),
+  and HORUS has no obstacle-free box of its own. Obstacles are left to these beams. The level
+  beams, 45° apart, miss what is above or below the drone and a thin pole between two beams, so
+  nothing keeps the drone off the 4.4 m kiosk roof and the low objects mapped below.
 - **Log**: `range sensors: 7 beams -> udp 127.0.0.1:5612 at 20 Hz` (or `range sensors: off`) at
   start, and sensor rays/s and `min horizontal range X m` (or `clear`) in the 5 s physics line.
 
@@ -366,9 +334,71 @@ flight repeated with `horus-mcp`. It took off to 20 m, flew to (12.4, −5) head
   once, and held the drone 1.02–1.05 m from the face (front_right beam) until the `goto`
   expired. HorusGta logged no contact besides take-off and touchdown.
 
+## Survey
+
+The survey measures the top surface of the GTA world: buildings, terrain, objects, trees and
+glass, every 5 m. HORUS builds its height map from it, `data/maps/gta/heights/`. It runs in the
+game with no SITL connected, started by a request file that `scripts/koko/gta_survey.sh` writes
+over SSH:
+
+```
+scripts/koko/gta_survey.sh start --box -500,-500,500,500   # metres N/E of home: min_n,min_e,max_n,max_e
+scripts/koko/gta_survey.sh start --whole-map               # the bounds of data/maps/gta/tiles/index.json
+scripts/koko/gta_survey.sh status | stop
+scripts/koko/gta_survey.sh fetch DEST_DIR                  # tiles, survey.json, progress.json
+python scripts/maps/build_gta_heights.py DEST_DIR         # -> data/maps/gta/heights/ (horus.maps.heights)
+```
+
+- **Request**: `scripts/HorusGtaSurvey.request.json`, e.g. `{"box": [-500, -500, 500, 500],
+  "cell_m": 5, "output": "HorusGtaSurvey"}`. The box is NED metres from SITL home in the map tile
+  index's `bounds` order. `cell_m` must divide 250 m into 5..250 cells. `output` is one folder name
+  inside `scripts/`. Optional: `settle_s` (default 1), `load_timeout_s` (10) and `load_attempts`
+  (3). The mod looks for the file once a second (`Core/Survey.cs` `SurveyRequest`). It refuses
+  unknown keys and bad values, deletes the request and writes the reason to the progress file.
+- **SITL first**: while SITL frames arrive or the physics link drives the camera, the survey is
+  suspended. It gives the player and the streaming focus back on the tick the first frame
+  arrives, and resumes when SITL is gone. The interrupted tile starts again from its load step.
+- **Home**: the survey starts once the ground height at `[origin]` is known, the same
+  `GET_GROUND_Z_FOR_3D_COORD` probe (or ini `z`) the physics link uses. `survey.json` records it as
+  `home_ground_z` with `rest_above_ground_m` 0.121: HORUS `up_m` 0 is the resting body centre, so
+  `up_m = GTA z - (home_ground_z + 0.121)`.
+- **Tiles**: the 250 m map tile grid (`horus/maps/tiles.py` level 0), row by row from the south,
+  alternating direction. Per tile, every tick until it is written:
+  - The mod moves the streaming focus to the tile centre (`SET_FOCUS_POS_AND_VEL`, at the ground
+    z the centre probe last hit) and requests collision there and at the four quadrant centres.
+  - It casts five probe rays (centre and quadrant centres). The tile counts as loaded when each
+    probe hits or stands on water (`GET_WATER_HEIGHT_NO_WAVES`), and at least one hits. If all
+    five stand on water, it counts as loaded after 3 s.
+  - After `settle_s` more, it casts one ray per cell, straight down from GTA z 1500 to -50 through
+    the cell centre, with `Map|Objects|Foliage|Glass`. Vehicles, peds, water and the player are
+    not hit. It casts for at most `[physics] budget_ms` per tick (at least one ray).
+  - Probes that do not pass within `load_timeout_s` start another attempt. After
+    `load_attempts`, the tile is listed as unloaded and gets no file.
+  - The player is held (frozen, invincible, no wanted level) while the survey runs and released
+    when it ends.
+- **Files** in `scripts/<output>/`:
+  - `survey.json`: format, cell size, box, `[origin]`, home ground z, rays and the tile layout.
+  - One `<x>_<y>.bin` per tile, written through a temporary file and a rename. Little-endian:
+    magic `HSRV` | u16 version 1 | u16 n (cells per side, 50) | i32 tile x | i32 tile y |
+    f32 cell_m | u32 cells hit | n·n × i16 GTA z in decimetres, -32768 where the ray hit nothing.
+    Cell (i, j) is column i east from the tile's west edge and row j north from its south edge,
+    stored at k = j·n + i. Its centre is NED east x·250 + (i + ½)·cell, north y·250 + (j + ½)·cell,
+    turned into GTA x, y like the camera (`PoseMapping.NedToGta`).
+  - Over the sea the rays hit nothing; HORUS treats those no-hit cells as water at GTA z 0.
+- **Progress**: `scripts/HorusGtaSurvey.progress.json`, rewritten atomically after every tile and
+  state change. It holds the state (`running`, `suspended`, `done`, `stopped`, `error`), the
+  message, tiles total, done, written and skipped, the unloaded tiles, the current tile, rays,
+  `rays_per_s` while casting, `seconds_per_tile`, `remaining_s` and `elapsed_s`. The log gets the
+  request, the start, each unloaded tile, a summary every 30 s and the end.
+- **Resume**: a run skips every valid tile file already in the folder. A truncated or foreign file
+  is surveyed again. Unloaded tiles have no file, so the next run retries them. A folder holding a
+  survey with another cell size, origin or ray setup is refused. Removing the request (`stop`)
+  ends the run as `stopped`. A finished run (`done`, or `error`) deletes its request.
+  `gta_mods.sh` does not list the survey files, so reinstalling the mod keeps them.
+
 ## Drone physics source: Los Santos FPV
 
-Besides the pose-only mode, HorusGta flies a physical quad (see "Physics"). ArduPilot SITL runs its
+HorusGta flies a physical quad (see "Physics"). ArduPilot SITL runs its
 JSON backend, and HorusGta steps the quad from ArduPilot's motor outputs.
 The quad's flight model comes from Los Santos FPV, checked 2026-10-20:
 
@@ -413,9 +443,9 @@ scripts/koko/gta_mods.sh install  # full stack: HORUS Script Hook, SHVDN, Los Sa
 ```
 
 `build.sh` downloads ScriptHookVDotNet Enhanced v1.1.0.6 (sha256-checked) into the gitignored
-`.cache/` and uses it only as a compile reference. `src/Core/` has no game dependency (packet,
-mapping, ini, receive state). `tests/` runs it headless with `dotnet run`. The script itself is
-`src/HorusGtaScript.cs`.
+`.cache/` and uses it only as a compile reference. `src/Core/` has no game dependency (physics,
+mapping, ini, range sensors, camera block). `tests/` runs it headless with `dotnet run`. The
+script itself is `src/HorusGtaScript.cs`.
 
 ## Drone camera size
 
@@ -444,6 +474,29 @@ Measured on 2026-10-21 with SITL on the JSON backend and the drone camera on scr
 below 0.20 s over 60 s while the drone held at 8 m.
 
 ## Checked in game
+
+Dated history. Until 2026-11-02, `sim/run.sh start --gta` without `--json-physics` ran pose mode
+(SITL's flat-plane quad and `horus-gta-bridge`); both were removed that day, and `--gta` is now
+always the physics world.
+
+**2026-11-03, HORUS's gimbal in game** (Koko, run `20261103T193118Z-260896`; the game had just
+taken a Steam update to BuildID 25971420, which first failed the launch with `AppError_19` while
+it downloaded, then ran on the HORUS Script Hook unchanged). With HorusGta.dll's gimbal, the
+drone board and `horus-gta-gimbal` from `sim/run.sh start --gta`, the drone took off to 20 m over
+Legion Square; each `look` was measured within 0.5° of its setpoint 0.5–0.85 s after it was sent
+(`logs/gimbal.log` "measured camera … reached"), and `get_state` read it back exactly:
+
+| Command | Measured pitch / yaw | Frame (`runs/manager/` on Koko) |
+| --- | --- | --- |
+| at rest | -45.00 / 0.00 | `…T193206.643333Z` |
+| `look(-10)` | -10.00 / 0.00 | `…T193231.884573Z`: towers and sky over the square |
+| `look(-60)` | -60.00 / 0.00 | `…T193239.024645Z`: the paving and lawn below |
+| `look(-30, 60)` | -30.00 / 60.00 | `…T193246.114457Z`: the grey sculpture at the square's east, right of the nose |
+| `rth` near home | -90.00 / 0.00 | `…T193253.520983Z`: the paving straight down |
+
+The camera stayed down until ArduPilot's RTL had landed the drone at home (GTA has no AprilTag
+pad, so no tag was found and the drone board logged no precision-landing control), then went back
+to the commanded -30 / 60.
 
 GTA V Enhanced 1.0.1158.16 under Proton, on the HORUS Script Hook (`gta/hook`): ArduPilot SITL
 (built-in quad physics, servo gimbal at -30°) flew 40 m up and 80 m north; `horus-gta-bridge`
@@ -724,13 +777,14 @@ Obstacles in the fence, 2026-10-21 00:49–01:36 (`koko:~/horus-gta/run11/`):
 - **Fence (history, 2026-10-21):** `config/horus_gta.yaml` then carried a HORUS fence, the
   convex rectangle north -15..20, east -20..8 less a 2 m margin, so targets were kept to north
   -13..18, east -18..6. That HORUS limit layer was removed on 2026-10-29; ArduPilot's `gta.parm`
-  (40 m circle, 48 m ceiling, 6 m floor) is the operating area now, and the mapped clearances
-  below remain the reason for the 6 m floor.
+  fence (40 m circle, 48 m ceiling, 6 m floor) then held the operating area, with the mapped
+  clearances below as the reason for the 6 m floor. That fence was removed on 2026-11-02.
   - **Clearances from the then fence edge:** the structure's nearest mapped cell is 8 m away, and
     its face at least 6 m allowing for the 2 m grid. The tree cells are 7 m away, and no tree
     was found at north -16. The walls are at least 6 m away.
   - **Flight altitude:** 6 m or higher. Below that are only the kiosk and low objects the sweeps
-    did not resolve (planters, benches, lamps); `gta.parm`'s `FENCE_ALT_MIN 6` keeps it.
+    did not resolve (planters, benches, lamps); `gta.parm`'s `FENCE_ALT_MIN 6` kept it until
+    2026-11-02.
 - **Check on the JSON-physics chain:** `horus-mcp` flew `fly11.sh` at 10 m. It took off and
   went round the then fence perimeter (-13, -18) → (-13, 6) → (18, 6) → (18, -18) → (-13, -18). It
   then flew a raster along north -5, 3 and 11, returned home and landed.
@@ -801,3 +855,70 @@ refuses. Before the next GTA run about 600 MiB has to be freed on Koko.
 The game must not pause: GTA's `PauseOnFocusLoss` setting pauses script threads, and with them
 the mod, whenever the window loses focus. `scripts/koko/gta_mods.sh install` sets it to 0 in
 `settings.xml` (see `gta/hook/README.md` "Proton prefix setup").
+
+Falling through the map far from home, 2026-11-02. At 18:47–18:55 the AI flew the drone 2.3 km
+north of home at 400 m, then landed "on the field" at NED (2050, 343), GTA (538, 1117), in the
+Vinewood Hills. It fell straight down through the hill to 123 m below home, with a uniform grey
+frame. The game log of that session was overwritten when GTA restarted; its lines are quoted here.
+
+- **Not missing collision.** The map collision was there 2.3 km from home. The quad touched the
+  hill five times before the fall, e.g. `contact #2: quad hit map at (578.01, 1350.88, 316.62) =
+  ned (2283.88, 383.01, -286.81), normal (-0.55, 0.25, 0.79)` at 18:38:01 and contact #6 at
+  (583.03, 1187.60, 303.88) at 18:46:22. At 18:47:03 the ray down through the prop hit `map`.
+- **What happened.** From 18:46:22 the quad was pressed against the hillside. It was tilted
+  20–59°, its beams read 0.00–0.12 m, and it cast about 1400–1540 world rays/s (the short down
+  ray every step). It slid down the slope, and the camera log shows it passing through the
+  hill: `intersection #17` through a rock face at (541.85, 1122.60, 240.70), normal (0.81, 0.58,
+  0.13); #18 through another face; and #19 at 18:49:02, `camera moved through map at (524.98,
+  1099.81, 228.67), normal (0.12, 0.01, 0.99)`, down through the ground. From 18:49:04 it was
+  under the terrain. The beams read clear, it cast about 800 rays/s (the long ground probe found
+  nothing below), and it sank at the 1.5 m/s landing rate with no contact, because GTA's rays hit
+  terrain only from its outer side.
+- **Cause.** On a contact, `QuadBody.Collide` put the body centre one radius off the hit point
+  along the surface normal. That point is not on the step's path: on a slope it lies sideways,
+  downhill, and no ray had tested it. So a quad resting on a slope slid downhill a little on
+  every step, and in the crease between the slope and a rock face the offset put the centre
+  behind the rock. From there no ray finds the surface again. Nothing about the distance from
+  home mattered; home is flat.
+- **Reproduced offline** (`tests/Tests.cs` `QuadHoldsOnSlopes`: a 30° slope running into a
+  vertical rock face). With the old response, a quad landed 5 m from the rock with the motors off
+  slid 11.3 m in 10 s and ended 4.86 m behind the rock face and under the slope. A quad pressed
+  into the corner did not stay in it.
+- **Fix** (`Core/QuadPhysics.cs`, see "Physics" > Collisions): the centre now moves only along
+  the segment the rays found clear, stops one radius plus 1 mm from the surface's plane, and
+  never passes a hit on its path. The short down ray is two reaches long, so a sphere touching a
+  slope finds it. Both offline cases now hold: the landed quad does not move, and nothing crosses
+  either surface.
+
+Checked in game the same evening, 19:57–21:12, flying by hand through `horus-mcp`
+(`config/zz_phone_gta.yaml`):
+
+- **Near home:** take-off to 20 m, `goto` (12.4, −5) heading east, then `goto` (12.4, 19) into the
+  sculpture. It stopped at east 12.07 at 19:59:06, 0.80 m from the face at 13.1. No contact and no
+  intersection were logged, and the frame shows the sculpture's red face filling the view.
+- **Far terrain:** a climb to 300 m, then 2078 m to (2050, 343), the spot of the fall, and `land`
+  at 20:14:55. It touched down at 20:16:00, `contact #2: quad hit map at (538.07, 1117.33, 237.50)
+  = ned (2050.33, 343.07, -207.69), normal (-0.35, -0.11, 0.93), 0.47 m/s into it`, on a 21° slope.
+  ArduPilot disarmed, and the body stayed at ned (2050.33, 343.07, -207.82) `on ground` to the
+  centimetre for the next 90 s. The frame shows the hillside's dirt and grass a few centimetres
+  away; its lower right corner is uniform blue-grey.
+- **Arming on a slope:** ArduPilot then refused to take off: `PreArm: Proximity 45 deg, 0.20m
+  (want > 0.6m)`. On the slope the level beams read 0.19–0.31 m. The world was restarted at 20:21,
+  which put the quad back at home.
+- **Far building:** a climb to 300 m, then (1245, −700) in West Vinewood, down to 120 m, and a
+  `goto` west along north 1258 toward Eclipse Towers. It stopped at east −943.2 at 20:38:44 (`min
+  horizontal range 0.77 m`) and held 1.09 m from the tower's balconies until the `goto` expired at
+  20:40:34, with no contact. The frame shows the balconies about a metre away.
+- **Far roof:** `land` from 300 m over the tower at (1255, −958). It touched down at 20:45:23,
+  `contact #4: quad hit map at (-763.35, 322.00, 229.64) = ned (1255.00, -958.35, -199.83), normal
+  (0.00, 0.00, 1.00), 0.51 m/s into it`, and rested `on ground`. The frame shows the roof tiles.
+  It took off from the roof to 300 m. `rth` then came straight down onto the roof again:
+  ArduPilot moves its home to where it arms, so after a take-off away from home RTL returns there.
+  A `goto` to (0, 0) at 300 m, a descent and `land` brought it home at 21:12 (contact #6 at
+  (194.99, −933.00, 29.69)).
+- **Whole session:** six contacts (three at home, the hillside, the roof twice) and no
+  `intersection` line. The real-time factor was 0.74–1.01. The quad cast about 800 world rays/s
+  in flight and 1600 while resting on the slope (the motion ray and the down ray every step).
+- **Not shown:** grazing contacts beside the path are still not tested (only the centre's path
+  and the ray down are), and taking off from a slope needs ArduPilot's proximity arming check to
+  pass.

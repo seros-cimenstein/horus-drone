@@ -21,11 +21,6 @@ static class Tests
 
     static int Main()
     {
-        Run(SharedVector);
-        Run(Rejections);
-        Run(SeqOrdering);
-        Run(LinkFreshness);
-        Run(LinkDrain);
         Run(PositionMapping);
         Run(HeadingMatchesPosition);
         Run(RotationMapping);
@@ -43,7 +38,12 @@ static class Tests
         Run(CameraPathSegments);
         Run(CameraPathRepeats);
         Run(ServoFrameDecode);
-        Run(GimbalFromServo);
+        Run(GimbalConfig);
+        Run(GimbalReportsEveryChange);
+        Run(GimbalDatagrams);
+        Run(GimbalHoldsTheSetpoint);
+        Run(GimbalReports);
+        Run(GimbalChannelRoundTrip);
         Run(QuadHover);
         Run(QuadTorqueSigns);
         Run(QuadRestsOnFloor);
@@ -51,6 +51,7 @@ static class Tests
         Run(FdmJsonLine);
         Run(PhysicsLinkLockstep);
         Run(WorldProbeRays);
+        Run(QuadHoldsOnSlopes);
         Run(QuadStopsAtWall);
         Run(ImuSaturates);
         Run(CameraOnTheMount);
@@ -62,6 +63,13 @@ static class Tests
         Run(RangeSchedule);
         Run(RangeSensorsDisabled);
         Run(RangeSensorsOnPhysicsLink);
+        Run(MiniJsonParse);
+        Run(SurveyGridCells);
+        Run(SurveyTileFormat);
+        Run(SurveyRequestParsing);
+        Run(SurveyRunWritesTiles);
+        Run(SurveyResumes);
+        Run(SurveyUnloadedAndWaterTiles);
         Console.WriteLine(failures == 0 ? $"OK: {checks} checks passed" : $"{failures} of {checks} checks FAILED");
         return failures == 0 ? 0 : 1;
     }
@@ -72,167 +80,10 @@ static class Tests
         catch (Exception e) { failures++; Console.WriteLine($"FAIL: {test.Method.Name} threw {e}"); }
     }
 
-    static byte[] Hex(string hex)
+    static NedPose Sample() => new NedPose
     {
-        var b = new byte[hex.Length / 2];
-        for (int i = 0; i < b.Length; i++) b[i] = Convert.ToByte(hex.Substring(2 * i, 2), 16);
-        return b;
-    }
-
-    static PosePacket Sample(ulong seq = 7) => new PosePacket
-    {
-        Seq = seq, NorthM = 1, EastM = 2, DownM = -3, RollDeg = 0, PitchDeg = -10, YawDeg = 45, HfovDeg = 90,
+        Seq = 7, NorthM = 1, EastM = 2, DownM = -3, RollDeg = 0, PitchDeg = -10, YawDeg = 45, HfovDeg = 90,
     };
-
-    static void SharedVector()
-    {
-        using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "pose_vector.json")));
-        var v = doc.RootElement;
-        byte[] bytes = Hex(v.GetProperty("hex").GetString());
-        Check(PoseProtocol.Size == 56, "packet size is 56 bytes");
-        Check(bytes.Length == PoseProtocol.Size, "vector is one packet");
-        Check(PoseProtocol.TryParse(bytes, bytes.Length, out var p) == PacketError.None, "vector parses");
-        Check(p.Seq == v.GetProperty("seq").GetUInt64(), "vector seq");
-        Near(p.NorthM, v.GetProperty("north_m").GetDouble(), "vector north");
-        Near(p.EastM, v.GetProperty("east_m").GetDouble(), "vector east");
-        Near(p.DownM, v.GetProperty("down_m").GetDouble(), "vector down");
-        Near(p.RollDeg, v.GetProperty("roll_deg").GetDouble(), "vector roll");
-        Near(p.PitchDeg, v.GetProperty("pitch_deg").GetDouble(), "vector pitch");
-        Near(p.YawDeg, v.GetProperty("yaw_deg").GetDouble(), "vector yaw");
-        Near(p.HfovDeg, v.GetProperty("hfov_deg").GetDouble(), "vector hfov");
-        Check(Convert.ToHexString(PoseProtocol.Encode(p)).ToLowerInvariant() == v.GetProperty("hex").GetString(),
-            "Encode reproduces the vector bytes");
-    }
-
-    static void Rejections()
-    {
-        byte[] good = PoseProtocol.Encode(Sample());
-        Check(PoseProtocol.TryParse(good, good.Length, out _) == PacketError.None, "sample parses");
-
-        var longer = new byte[57];
-        Array.Copy(good, longer, good.Length);
-        Check(PoseProtocol.TryParse(longer, 57, out _) == PacketError.Size, "57 bytes rejected");
-        Check(PoseProtocol.TryParse(good, 55, out _) == PacketError.Size, "55 bytes rejected");
-        Check(PoseProtocol.TryParse(null, 0, out _) == PacketError.Size, "null rejected");
-
-        var magic = (byte[])good.Clone();
-        magic[0] = (byte)'X';
-        Check(PoseProtocol.TryParse(magic, magic.Length, out _) == PacketError.Magic, "bad magic rejected");
-
-        var version = (byte[])good.Clone();
-        version[4] = 2;
-        Check(PoseProtocol.TryParse(version, version.Length, out _) == PacketError.Version, "version 2 rejected");
-
-        foreach (var bad in new[]
-        {
-            new PosePacket { Seq = 1, NorthM = double.NaN, HfovDeg = 90 },
-            new PosePacket { Seq = 1, DownM = double.PositiveInfinity, HfovDeg = 90 },
-            new PosePacket { Seq = 1, YawDeg = float.NaN, HfovDeg = 90 },
-            new PosePacket { Seq = 1, HfovDeg = float.PositiveInfinity },
-        })
-        {
-            var b = PoseProtocol.Encode(bad);
-            Check(PoseProtocol.TryParse(b, b.Length, out var parsed) == PacketError.NonFinite, "non-finite field rejected");
-            Check(parsed.Seq == 0, "rejected packet is not returned");
-        }
-        foreach (float fov in new[] { 0f, -5f, 180f, 200f })
-        {
-            var p = Sample();
-            p.HfovDeg = fov;
-            var b = PoseProtocol.Encode(p);
-            Check(PoseProtocol.TryParse(b, b.Length, out _) == PacketError.FovRange, $"hfov {fov} rejected");
-        }
-    }
-
-    static void SeqOrdering()
-    {
-        var t = new SeqTracker();
-        Check(t.Accept(10), "first seq accepted");
-        Check(t.Accept(12), "newer seq accepted");
-        Check(!t.Accept(11), "older seq dropped");
-        Check(!t.Accept(12), "duplicate seq dropped");
-        Check(t.Newest == 12, "newest kept");
-        Check(t.Accept(5000), "jump ahead accepted");
-        Check(t.Accept(3), "restart (far older seq) accepted");
-        Check(t.Newest == 3, "restart becomes newest");
-        t.Reset();
-        Check(t.Accept(0), "seq 0 accepted after reset");
-    }
-
-    static void LinkFreshness()
-    {
-        var link = new PoseLink(2.0);
-        Check(!link.IsFresh(0), "empty link is not fresh");
-        var a = PoseProtocol.Encode(Sample(5));
-        Check(link.Offer(a, a.Length, 10.0) == PacketError.None, "valid offer");
-        Check(link.HasLatest && link.Latest.Seq == 5, "latest stored");
-        Check(link.IsFresh(11.9), "fresh within timeout");
-        Check(!link.IsFresh(12.1), "stale after timeout");
-
-        var older = PoseProtocol.Encode(Sample(4));
-        link.Offer(older, older.Length, 12.0);
-        Check(link.Latest.Seq == 5, "older packet does not replace the newest");
-        Check(link.IsFresh(13.5), "older but valid packet still counts as traffic");
-
-        var junk = new byte[10];
-        Check(link.Offer(junk, junk.Length, 13.0) == PacketError.Size, "junk rejected");
-        Check(link.BadPackets == 1 && link.LastError == PacketError.Size, "bad packet counted");
-        Check(!link.IsFresh(15.0), "junk does not keep the link alive");
-
-        link.Reset();
-        Check(!link.HasLatest && !link.IsFresh(13.0), "reset clears the stream");
-        var restart = PoseProtocol.Encode(Sample(0));
-        link.Offer(restart, restart.Length, 20.0);
-        Check(link.Latest.Seq == 0 && link.IsFresh(20.0), "restarted bridge accepted after reset");
-    }
-
-    // A8: one drain reaches the newest queued pose, a time budget may split it across ticks, and a
-    // backlog queued while the script did not tick (pause) is thrown away, not applied.
-    static void LinkDrain()
-    {
-        var queue = new System.Collections.Generic.Queue<byte[]>();
-        void Enqueue(ulong from, ulong to)
-        {
-            for (ulong s = from; s <= to; s++) queue.Enqueue(PoseProtocol.Encode(Sample(s)));
-        }
-        int Receive(byte[] into)
-        {
-            if (queue.Count == 0) return -1;
-            byte[] d = queue.Dequeue();
-            Array.Copy(d, into, d.Length);
-            return d.Length;
-        }
-        var buffer = new byte[2048];
-
-        var link = new PoseLink(2.0);
-        Enqueue(1, 220);
-        queue.Enqueue(new byte[10]);   // one junk datagram in the backlog
-        var all = link.Drain(buffer, Receive, 10.0, () => false);
-        Check(all.Datagrams == 221 && all.Discarded == 0 && !all.BudgetHit, $"whole backlog read in one drain ({all.Datagrams})");
-        Check(link.Latest.Seq == 220 && link.BadPackets == 1, "newest packet kept, junk counted");
-        Check(link.Drain(buffer, Receive, 10.016, () => false).Datagrams == 0, "empty socket: nothing read");
-
-        Enqueue(4001, 4250);
-        int calls = 0;
-        var first = link.Drain(buffer, Receive, 10.032, () => ++calls >= 100);
-        Check(first.Datagrams == 100 && first.BudgetHit, "budget ends the drain after the datagram that used it up");
-        Check(link.Latest.Seq == 4100 && queue.Count == 150, "the rest stays queued");
-        var second = link.Drain(buffer, Receive, 10.048, () => false);
-        Check(second.Datagrams == 150 && !second.BudgetHit && link.Latest.Seq == 4250, "next tick reaches the newest");
-
-        // Paused 30 s: the socket filled with the poses sent right after the pause began (newer ones
-        // were dropped). The first drain after the gap discards them, over two budget-limited ticks.
-        Enqueue(4251, 4471);
-        calls = 0;
-        var gap = link.Drain(buffer, Receive, 40.0, () => ++calls >= 150);
-        Check(gap.Discarded == 150 && gap.BudgetHit && link.Latest.Seq == 4250, "backlog after a tick gap is discarded, not applied");
-        var rest = link.Drain(buffer, Receive, 40.016, () => false);
-        Check(rest.Discarded == 71 && !rest.BudgetHit, "discarding continues until the socket is empty");
-        Check(!link.HasLatest && !link.IsFresh(40.016), "then the link restarts empty");
-        Enqueue(5751, 5751);   // the bridge's current pose
-        var fresh = link.Drain(buffer, Receive, 40.032, () => false);
-        Check(fresh.Discarded == 0 && link.Latest.Seq == 5751 && link.IsFresh(40.032), "first pose after the gap is a fresh one");
-    }
 
     static readonly Origin Legion = new Origin { X = 195, Y = -933, HeadingDeg = 0 };
 
@@ -261,7 +112,7 @@ static class Tests
         var e90 = MapNed(0, 10, 0, turned);
         Near(e90.X, 0, "heading 90 east x", 1e-9); Near(e90.Y, 10, "heading 90 east y", 1e-9);
 
-        var vector = new PosePacket { NorthM = 12.5, EastM = -3.25, DownM = -20, PitchDeg = -45, RollDeg = 1.5f, YawDeg = 270, HfovDeg = 84 };
+        var vector = new NedPose { NorthM = 12.5, EastM = -3.25, DownM = -20, PitchDeg = -45, RollDeg = 1.5f, YawDeg = 270, HfovDeg = 84 };
         var v = PoseMapping.Map(vector, Legion, 30, 1920, 1080);
         Near(v.X, 191.75, "vector x"); Near(v.Y, -920.5, "vector y"); Near(v.Z, 50, "vector z");
         Near(v.RotX, -45, "vector rot x"); Near(v.RotY, 1.5, "vector rot y"); Near(v.RotZ, 90, "vector rot z");
@@ -311,7 +162,6 @@ static class Tests
     static void ConfigDefaults()
     {
         var c = ModConfig.Parse("");
-        Check(c.Bind == "127.0.0.1" && c.Port == 5611, "pose defaults");
         Near(c.TimeoutS, 1.9, "timeout default");
         Near(c.Origin.X, 195, "origin x default"); Near(c.Origin.Y, -933, "origin y default");
         Near(c.Origin.HeadingDeg, 0, "heading default");
@@ -322,9 +172,8 @@ static class Tests
 
     static void ConfigParsing()
     {
-        var c = ModConfig.Parse("; comment\r\n[POSE]\r\nBind = 0.0.0.0\r\nport=6000 ; inline\r\ntimeout_s=0.5\r\n"
+        var c = ModConfig.Parse("; comment\r\n[POSE]\r\ntimeout_s=0.5 ; inline\r\n"
             + "[origin]\nx=-1000.5\ny=2500\nheading_deg=-30\nz=42.25\n# end\n");
-        Check(c.Bind == "0.0.0.0" && c.Port == 6000, "pose parsed");
         Near(c.TimeoutS, 0.5, "timeout parsed");
         Near(c.Origin.X, -1000.5, "x parsed"); Near(c.Origin.Y, 2500, "y parsed");
         Near(c.Origin.HeadingDeg, -30, "heading parsed");
@@ -332,7 +181,8 @@ static class Tests
         Check(c.Warnings.Count == 0, "valid file has no warnings: " + string.Join(" | ", c.Warnings));
 
         var bad = ModConfig.Parse("[pose]\nbind=localhost\nport=70000\ntimeout_s=0\nfoo=1\n[origin]\nx=abc\ny=nan\nheading_deg=\nz=high\nnot a pair\n[broken\nport=1\n");
-        Check(bad.Bind == "127.0.0.1" && bad.Port == 5611, "bad pose values fall back");
+        Check(bad.Warnings.Exists(w => w.Contains("unknown setting [pose] bind")) && bad.Warnings.Exists(w => w.Contains("unknown setting [pose] port")),
+            "the removed pose receiver's bind and port are unknown settings");
         Near(bad.TimeoutS, 1.9, "bad timeout falls back");
         Near(bad.Origin.X, 195, "bad x falls back"); Near(bad.Origin.Y, -933, "nan y falls back");
         Near(bad.Origin.HeadingDeg, 0, "empty heading falls back");
@@ -377,7 +227,7 @@ static class Tests
     {
         var c = ModConfig.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "HorusGta.ini")));
         Check(c.Warnings.Count == 0, "shipped HorusGta.ini parses cleanly: " + string.Join(" | ", c.Warnings));
-        Check(c.Port == 5611 && !c.Origin.Z.HasValue, "shipped ini matches the defaults");
+        Check(!c.Origin.Z.HasValue, "shipped ini probes the ground at the origin");
         Near(c.TimeoutS, new ModConfig().TimeoutS, "shipped timeout equals the default");
         Near(c.Origin.X, 195, "shipped origin x"); Near(c.Origin.Y, -933, "shipped origin y");
         Check(c.Scene.Weather == null && !c.Scene.Hour.HasValue && !c.Scene.FreezeTime, "shipped scene: the game's own weather and clock");
@@ -579,19 +429,265 @@ static class Tests
         Near(SitlJson.Throttle(2100), 1, "pwm over 2000 clamps"); Near(SitlJson.Throttle(0), 0, "pwm 0 clamps");
     }
 
-    static void GimbalFromServo()
+    static void GimbalConfig()
     {
-        var g = new GimbalServo();   // start_gta_sitl.sh physics mode: MNT1_PITCH_MIN -135, MAX 45; SERVO10 1100..1900
-        ServoFrame F(ushort pwm) { var p = Pwm(16, 1000); p[9] = pwm; return new ServoFrame { FrameRate = 400, Pwm = p }; }
-        Near(g.PitchDeg(F(1500)).Value, -45, "centre = -45 deg", 1e-9);
-        Near(g.PitchDeg(F(1100)).Value, -135, "servo min = pitch min");
-        Near(g.PitchDeg(F(1900)).Value, 45, "servo max = pitch max");
-        Near(g.PitchDeg(F(2100)).Value, 45, "beyond servo max clamps");
-        Check(g.PitchDeg(F(0)) == null, "undriven channel gives no pitch");
-        var all = Pwm(16, 1000); all[8] = 1100; all[9] = 1500; all[10] = 1900;
-        var three = new ServoFrame { FrameRate = 400, Pwm = all };
-        Near(g.RollDeg(three).Value, -30, "SERVO9 min = roll min (MNT1_ROLL_MIN -30)");
-        Near(g.YawDeg(three).Value, 160, "SERVO11 max = yaw max (MNT1_YAW_MAX 160)");
+        var d = new ModConfig().Gimbal;
+        Check(d.Bind == "127.0.0.1" && d.Port == 5613 && d.Target == "127.0.0.1:5614" && d.RateHz == 50 && d.SlewDegS == 90,
+            "gimbal defaults: setpoints on 127.0.0.1:5613, status to 127.0.0.1:5614, 50 Hz, 90 deg/s");
+        var c = ModConfig.Parse("[gimbal]\nbind=0.0.0.0\nport=6000\ntarget=10.0.0.2:6001\nrate_hz=20\nslew_deg_s=180\n");
+        Check(c.Warnings.Count == 0 && c.Gimbal.Bind == "0.0.0.0" && c.Gimbal.Port == 6000 && c.Gimbal.Target == "10.0.0.2:6001"
+            && c.Gimbal.RateHz == 20 && c.Gimbal.SlewDegS == 180, "gimbal settings parsed");
+        var bad = ModConfig.Parse("[gimbal]\nbind=localhost\nport=0\ntarget=127.0.0.1\nrate_hz=5\nslew_deg_s=0\n");
+        Check(bad.Warnings.Count == 5 && bad.Gimbal.Port == 5613 && bad.Gimbal.RateHz == 50 && bad.Gimbal.SlewDegS == 90 && bad.Gimbal.Target == "127.0.0.1:5614",
+            "bad gimbal settings warn and keep the defaults: " + string.Join(" | ", bad.Warnings));
+    }
+
+    static void GimbalDatagrams()
+    {
+        var b = new byte[GimbalProtocol.SetpointSize];
+        GimbalProtocol.EncodeSetpoint(b, 9, -30.5f, 60.25f);
+        Check(b[0] == 'H' && b[1] == 'G' && b[2] == 'I' && b[3] == 'M' && BitConverter.ToUInt32(b, 4) == 1 && BitConverter.ToUInt32(b, 8) == 9, "setpoint header: HGIM, version 1, seq");
+        Check(GimbalProtocol.TryDecodeSetpoint(b, b.Length, out uint seq, out float pitch, out float yaw) && seq == 9 && pitch == -30.5f && yaw == 60.25f, "setpoint round trip");
+        Check(!GimbalProtocol.TryDecodeSetpoint(b, b.Length - 1, out _, out _, out _), "short setpoint rejected");
+        var big = new byte[GimbalProtocol.SetpointSize + 4]; Array.Copy(b, big, b.Length);
+        Check(!GimbalProtocol.TryDecodeSetpoint(big, big.Length, out _, out _, out _), "long setpoint rejected");
+        var magic = (byte[])b.Clone(); magic[3] = (byte)'X';
+        Check(!GimbalProtocol.TryDecodeSetpoint(magic, magic.Length, out _, out _, out _), "wrong magic rejected");
+        var version = (byte[])b.Clone(); version[4] = 2;
+        Check(!GimbalProtocol.TryDecodeSetpoint(version, version.Length, out _, out _, out _), "wrong version rejected");
+        GimbalProtocol.EncodeSetpoint(b, 10, float.NaN, 0);
+        Check(!GimbalProtocol.TryDecodeSetpoint(b, b.Length, out _, out _, out _), "NaN pitch rejected");
+        GimbalProtocol.EncodeSetpoint(b, 11, 0, float.PositiveInfinity);
+        Check(!GimbalProtocol.TryDecodeSetpoint(b, b.Length, out _, out _, out _), "infinite yaw rejected");
+
+        var s = new byte[GimbalProtocol.StatusSize];
+        GimbalProtocol.EncodeStatus(s, 3, 1234, 0.5f, -45f, 30f, 2f, -3f);
+        Check(s[0] == 'H' && s[1] == 'G' && s[2] == 'A' && s[3] == 'T' && BitConverter.ToUInt32(s, 4) == 1, "status header: HGAT, version 1");
+        Check(BitConverter.ToUInt32(s, 8) == 3 && BitConverter.ToUInt32(s, 12) == 1234, "status seq and time_ms");
+        Check(BitConverter.ToSingle(s, 16) == 0.5f && BitConverter.ToSingle(s, 20) == -45f && BitConverter.ToSingle(s, 24) == 30f
+            && BitConverter.ToSingle(s, 28) == 2f && BitConverter.ToSingle(s, 32) == -3f, "status floats: camera roll, pitch, yaw, vehicle roll, pitch");
+    }
+
+    /// <summary>Body leaning by <paramref name="rollDeg"/> (right side down) and <paramref name="noseDeg"/> (nose up), at NED yaw <paramref name="yawDeg"/>.</summary>
+    static QuadBody Leaning(NedFrame ned, double yawDeg, double rollDeg, double noseDeg)
+    {
+        var body = new QuadBody(new Airframe()) { FloorZ = -1000 };
+        body.Place(new Vec3(200, -930, 45), ned.GtaHeadingRad(yawDeg * Math.PI / 180));
+        double roll = rollDeg * Math.PI / 180, nose = noseDeg * Math.PI / 180;
+        body.F = Vec3.Rotate(body.F, body.R, nose); body.U = Vec3.Rotate(body.U, body.R, nose);
+        body.R = Vec3.Rotate(body.R, body.F, roll); body.U = Vec3.Rotate(body.U, body.F, roll);
+        return body;
+    }
+
+    static void GimbalHoldsTheSetpoint()
+    {
+        var ned = new NedFrame { Origin = new Vec3(195, -933, 30), HeadingDeg = 30 };
+        var g = new GimbalMount();
+        var level = Leaning(ned, 70, 0, 0);
+        g.Reset(level, ned);
+        Check(!g.HasSetpoint && g.TargetPitchDeg == -45 && g.TargetYawDeg == 0, "at rest: no setpoint, pitch -45, yaw 0");
+        g.Measure(level, ned, out double cr, out double cp, out double cy, out _, out _);
+        Near(cp, -45, "resting camera 45 deg down", 1e-6); Near(cy, 0, "resting camera faces the nose", 1e-6); Near(cr, 0, "resting camera level", 1e-6);
+
+        // A new setpoint is approached at 90 deg/s per axis: 0.1 s moves 9 deg.
+        g.SetTarget(-10, 60);
+        for (int i = 0; i < 40; i++) g.Step(0.0025, level, ned);
+        Near(g.PitchDeg, -36, "pitch slews 9 deg in 0.1 s", 1e-9); Near(g.YawDeg, 9, "yaw slews 9 deg in 0.1 s", 1e-9);
+        for (int i = 0; i < 400; i++) g.Step(0.0025, level, ned);
+        g.Measure(level, ned, out cr, out cp, out cy, out _, out _);
+        Near(cp, -10, "settled at pitch -10", 1e-6); Near(cy, 60, "settled 60 deg right of the nose", 1e-6); Near(cr, 0, "still level", 1e-6);
+        var pose = new PhysicsLink(level, ned, g, level.P, ned.GtaHeadingRad(70 * Math.PI / 180));
+        g.SetTarget(-10, 60);
+        for (int i = 0; i < 400; i++) g.Step(0.0025, level, ned);
+        Near(pose.CameraPose(30, 84).YawDeg, 130, "NED camera yaw = body yaw 70 + pan 60", 1e-3);
+
+        // Leaning 15 deg right and 10 deg nose up: the motors hold the horizon pitch, level roll and nose-relative yaw.
+        var lean = Leaning(ned, 70, 15, 10);
+        g.SetTarget(-30, -40);
+        for (int i = 0; i < 1000; i++) g.Step(0.0025, lean, ned);
+        g.Measure(lean, ned, out cr, out cp, out cy, out double vr, out double vp);
+        Near(cp, -30, "horizon pitch held against the lean", 1e-6); Near(cr, 0, "roll held level against the lean", 1e-6);
+        Near(cy, -40, "yaw relative to the nose held against the lean", 1e-6);
+        Check(Math.Abs(vr - 15) < 0.5 && Math.Abs(vp - 10) < 0.5, $"vehicle lean reported (roll {vr:F2}, pitch {vp:F2})");
+        Check(Math.Abs(g.RollDeg) > 5 && Math.Abs(g.TiltDeg + 30) > 5, $"the motors moved against the lean (roll {g.RollDeg:F1}, tilt {g.TiltDeg:F1})");
+
+        // Straight down keeps the body's yaw in NED.
+        g.SetTarget(-90, 0);
+        for (int i = 0; i < 1000; i++) g.Step(0.0025, level, ned);
+        var down = pose.CameraPose(30, 84);
+        Near(down.PitchDeg, -90, "nadir pitch", 1e-3); Near(down.YawDeg, 70, "nadir camera keeps the body's yaw", 1e-3);
+
+        // Setpoints are clamped to the setpoint range; non-finite ones are ignored.
+        g.SetTarget(-120, 200);
+        Check(g.TargetPitchDeg == GimbalMount.PitchMinDeg && g.TargetYawDeg == GimbalMount.YawLimitDeg, "setpoint clamped to pitch -90, yaw 160");
+        g.SetTarget(double.NaN, 0);
+        Check(g.TargetPitchDeg == GimbalMount.PitchMinDeg, "NaN setpoint ignored");
+
+        // Motor travel: looking 45 deg up with the nose 30 deg down needs tilt +75, beyond +45.
+        var noseDown = Leaning(ned, 0, 0, -30);
+        g.SetTarget(45, 0);
+        for (int i = 0; i < 2000; i++) g.Step(0.0025, noseDown, ned);
+        g.Measure(noseDown, ned, out _, out cp, out _, out _, out _);
+        Near(g.TiltDeg, GimbalMount.TiltMaxDeg, "tilt motor stops at +45", 1e-9);
+        Near(cp, 15, "the measured camera pitch shows the stop", 1e-6);
+
+        g.Reset(level, ned);
+        Check(!g.HasSetpoint && g.PitchDeg == -45 && g.YawDeg == 0 && Math.Abs(g.TiltDeg + 45) < 1e-9, "reset: back to rest at once");
+        Check(new GimbalMount(10, 20).SlewDegS == 10, "slew from the settings");
+        foreach (double bad in new[] { 0.5, 1001, double.NaN })
+        {
+            bool threw = false;
+            try { new GimbalMount(bad); } catch (ArgumentOutOfRangeException) { threw = true; }
+            Check(threw, $"slew {bad} refused");
+        }
+    }
+
+    static void GimbalReports()
+    {
+        // Holding still: only the heartbeat, every 1/rate_hz of sim time.
+        var ned = new NedFrame { Origin = new Vec3(0, 0, 0) };
+        var body = Leaning(ned, 0, 0, 0);
+        var g = new GimbalMount(rateHz: 50);
+        g.Reset(body, ned);
+        var at = new System.Collections.Generic.List<double>();
+        for (int i = 1; i <= 400; i++)
+        {
+            double t = i / 400.0;
+            g.Step(1 / 400.0, body, ned);
+            if (g.Report(t, body, ned)) at.Add(t);
+        }
+        Check(at.Count == 50, $"still: a 50 Hz heartbeat, 50 reports per sim second ({at.Count})");
+        bool gaps = true;
+        for (int i = 1; i < at.Count; i++) gaps &= Math.Abs(at[i] - at[i - 1] - 0.02) < 1e-9;
+        Check(gaps, "still: heartbeats exactly 20 ms apart");
+        Check(BitConverter.ToUInt32(g.Datagram, 8) == 50 && BitConverter.ToUInt32(g.Datagram, 12) == RangeProtocol.TimeMs(at[at.Count - 1]), "last report: seq 50, time_ms its sim time");
+        Near(BitConverter.ToSingle(g.Datagram, 20), -45, "reported camera pitch", 1e-5);
+        Check(g.Report(0.1, body, ned), "the sim clock went back: report at once");
+        Check(!g.Report(0.11, body, ned) && g.Report(0.12, body, ned), "then one period later");
+        var slow = new GimbalMount(rateHz: GimbalMount.MinRateHz);
+        slow.Reset(body, ned);
+        int beats = 0;
+        for (int i = 1; i <= 400; i++) if (slow.Report(i / 400.0, body, ned)) beats++;
+        Check(beats == 20, $"the slowest heartbeat is 20 Hz ({beats})");
+        bool refused = false;
+        try { new GimbalMount(rateHz: 19); } catch (ArgumentOutOfRangeException) { refused = true; }
+        Check(refused, "a heartbeat under 20 Hz is refused");
+    }
+
+    static void GimbalReportsEveryChange()
+    {
+        var ned = new NedFrame { Origin = new Vec3(0, 0, 0) };
+        const double h = 1 / 400.0;
+
+        // The vehicle rolls 0.05 deg per 400 Hz step: the camera stays level, the reported vehicle
+        // roll changes, so every step reports, with consecutive seqs and its own sim time.
+        var body = Leaning(ned, 0, 0, 0);
+        var g = new GimbalMount();
+        g.Reset(body, ned);
+        double d = 0.05 * Math.PI / 180;
+        int reports = 0; bool consecutive = true; double t = 0;
+        for (int i = 0; i < 40; i++)
+        {
+            body.R = Vec3.Rotate(body.R, body.F, d); body.U = Vec3.Rotate(body.U, body.F, d);
+            t += h;
+            g.Step(h, body, ned);
+            if (!g.Report(t, body, ned)) continue;
+            reports++;
+            consecutive &= BitConverter.ToUInt32(g.Datagram, 8) == g.Reports && BitConverter.ToUInt32(g.Datagram, 12) == RangeProtocol.TimeMs(t);
+        }
+        Check(reports == 40 && consecutive, $"a changing lean reports on each of 40 consecutive steps ({reports})");
+        Near(BitConverter.ToSingle(g.Datagram, 28), 2.0, "the last report carries the 2 deg roll", 1e-4);
+        Near(BitConverter.ToSingle(g.Datagram, 16), 0, "while the camera stays level", 1e-4);
+
+        // No deadband: a lean changing 0.005 deg per 400 Hz step, well under any earlier threshold,
+        // still reports on each step, and each report carries that step's roll.
+        var fine = Leaning(ned, 0, 0, 0);
+        var f = new GimbalMount();
+        f.Reset(fine, ned);
+        double small = 0.005 * Math.PI / 180;
+        reports = 0; bool tracks = true; t = 0;
+        for (int i = 1; i <= 40; i++)
+        {
+            fine.R = Vec3.Rotate(fine.R, fine.F, small); fine.U = Vec3.Rotate(fine.U, fine.F, small);
+            t += h;
+            f.Step(h, fine, ned);
+            if (!f.Report(t, fine, ned)) continue;
+            reports++;
+            tracks &= Math.Abs(BitConverter.ToSingle(f.Datagram, 28) - 0.005 * i) < 1e-4;
+        }
+        Check(reports == 40 && tracks, $"a 0.005 deg/step lean reports on each of 40 consecutive steps with its roll ({reports})");
+        // Then still: the same float32 angles again send nothing until the heartbeat.
+        Check(!f.Report(t + h, fine, ned) && !f.Report(t + 2 * h, fine, ned), "unchanged angles: no report before the heartbeat");
+
+        // A slewing setpoint on a level body: every step's camera angle differs, so every step reports.
+        var level = Leaning(ned, 0, 0, 0);
+        var s = new GimbalMount();
+        s.Reset(level, ned);
+        s.SetTarget(-10, 60);
+        reports = 0;
+        for (int i = 1; i <= 40; i++)
+        {
+            s.Step(h, level, ned);
+            if (s.Report(1 + i * h, level, ned)) reports++;
+        }
+        Check(reports == 40, $"a slewing camera reports on each of 40 consecutive steps ({reports})");
+        Near(BitConverter.ToSingle(s.Datagram, 24), 9, "reported yaw after 0.1 s of slew", 1e-4);
+
+        // Through the physics link, as the mod and horus-gta-physics-sim run it: a report from
+        // Advanced on every changing step, then only the heartbeat once the gimbal settles.
+        var frame = new Airframe();
+        var quad = new QuadBody(frame) { FloorZ = 0 };
+        var origin = new NedFrame { Origin = new Vec3(0, 0, frame.RadiusM + 0.001) };
+        var link = new PhysicsLink(quad, origin, new GimbalMount(), origin.Origin, 0);
+        int sent = 0;
+        link.Advanced = () => { if (link.Gimbal.Report(link.SimTimeS, link.Body, link.Frame)) sent++; };
+        uint n = 0;
+        PumpResult Run(int frames)
+        {
+            var q = new System.Collections.Generic.Queue<ServoFrame?>();
+            for (int i = 0; i < frames; i++) q.Enqueue(new ServoFrame { FrameRate = 400, FrameCount = ++n, Pwm = Pwm(16, 1000) });
+            return link.Pump(link.SimTimeS + 10, () => q.Count > 0 ? q.Dequeue() : null, _ => { }, () => false);
+        }
+        Run(400);   // settle on the floor at rest
+        link.Gimbal.SetTarget(0, 0);
+        sent = 0;
+        var r = Run(40);
+        Check(r.Steps == 40 && sent == 40, $"physics link: 40 slewing steps, 40 reports ({sent})");
+        Run(400);   // the 45 deg slew ends after 0.5 s
+        sent = 0;
+        Run(400);
+        Check(sent == 50, $"physics link: settled, a 50 Hz heartbeat over 1 s ({sent})");
+    }
+
+    static void GimbalChannelRoundTrip()
+    {
+        using var horus = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp);
+        horus.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 0));
+        horus.ReceiveTimeout = 2000;
+        int horusPort = ((System.Net.IPEndPoint)horus.LocalEndPoint).Port;
+        var settings = ModConfig.Parse($"[gimbal]\ntarget=127.0.0.1:{horusPort}\n").Gimbal;
+        settings.Port = 0;   // any free port
+        using var channel = new GimbalChannel(settings);
+        var to = new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, channel.LocalPort);
+        var b = new byte[GimbalProtocol.SetpointSize];
+        GimbalProtocol.EncodeSetpoint(b, 1, -20, 10);
+        horus.SendTo(b, to);
+        GimbalProtocol.EncodeSetpoint(b, 2, -25, 15);
+        horus.SendTo(b, to);
+        horus.SendTo(new byte[] { 1, 2, 3 }, to);
+        var g = new GimbalMount();
+        int taken = 0;
+        for (int i = 0; i < 200 && taken < 2; i++) { taken += channel.Drain(g); System.Threading.Thread.Sleep(5); }
+        for (int i = 0; i < 50 && channel.Rejected == 0; i++) { channel.Drain(g); System.Threading.Thread.Sleep(5); }
+        Check(taken == 2 && g.TargetPitchDeg == -25 && g.TargetYawDeg == 15, $"two setpoints taken, the last wins ({taken}: {g.TargetPitchDeg}, {g.TargetYawDeg})");
+        Check(channel.Received == 2 && channel.Rejected == 1, $"the 3-byte datagram rejected ({channel.Received} taken, {channel.Rejected} rejected)");
+        var ned = new NedFrame { Origin = new Vec3(0, 0, 0) };
+        var body = Leaning(ned, 0, 0, 0);
+        g.Report(0.5, body, ned);
+        channel.Send(g);
+        var got = new byte[64];
+        int n = horus.Receive(got);
+        Check(n == GimbalProtocol.StatusSize && got[3] == 'T' && BitConverter.ToUInt32(got, 12) == 500, $"status datagram reaches the target ({n} bytes)");
     }
 
     static double[] All(double t) => new[] { t, t, t, t };
@@ -655,7 +751,7 @@ static class Tests
     {
         var origin = new Origin { X = 195, Y = -933, HeadingDeg = 30 };
         var ned = new NedFrame { Origin = new Vec3(195, -933, 29.69), HeadingDeg = 30 };
-        var p = new PosePacket { NorthM = 12, EastM = -7, DownM = -4, HfovDeg = 84 };
+        var p = new NedPose { NorthM = 12, EastM = -7, DownM = -4, HfovDeg = 84 };
         var cam = PoseMapping.Map(p, origin, 29.69, 1920, 1080);
         var back = ned.ToNed(new Vec3(cam.X, cam.Y, cam.Z) - ned.Origin);
         Near(back.X, 12, "north round-trips", 1e-9); Near(back.Y, -7, "east round-trips", 1e-9); Near(back.Z, -4, "down round-trips", 1e-9);
@@ -690,10 +786,10 @@ static class Tests
         var frame = new Airframe();
         var body = new QuadBody(frame) { FloorZ = 0 };
         var ned = new NedFrame { Origin = new Vec3(0, 0, frame.RadiusM + 0.001) };
-        var link = new PhysicsLink(body, ned, new GimbalServo(), ned.Origin, 0);
+        var link = new PhysicsLink(body, ned, new GimbalMount(), ned.Origin, 0);
         var queue = new System.Collections.Generic.Queue<ServoFrame?>();
         var replies = new System.Collections.Generic.List<string>();
-        ServoFrame Fr(uint n) { var p = Pwm(16, 1000); p[9] = 1500; return new ServoFrame { FrameRate = 400, FrameCount = n, Pwm = p }; }
+        ServoFrame Fr(uint n) => new ServoFrame { FrameRate = 400, FrameCount = n, Pwm = Pwm(16, 1000) };
         ServoFrame? Next() => queue.Count > 0 ? queue.Dequeue() : null;
         void Reply(string s) => replies.Add(s);
 
@@ -703,10 +799,12 @@ static class Tests
         Check(replies.Count == 4 && replies[2] == replies[1], "the repeated frame gets the same answer");
         Check(link.LastFrame == 3, "sim stops at the target: frame 4 held");
         Near(link.SimTimeS, 3 / 400.0, "three steps of 1/400 s");
-        Near(link.GimbalPitchDeg.Value, -45, "gimbal pitch taken from servo 10");
+        Near(link.Gimbal.TiltDeg, -45, "no setpoint yet: the gimbal rests 45 deg down", 1e-9);
+        link.Gimbal.SetTarget(0, 0);
 
         r = link.Pump(1.0, Next, Reply, () => false);
         Check(r.Steps == 2 && r.TimedOut && link.LastFrame == 5, "held frame 4 answered first, then 5, then timeout");
+        Near(link.Gimbal.PitchDeg, -45 + 2 * 90 / 400.0, "each physics step slews the gimbal by 90 deg/s", 1e-9);
 
         queue.Enqueue(Fr(1));
         r = link.Pump(1.0, Next, Reply, () => false);
@@ -718,22 +816,31 @@ static class Tests
         Check(r.Steps == 0 && r.BudgetHit && queue.Count == 2, "an exhausted budget answers nothing");
     }
 
-    // World contact. A fake world: ground plane z = 0 and a wall plane x = 10 facing -X.
-    static Contact? FakeRay(Vec3 a, Vec3 b, System.Collections.Generic.List<(Vec3, Vec3)> log)
+    // World contact. One-sided planes (a point on each and its outward normal): a ray hits a plane
+    // only crossing it from the open side into the solid, as GTA's rays pass out of terrain from
+    // underneath without a hit.
+    static Contact? PlanesRay(Vec3 a, Vec3 b, (Vec3 at, Vec3 normal)[] planes)
     {
-        log?.Add((a, b));
         double bestT = double.MaxValue; Contact? best = null;
-        void Plane(double ta, double tb, Vec3 normal)
+        foreach (var (at, normal) in planes)
         {
-            if (ta < 0 || tb >= 0) return;   // only crossings from the open side into the solid
+            double ta = Vec3.Dot(a - at, normal), tb = Vec3.Dot(b - at, normal);
+            if (ta < 0 || tb >= 0) continue;
             double t = ta / (ta - tb);
-            if (t >= bestT) return;
+            if (t >= bestT) continue;
             bestT = t;
             best = new Contact { Position = a + (b - a) * t, Normal = normal, Entity = 0 };
         }
-        Plane(a.Z, b.Z, new Vec3(0, 0, 1));
-        Plane(10 - a.X, 10 - b.X, new Vec3(-1, 0, 0));
         return best;
+    }
+
+    // A fake world: ground plane z = 0 and a wall plane x = 10 facing -X.
+    static readonly (Vec3, Vec3)[] FloorAndWall = { (new Vec3(0, 0, 0), new Vec3(0, 0, 1)), (new Vec3(10, 0, 0), new Vec3(-1, 0, 0)) };
+
+    static Contact? FakeRay(Vec3 a, Vec3 b, System.Collections.Generic.List<(Vec3, Vec3)> log)
+    {
+        log?.Add((a, b));
+        return PlanesRay(a, b, FloorAndWall);
     }
 
     static void WorldProbeRays()
@@ -741,7 +848,7 @@ static class Tests
         var rays = new System.Collections.Generic.List<(Vec3, Vec3)>();
         var probe = new WorldProbe((a, b) => FakeRay(a, b, rays));
         var hit = probe.Sweep(new Vec3(9.5, 0, 5), new Vec3(9.9, 0, 5), 0.122);
-        Check(hit.HasValue && Math.Abs(hit.Value.Position.X - 10) < 1e-9 && hit.Value.Normal.X == -1, "motion ray extended by the reach finds the wall 0.1 m past the step");
+        Check(hit.HasValue && Math.Abs(hit.Value.Position.X - 10) < 1e-9 && hit.Value.Normal.X == -1 && hit.Value.OnPath, "motion ray extended by the reach finds the wall 0.1 m past the step, on the path");
         Check(rays.Count == 1 && Math.Abs(rays[0].Item2.X - 10.022) < 1e-9, "a hit along the motion needs no further ray");
 
         rays.Clear();
@@ -762,9 +869,13 @@ static class Tests
         var low = new Vec3(0, 0, 0.5);
         probe.Sweep(low, low, 0.122);
         rays.Clear();
-        Check(!probe.Sweep(low, low, 0.122).HasValue && rays.Count == 1 && rays[0].Item2.Z == 0.5 - 0.122, "near the ground: the short down ray every step");
+        Check(!probe.Sweep(low, low, 0.122).HasValue && rays.Count == 1 && rays[0].Item2.Z == 0.5 - 2 * 0.122, "near the ground: the short down ray (two reaches) every step");
         var rest = new Vec3(0, 0, 0.121);
-        Check(probe.Sweep(rest, rest, 0.122).HasValue, "resting: the down ray finds the ground within the reach");
+        var under = probe.Sweep(rest, rest, 0.122);
+        Check(under.HasValue && !under.Value.OnPath, "resting: the down ray finds the ground, off the path");
+        var slopeProbe = new WorldProbe((a, b) => PlanesRay(a, b, new[] { (new Vec3(0, 0, 0), new Vec3(-0.5, 0, Math.Sqrt(0.75))) }));
+        var touching = new Vec3(0, 0, 0.122 / Math.Sqrt(0.75));
+        Check(slopeProbe.Sweep(touching, touching, 0.122).HasValue, "a sphere touching a 30 deg slope (0.141 m above it) finds it with the down ray");
     }
 
     static void QuadStopsAtWall()
@@ -800,6 +911,56 @@ static class Tests
         Check(inContact == 400, $"in contact on every step while resting ({inContact} of 400)");
     }
 
+    // The 2026-11-02 fall through a Vinewood hillside, offline: a 30 deg slope falling toward +X into
+    // a vertical rock face at x = 10 (an acute concave corner, like the hill and its rock).
+    static void QuadHoldsOnSlopes()
+    {
+        var frame = new Airframe();
+        double a = 30 * Math.PI / 180;
+        var slope = (at: new Vec3(10, 0, 0), normal: new Vec3(Math.Sin(a), 0, Math.Cos(a)));
+        var wall = (at: new Vec3(10, 0, 0), normal: new Vec3(-1, 0, 0));
+        var planes = new[] { slope, wall };
+        double Gap((Vec3 at, Vec3 normal) plane, Vec3 p) => Vec3.Dot(p - plane.at, plane.normal);
+        double SlopeZ(double x) => (10 - x) * Math.Tan(a);
+
+        // Landed on the slope 5 m from the rock with the motors off: it stays where it touched down
+        // (and so never reaches the corner).
+        var lander = new QuadBody(frame) { Sweep = new WorldProbe((x, y) => PlanesRay(x, y, planes)).Sweep };
+        lander.Place(new Vec3(5, 0, SlopeZ(5) + 0.5), 0);
+        Vec3? landed = null;
+        double lowest = double.MaxValue;
+        for (int i = 0; i < 8000; i++)
+        {
+            lander.Step(1 / 800.0, All(0));
+            if (landed == null && lander.InContact) landed = lander.P;
+            lowest = Math.Min(lowest, Math.Min(Gap(slope, lander.P), Gap(wall, lander.P)));
+        }
+        Check(landed.HasValue, "lands on the slope");
+        double moved = landed.HasValue ? (lander.P - landed.Value).Length : double.NaN;
+        Check(moved < 0.01, $"rests where it landed on a 30 deg slope (moved {moved:F3} m in 10 s, to x {lander.P.X:F2})");
+        Check(lander.InContact && Gap(slope, lander.P) > frame.RadiusM - 0.01, $"resting on the slope one radius off it (gap {Gap(slope, lander.P):F4} m)");
+        Check(lowest >= 0, $"landed: never behind the slope or the rock (closest {lowest:F3} m; ends at x {lander.P.X:F3}, z {lander.P.Z:F3}, slope there {SlopeZ(lander.P.X):F3})");
+
+        // Driven down the slope into the rock (tilted 25 deg toward it, sinking): the centre never
+        // passes behind either surface, and the quad ends up wedged in the corner.
+        var pushed = new QuadBody(frame) { Sweep = new WorldProbe((x, y) => PlanesRay(x, y, planes)).Sweep };
+        pushed.Place(new Vec3(8, 0, SlopeZ(8) + 0.3), 0);
+        double tilt = 25 * Math.PI / 180;
+        pushed.U = new Vec3(Math.Sin(tilt), 0, Math.Cos(tilt));
+        pushed.R = Vec3.Cross(pushed.F, pushed.U);
+        double hover = frame.HoverThrottle();
+        for (int i = 0; i < 4; i++) pushed.Rpm[i] = hover * frame.MaxRpm;
+        double worst = double.MaxValue;
+        for (int i = 0; i < 8000; i++)
+        {
+            // Pressed against the rock for 5 s, then the motors stop and it drops into the crease.
+            pushed.Step(1 / 800.0, All(i < 4000 ? hover : 0));
+            worst = Math.Min(worst, Math.Min(Gap(slope, pushed.P), Gap(wall, pushed.P)));
+        }
+        Check(worst >= 0, $"never behind the slope or the rock (closest {worst:F3} m; ends at x {pushed.P.X:F3}, z {pushed.P.Z:F3}, slope there {SlopeZ(pushed.P.X):F3})");
+        Check(Gap(wall, pushed.P) < 0.2 && Gap(slope, pushed.P) < 0.2, $"wedged in the corner (gaps rock {Gap(wall, pushed.P):F3}, slope {Gap(slope, pushed.P):F3} m)");
+    }
+
     static void ImuSaturates()
     {
         var body = new QuadBody(new Airframe()) { FloorZ = -1000 };
@@ -820,7 +981,7 @@ static class Tests
         var body = new QuadBody(frame) { FloorZ = groundZ };
         var origin = new Origin { X = 195, Y = -933, HeadingDeg = 30 };
         var ned = new NedFrame { Origin = new Vec3(195, -933, groundZ + frame.RadiusM + 0.001), HeadingDeg = 30 };
-        var link = new PhysicsLink(body, ned, new GimbalServo(), ned.Origin, ned.GtaHeadingRad(0));
+        var link = new PhysicsLink(body, ned, new GimbalMount(), ned.Origin, ned.GtaHeadingRad(0));
 
         // Resting: the camera at ArduPilot's down 0 above the ground origin would be in the ground (white frame).
         var cam = PoseMapping.Map(link.CameraPose(groundZ, 84), origin, groundZ, 1920, 1080);
@@ -828,53 +989,32 @@ static class Tests
         var mount = body.ToWorld(frame.CameraMountM);
         Near(cam.X, mount.X, "resting camera x = mount", 1e-6); Near(cam.Y, mount.Y, "resting camera y = mount", 1e-6);
 
-        // Turned, rolled 15 deg right and pitched 10 deg up in the air, servos not driven: the mount
-        // moves with the body and the camera is fixed to it.
+        // Turned, rolled 15 deg right and pitched 10 deg up in the air: the mount moves with the
+        // body, and the gimbal's motors turn against the lean, so the resting camera still looks
+        // 45 deg down, level, toward the body's heading.
         body.Place(new Vec3(200, -930, 45), ned.GtaHeadingRad(70 * Math.PI / 180));
         double roll = 15 * Math.PI / 180, nose = 10 * Math.PI / 180;
         body.R = Vec3.Rotate(body.R, body.F, roll); body.U = Vec3.Rotate(body.U, body.F, roll);
         body.F = Vec3.Rotate(body.F, body.R, nose); body.U = Vec3.Rotate(body.U, body.R, nose);
+        link.Gimbal.Step(0.0025, body, ned);
         cam = PoseMapping.Map(link.CameraPose(groundZ, 84), origin, groundZ, 1920, 1080);
         mount = body.ToWorld(frame.CameraMountM);
         Near(cam.X, mount.X, "tilted camera x = mount", 1e-6); Near(cam.Y, mount.Y, "tilted camera y = mount", 1e-6);
         Near(cam.Z, mount.Z, "tilted camera z = mount", 1e-6);
         Check(Math.Abs(mount.Z - (45 + frame.CameraMountM.Z)) > 0.005, "the tilt moves the mount off its level height");
-        GtaCameraAxes(cam, out var cr, out var cf, out var cu);
-        Near((cr - body.R).Length + (cf - body.F).Length + (cu - body.U).Length, 0, "undriven gimbal: camera axes = body axes", 1e-5);
-
-        // ArduPilot's servo mount levels the camera by turning the servos against the lean: roll
-        // -15 (SERVO9 1300 us) undoes the body's 15 deg right roll.
-        body.Place(new Vec3(200, -930, 45), ned.GtaHeadingRad(70 * Math.PI / 180));
-        body.R = Vec3.Rotate(body.R, body.F, roll); body.U = Vec3.Rotate(body.U, body.F, roll);
-        DriveGimbal(link, 1300, 1500, 1500);
-        Near(link.GimbalRollDeg.Value, -15, "SERVO9 1300 us = roll -15"); Near(link.GimbalPitchDeg.Value, -45, "SERVO10 1500 us = pitch -45");
-        GtaCameraAxes(PoseMapping.Map(link.CameraPose(groundZ, 84), origin, groundZ, 1920, 1080), out cr, out cf, out cu);
-        Near(cr.Z, 0, "counter-rolled camera: right axis level", 1e-5);
+        GtaCameraAxes(cam, out var cr, out var cf, out _);
+        Near(cr.Z, 0, "held against the lean: right axis level", 1e-5);
         Near(Math.Asin(cf.Z) * 180 / Math.PI, -45, "camera looks 45 deg down", 1e-4);
         double bodyHeading = Math.Atan2(-body.F.X, body.F.Y), camHeading = Math.Atan2(-cf.X, cf.Y);
         Near(Math.IEEERemainder(camHeading - bodyHeading, 2 * Math.PI), 0, "camera faces the body's heading", 1e-5);
 
-        // Pan 30 deg right (SERVO11 1575 us) on a level body: the camera heading turns clockwise.
+        // Pan 30 deg right on a level body: the camera heading turns clockwise.
         body.Place(new Vec3(200, -930, 45), ned.GtaHeadingRad(70 * Math.PI / 180));
-        DriveGimbal(link, 1500, 1500, 1575);
-        Near(link.GimbalYawDeg.Value, 30, "SERVO11 1575 us = yaw 30");
+        link.Gimbal.SetTarget(-45, 30);
+        for (int i = 0; i < 400; i++) link.Gimbal.Step(0.0025, body, ned);
         var pose = link.CameraPose(groundZ, 84);
         Near(pose.YawDeg, 100, "NED camera yaw = body yaw 70 + pan 30", 1e-3);
         Near(pose.PitchDeg, -45, "NED camera pitch", 1e-3); Near(pose.RollDeg, 0, "NED camera roll", 1e-3);
-
-        // Straight down (pitch -90): Euler yaw comes from the camera's right axis instead of its forward axis.
-        body.Place(new Vec3(200, -930, 45), ned.GtaHeadingRad(70 * Math.PI / 180));
-        DriveGimbal(link, 1500, 1300, 1500);
-        pose = link.CameraPose(groundZ, 84);
-        Near(pose.PitchDeg, -90, "nadir pitch", 1e-3); Near(pose.YawDeg, 70, "nadir camera keeps the body's yaw", 1e-3);
-    }
-
-    /// <summary>One servo frame (motors off) with the given SERVO9/10/11 pulse widths.</summary>
-    static void DriveGimbal(PhysicsLink link, ushort roll, ushort pitch, ushort yaw)
-    {
-        var p = Pwm(16, 1000); p[8] = roll; p[9] = pitch; p[10] = yaw;
-        bool sent = false;
-        link.Pump(link.SimTimeS + 1, () => { if (sent) return null; sent = true; return new ServoFrame { FrameRate = 400, FrameCount = link.LastFrame + 1, Pwm = p }; }, _ => { }, () => false);
     }
 
     /// <summary>Camera axes (right, forward, up) of a GTA camera rotation (order 2: Rz(heading) Rx(pitch) Ry(roll)).</summary>
@@ -967,7 +1107,7 @@ static class Tests
             var dir = (e - a).Normalized;
             for (int i = 0; i < RangeSensors.Beams; i++)
                 if ((dir - RangeSensors.Direction(i, body.R, body.F, body.U)).Length < 1e-9)
-                    return i == 3 ? null : frame.RadiusM + 1 + 0.25 * i + (i == RangeSensors.Down ? RangeSensors.RestGapM : 0);
+                    return i == 3 ? null : frame.RadiusM + 1 + 0.25 * i + (i == RangeSensors.Down ? QuadBody.RestGapM : 0);
             return null;
         }
         var s = new RangeSensors(frame, 20, ByBeam);
@@ -1163,7 +1303,7 @@ static class Tests
         var frame = new Airframe();
         var body = new QuadBody(frame) { FloorZ = 0 };
         var ned = new NedFrame { Origin = new Vec3(0, 0, frame.RadiusM + 0.001) };
-        var link = new PhysicsLink(body, ned, new GimbalServo(), ned.Origin, 0);
+        var link = new PhysicsLink(body, ned, new GimbalMount(), ned.Origin, 0);
         var s = new RangeSensors(frame, 20, (a, b) => b.Z < a.Z ? a.Z : (double?)null);   // flat ground at z = 0
         var sent = new System.Collections.Generic.List<(uint seq, uint ms)>();
         var sentAt = new System.Collections.Generic.List<double>();
@@ -1185,5 +1325,334 @@ static class Tests
         Check(times && Math.Abs(sentAt[0] - 1 / 400.0) < 1e-12 && Math.Abs(sentAt[1] - 21 / 400.0) < 1e-9 && Math.Abs(sentAt[2] - 41 / 400.0) < 1e-9,
             "sweeps at sim 2.5, 52.5, 102.5 ms, seq 1..3, time_ms the sim time: " + string.Join(" ", sent));
         Near(s.Ranges[RangeSensors.Down], 0, "resting at the origin: down reads 0", 1e-6);
+    }
+
+    static void MiniJsonParse()
+    {
+        var o = (System.Collections.Generic.Dictionary<string, object>)MiniJson.Parse(
+            " {\"a\": [1, -2.5e1, true, false, null], \"s\": \"q\\\"\\\\\\n\\u00e9\", \"o\": {}} \n");
+        var a = (System.Collections.Generic.List<object>)o["a"];
+        Check(a.Count == 5 && (double)a[0] == 1 && (double)a[1] == -25 && (bool)a[2] && !(bool)a[3] && a[4] == null, "array values");
+        Check((string)o["s"] == "q\"\\\n\u00e9", "string escapes");
+        Check(MiniJson.Parse(MiniJson.Quote("tab\t\"x\"\\")) as string == "tab\t\"x\"\\", "Quote round-trips");
+        Check(MiniJson.Number(0.1) == "0.1" && MiniJson.Number(double.NaN) == "null", "numbers: round-trip text, NaN as null");
+        foreach (string bad in new[] { "", "{", "[1,]", "{\"a\":1}x", "{\"a\":1,\"a\":2}", "{a:1}", "\"\\x\"", "1e999", "tru" })
+        {
+            bool threw = false;
+            try { MiniJson.Parse(bad); } catch (FormatException) { threw = true; }
+            Check(threw, $"refuses {bad}");
+        }
+    }
+
+    static void SurveyGridCells()
+    {
+        Check(SurveyGrid.TryCellsPerSide(5, out int n) && n == 50, "5 m cells: 50 per 250 m tile");
+        Check(SurveyGrid.TryCellsPerSide(1, out n) && n == 250 && SurveyGrid.TryCellsPerSide(50, out n) && n == 5, "1 m and 50 m cells divide the tile");
+        Check(!SurveyGrid.TryCellsPerSide(4, out _) && !SurveyGrid.TryCellsPerSide(0.5, out _) && !SurveyGrid.TryCellsPerSide(100, out _)
+            && !SurveyGrid.TryCellsPerSide(0, out _) && !SurveyGrid.TryCellsPerSide(double.NaN, out _), "cells that do not divide the tile into 5..250 are refused");
+
+        // Tiles as horus/maps/tiles.py tiles_touched: floor(e / 250) by floor(n / 250), serpentine rows from the south.
+        var tiles = SurveyGrid.Tiles(-10, -10, 10, 260);
+        string order = string.Join(" ", tiles.ConvertAll(t => t.ToString()));
+        Check(order == "-1_-1 0_-1 1_-1 1_0 0_0 -1_0", "tile order: " + order);
+        Check(SurveyGrid.Tiles(0, 0, 249.9, 249.9).Count == 1 && SurveyGrid.Tiles(0, 0, 250, 250).Count == 4, "a box edge on 250 touches the next tile");
+
+        var t = new SurveyTileKey(2, -3);
+        SurveyGrid.CellCentreNed(t, 0, 0, 5, out double north, out double east);
+        Near(east, 502.5, "first cell east"); Near(north, -747.5, "first cell north");
+        SurveyGrid.CellCentreNed(t, 49, 49, 5, out north, out east);
+        Near(east, 747.5, "last cell east"); Near(north, -502.5, "last cell north");
+        SurveyGrid.CellCentreNed(t, 3, 0, 5, out north, out east);
+        Near(east, 517.5, "i runs east"); Near(north, -747.5, "i keeps the row");
+
+        // Cell centres in GTA through PoseMapping: the same place the camera would be at that NED position.
+        SurveyGrid.CellCentreGta(t, 0, 0, 5, Legion, out double x, out double y);
+        Near(x, 195 + 502.5, "Legion heading 0: GTA x = origin x + east"); Near(y, -933 - 747.5, "GTA y = origin y + north");
+        foreach (double heading in new[] { 0.0, 37.0, 90.0, -120.0 })
+        {
+            var o = new Origin { X = 100, Y = 50, HeadingDeg = heading };
+            SurveyGrid.CellCentreGta(t, 7, 11, 5, o, out x, out y);
+            SurveyGrid.CellCentreNed(t, 7, 11, 5, out north, out east);
+            var cam = MapNed(north, east, 0, o);
+            Near(x, cam.X, $"cell x = camera x at heading {heading}", 1e-9); Near(y, cam.Y, $"cell y = camera y at heading {heading}", 1e-9);
+        }
+    }
+
+    static void SurveyTileFormat()
+    {
+        Check(SurveyTile.Decimetres(29.69) == 297 && SurveyTile.Decimetres(-0.05) == -1 && SurveyTile.Decimetres(1500) == 15000, "decimetres, half away from zero");
+        Check(SurveyTile.Decimetres(null) == SurveyTile.NoHit && SurveyTile.Decimetres(double.NaN) == SurveyTile.NoHit, "no hit is the sentinel");
+        Check(SurveyTile.Decimetres(-4000) == -32767 && SurveyTile.Decimetres(4000) == 32767, "out of range clamps above the sentinel");
+
+        var key = new SurveyTileKey(-3, 7);
+        var h = new short[25];
+        for (int k = 0; k < h.Length; k++) h[k] = (short)(k * 10 - 50);
+        h[0] = 297; h[3] = SurveyTile.NoHit; h[24] = SurveyTile.NoHit;
+        byte[] b = SurveyTile.Encode(key, 5, 50, h);
+        Check(b.Length == SurveyTile.HeaderSize + 50, $"24-byte header + 2 bytes per cell ({b.Length})");
+        Check(b[0] == 'H' && b[1] == 'S' && b[2] == 'R' && b[3] == 'V' && b[4] == 1 && b[5] == 0 && b[6] == 5 && b[7] == 0, "magic, version 1, n");
+        Check(b[8] == 0xFD && b[9] == 0xFF && b[10] == 0xFF && b[11] == 0xFF && b[12] == 7, "tile x -3, y 7 little-endian");
+        Check(BitConverter.ToSingle(b, 16) == 50f && BitConverter.ToUInt32(b, 20) == 23, "cell_m and the hit count");
+        Check(b[24] == 0x29 && b[25] == 0x01 && b[30] == 0x00 && b[31] == 0x80, "cell 0 = 297 dm, cell 3 = 0x8000 no hit");
+        Check(SurveyTile.TryDecode(b, out var k2, out int n2, out double cell2, out var h2, out string err)
+            && k2.X == -3 && k2.Y == 7 && n2 == 5 && cell2 == 50 && System.Linq.Enumerable.SequenceEqual(h, h2), "round trip: " + err);
+
+        Check(!SurveyTile.TryDecode(b[..^1], out _, out _, out _, out _, out err) && err.Contains("bytes"), "truncated file refused: " + err);
+        var bad = (byte[])b.Clone(); bad[0] = (byte)'X';
+        Check(!SurveyTile.TryDecode(bad, out _, out _, out _, out _, out _), "wrong magic refused");
+        bad = (byte[])b.Clone(); bad[4] = 2;
+        Check(!SurveyTile.TryDecode(bad, out _, out _, out _, out _, out _), "version 2 refused");
+        bad = (byte[])b.Clone(); bad[30] = 0; bad[31] = 0;
+        Check(!SurveyTile.TryDecode(bad, out _, out _, out _, out _, out err) && err.Contains("hit count"), "a cell changed under the header refused");
+
+        string dir = TempDir();
+        try
+        {
+            string path = Path.Combine(dir, SurveyTile.FileName(key));
+            Check(Path.GetFileName(path) == "-3_7.bin", "file name <x>_<y>.bin");
+            SurveyTile.WriteAtomic(path, new byte[] { 1 });
+            SurveyTile.WriteAtomic(path, b);
+            Check(System.Linq.Enumerable.SequenceEqual(File.ReadAllBytes(path), b) && !File.Exists(path + ".tmp"), "atomic rewrite replaces the file, no temporary left");
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    static void SurveyRequestParsing()
+    {
+        Check(SurveyRequest.TryParse("{\"box\": [-500, -500.5, 500, 500]}", out var r, out string err), "minimal request: " + err);
+        Check(r.MinN == -500 && r.MinE == -500.5 && r.MaxN == 500 && r.MaxE == 500 && r.CellM == 5 && r.Output == "HorusGtaSurvey"
+            && r.SettleS == 1 && r.LoadTimeoutS == 10 && r.LoadAttempts == 3, "box order [min_n, min_e, max_n, max_e] and defaults");
+        Check(SurveyRequest.TryParse("{\"box\":[-6237.1,-4436.4,8988.9,7347.1],\"cell_m\":5,\"output\":\"whole_map-1.a\",\"settle_s\":0,\"load_timeout_s\":8,\"load_attempts\":2}",
+            out r, out err) && r.Output == "whole_map-1.a" && r.SettleS == 0 && r.LoadTimeoutS == 8 && r.LoadAttempts == 2, "full request (the map's bounds): " + err);
+        foreach (var (json, why) in new[]
+        {
+            ("{}", "box is required"), ("[1]", "not a JSON object"), ("{\"box\": [1, 2, 3]}", "box must be"),
+            ("{\"box\": [10, 0, 10, 5]}", "min_n < max_n"), ("{\"box\": [0, 0, 1, \"5\"]}", "box must be"), ("{\"box\": [0, 0, 1, 25000]}", "box must be"),
+            ("{\"box\": [0, 0, 1, 1], \"cell_m\": 4}", "cell_m"), ("{\"box\": [0, 0, 1, 1], \"output\": \"../x\"}", "output"),
+            ("{\"box\": [0, 0, 1, 1], \"output\": \"a/b\"}", "output"), ("{\"box\": [0, 0, 1, 1], \"output\": \"\"}", "output"),
+            ("{\"box\": [0, 0, 1, 1], \"load_attempts\": 1.5}", "load_attempts"), ("{\"box\": [0, 0, 1, 1], \"load_timeout_s\": 1}", "load_timeout_s"),
+            ("{\"box\": [0, 0, 1, 1], \"cells\": 5}", "unknown key \"cells\""), ("box=1", "not JSON"),
+        })
+            Check(!SurveyRequest.TryParse(json, out r, out err) && r == null && err.Contains(why), $"{json} refused with '{why}' (got '{err}')");
+    }
+
+    /// <summary>A world for the survey: a top surface per GTA x, y, water, and a wall clock that each ray advances by 0.25 ms (the in-game cost).</summary>
+    sealed class SurveyWorld
+    {
+        public double ClockS;
+        public Func<double, double, double?> Top = (x, y) => 30;
+        public Func<double, double, bool> Water = (x, y) => false;
+        public int Rays, RaysThisTick, MaxRaysPerTick;
+        public readonly System.Collections.Generic.List<(double X, double Y, double Z)> Focus = new System.Collections.Generic.List<(double, double, double)>();
+    }
+
+    static string TempDir()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "horus_survey_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    static SurveyRun NewSurvey(string dir, string json, SurveyWorld w, Origin? origin = null)
+    {
+        Check(SurveyRequest.TryParse(json, out var req, out string err), "survey request parses: " + err);
+        return new SurveyRun(req, origin ?? Legion, 29.69, "probe", 0.121, dir, Path.Combine(dir, "HorusGtaSurvey.progress.json"))
+        {
+            CastDown = (x, y) => { w.ClockS += 0.00025; w.Rays++; w.RaysThisTick++; return w.Top(x, y); },
+            IsWater = (x, y) => w.Water(x, y),
+            KeepLoaded = (x, y, z) => w.Focus.Add((x, y, z)),
+            Clock = () => w.ClockS,
+        };
+    }
+
+    /// <summary>Tick at 30 Hz with a 10 ms budget until the survey ends; the number of ticks.</summary>
+    static int RunSurvey(SurveyRun run, SurveyWorld w, ref double now, int maxTicks = 20000, Func<int, bool> before = null)
+    {
+        for (int tick = 0; tick < maxTicks; tick++)
+        {
+            if (before != null && !before(tick)) continue;
+            w.RaysThisTick = 0;
+            bool going = run.Step(now, 0.010);
+            w.MaxRaysPerTick = Math.Max(w.MaxRaysPerTick, w.RaysThisTick);
+            now += 1 / 30.0;
+            if (!going) return tick;
+        }
+        return maxTicks;
+    }
+
+    static System.Collections.Generic.Dictionary<string, object> ReadJson(string path) =>
+        (System.Collections.Generic.Dictionary<string, object>)MiniJson.Parse(File.ReadAllText(path));
+
+    static short[] ReadTile(string folder, int x, int y)
+    {
+        Check(SurveyTile.TryDecode(File.ReadAllBytes(Path.Combine(folder, $"{x}_{y}.bin")), out var k, out _, out _, out var h, out string err)
+            && k.X == x && k.Y == y, $"tile {x}_{y} decodes: {err}");
+        return h;
+    }
+
+    const string TwoTiles = "{\"box\": [0, 0, 10, 260], \"cell_m\": 25, \"output\": \"out\", \"settle_s\": 0.5}";
+
+    static void SurveyRunWritesTiles()
+    {
+        string dir = TempDir();
+        try
+        {
+            // A 60 m block over GTA x 200..260 (east 5..65 from Legion), ground at z 30 elsewhere.
+            var w = new SurveyWorld { Top = (x, y) => x >= 200 && x < 260 ? 60.04 : 30 };
+            var run = NewSurvey(dir, TwoTiles, w);
+            Check(run.Begin(0), "survey begins");
+            Check(run.Tiles.Count == 2 && run.CellsPerSide == 10, "two tiles of 10x10 cells");
+            int settleTicks = 0;
+            double now = 0;
+            int ticks = RunSurvey(run, w, ref now, before: tick =>
+            {
+                // Ticks between the passing probes and the first cast (only the first tile: tile 2 is already streamed).
+                if (run.Rays == 0 && run.ProbeRays >= 5) settleTicks++;
+                return true;
+            });
+            Check(run.State == "done" && run.TilesWritten == 2 && run.Rays == 200, $"done: {run.TilesWritten} tiles, {run.Rays} rays ({run.State} {run.Message})");
+            Check(ticks < 200, $"finished in {ticks} ticks");
+            Check(w.MaxRaysPerTick <= 41 && w.MaxRaysPerTick >= 40, $"casting stops at the 10 ms budget: at most {w.MaxRaysPerTick} rays of 0.25 ms per tick");
+            Check(settleTicks >= 15, $"probes passed, then the tile stays streamed settle_s 0.5 before casting ({settleTicks} ticks at 30 Hz)");
+            Check(w.Focus.Count > 0 && Math.Abs(w.Focus[0].X - (195 + 125)) < 1e-9 && Math.Abs(w.Focus[0].Y - (-933 + 125)) < 1e-9, "the focus goes to the first tile's centre");
+            Check(w.Focus.Exists(f => Math.Abs(f.X - (195 + 375)) < 1e-9) && Math.Abs(w.Focus[w.Focus.Count - 1].Z - 30) < 1e-9, "then to the second, at the centre probe's ground z");
+
+            string folder = Path.Combine(dir, "out");
+            var t0 = ReadTile(folder, 0, 0);
+            for (int j = 0; j < 10; j++)
+                for (int i = 0; i < 10; i++)
+                {
+                    double gx = 195 + (i + 0.5) * 25;
+                    short want = (short)(gx >= 200 && gx < 260 ? 600 : 300);
+                    if (t0[j * 10 + i] != want) Check(false, $"tile 0_0 cell i {i} j {j}: {t0[j * 10 + i]} dm, want {want}");
+                }
+            Check(t0[0] == 600 && t0[1] == 600 && t0[2] == 600 && t0[3] == 300, "the block covers cells 0-2 of each row (x 207.5, 232.5, 257.5)");
+            Check(Array.TrueForAll(ReadTile(folder, 1, 0), v => v == 300), "tile 1_0 is ground");
+
+            var meta = ReadJson(Path.Combine(folder, SurveyRun.MetadataFile));
+            Check((double)meta["home_ground_z"] == 29.69 && (string)meta["home_ground_source"] == "probe" && (double)meta["rest_above_ground_m"] == 0.121
+                && (double)meta["cell_m"] == 25 && (double)meta["cells_per_side"] == 10, "survey.json records the home ground z and the grid");
+            var o = (System.Collections.Generic.Dictionary<string, object>)meta["origin"];
+            Check((double)o["x"] == 195 && (double)o["y"] == -933 && (double)o["heading_deg"] == 0, "survey.json records [origin]");
+            var p = ReadJson(Path.Combine(dir, "HorusGtaSurvey.progress.json"));
+            Check((string)p["state"] == "done" && (double)p["tiles_total"] == 2 && (double)p["tiles_done"] == 2 && (double)p["rays"] == 200
+                && ((System.Collections.Generic.List<object>)p["unloaded"]).Count == 0 && p["current"] == null, "progress: done, 2 of 2, 200 rays");
+            Near((double)p["rays_per_s"], 4000, "rays per second while casting (0.25 ms each)", 1);
+            Check(Directory.GetFiles(folder, "*.tmp").Length == 0, "no temporary files left");
+
+            // SITL connects mid-cast: the run suspends, and the tile starts again (load, settle, all its cells) on resume.
+            string dir2 = Path.Combine(dir, "again");
+            Directory.CreateDirectory(dir2);
+            var w2 = new SurveyWorld { Top = w.Top };
+            var again = NewSurvey(dir2, TwoTiles, w2);
+            again.Begin(0);
+            now = 0;
+            bool suspended = false;
+            long raysAtSuspend = 0;
+            RunSurvey(again, w2, ref now, before: tick =>
+            {
+                if (!suspended && again.Rays > 0)
+                {
+                    raysAtSuspend = again.Rays;
+                    again.Suspend(now, "SITL connected");
+                    suspended = true;
+                    Check(ReadJson(Path.Combine(dir2, "HorusGtaSurvey.progress.json"))["state"] as string == "suspended", "progress shows suspended");
+                    Check(again.Step(now, 0.010) && again.Rays == raysAtSuspend, "a suspended run casts nothing and is not over");
+                    again.Resume(now);
+                }
+                return true;
+            });
+            Check(suspended && raysAtSuspend > 0 && raysAtSuspend < 100 && again.State == "done" && again.Rays == 200 + raysAtSuspend,
+                $"resumed run re-casts the interrupted tile: {again.Rays} rays, {raysAtSuspend} before the suspension");
+            Check(System.Linq.Enumerable.SequenceEqual(ReadTile(Path.Combine(dir2, "out"), 0, 0), t0), "and writes the same tile");
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    static void SurveyResumes()
+    {
+        string dir = TempDir();
+        try
+        {
+            var w = new SurveyWorld();
+            double now = 0;
+            var first = NewSurvey(dir, TwoTiles, w);
+            first.Begin(now);
+            RunSurvey(first, w, ref now);
+            string folder = Path.Combine(dir, "out");
+
+            // Restart: both tiles are on disk, nothing is cast.
+            var w2 = new SurveyWorld();
+            var second = NewSurvey(dir, TwoTiles, w2);
+            Check(second.Begin(now) && second.TilesSkipped == 2, $"restart skips the written tiles ({second.TilesSkipped})");
+            RunSurvey(second, w2, ref now);
+            Check(second.State == "done" && w2.Rays == 0 && w2.Focus.Count == 0, "and casts nothing");
+
+            // A truncated tile (the game died while writing it without the rename) is surveyed again.
+            string path = Path.Combine(folder, "1_0.bin");
+            File.WriteAllBytes(path, File.ReadAllBytes(path)[..100]);
+            var w3 = new SurveyWorld { Top = (x, y) => 31 };
+            var third = NewSurvey(dir, TwoTiles, w3);
+            Check(third.Begin(now) && third.TilesSkipped == 1, "the truncated tile is not skipped");
+            RunSurvey(third, w3, ref now);
+            Check(third.TilesWritten == 1 && third.Rays == 100 && Array.TrueForAll(ReadTile(folder, 1, 0), v => v == 310), "only it is surveyed again");
+
+            // The folder holds another survey: refused, nothing touched.
+            var w4 = new SurveyWorld();
+            var other = NewSurvey(dir, TwoTiles.Replace("\"cell_m\": 25", "\"cell_m\": 50"), w4);
+            Check(!other.Begin(now) && other.State == "error" && other.Message.Contains("another cell size"), "another cell size refused: " + other.Message);
+            var p = ReadJson(Path.Combine(dir, "HorusGtaSurvey.progress.json"));
+            Check((string)p["state"] == "error" && ((string)p["message"]).Contains("new output folder"), "progress reports the error");
+            var moved = NewSurvey(dir, TwoTiles, w4, new Origin { X = 196, Y = -933, HeadingDeg = 0 });
+            Check(!moved.Begin(now) && moved.Message.Contains("another origin"), "another origin refused: " + moved.Message);
+            Check(Array.TrueForAll(ReadTile(folder, 1, 0), v => v == 310) && w4.Rays == 0, "the refused runs cast and wrote nothing");
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    static void SurveyUnloadedAndWaterTiles()
+    {
+        string dir = TempDir();
+        try
+        {
+            // Tile 1_0 (GTA x 445..695) never loads: no ray hits and it is not water.
+            const string Req = "{\"box\": [0, 0, 10, 260], \"cell_m\": 25, \"output\": \"out\", \"settle_s\": 0, \"load_timeout_s\": 5, \"load_attempts\": 2}";
+            var w = new SurveyWorld { Top = (x, y) => x < 445 ? 30 : (double?)null };
+            var run = NewSurvey(dir, Req, w);
+            run.Begin(0);
+            double now = 0;
+            int ticks = RunSurvey(run, w, ref now);
+            string folder = Path.Combine(dir, "out");
+            Check(run.State == "done" && run.TilesWritten == 1 && run.Unloaded.Count == 1 && run.Unloaded[0].X == 1, "tile 1_0 listed as unloaded");
+            Check(now >= 10 && now < 11, $"after 2 attempts of 5 s ({now:F2} s)");
+            Check(!File.Exists(Path.Combine(folder, "1_0.bin")) && File.Exists(Path.Combine(folder, "0_0.bin")), "no file for the unloaded tile");
+            var p = ReadJson(Path.Combine(dir, "HorusGtaSurvey.progress.json"));
+            var unloaded = (System.Collections.Generic.List<object>)p["unloaded"];
+            Check(unloaded.Count == 1 && (double)((System.Collections.Generic.List<object>)unloaded[0])[0] == 1 && ((string)p["message"]).Contains("1 tile(s) unloaded"),
+                "progress lists it");
+
+            // The next run retries it; now it is sea: every probe stands on water, nothing hits.
+            var sea = new SurveyWorld { Top = (x, y) => x < 445 ? 30 : (double?)null, Water = (x, y) => x >= 445 };
+            var retry = NewSurvey(dir, Req, sea);
+            Check(retry.Begin(0) && retry.TilesSkipped == 1, "the retry skips the written tile");
+            now = 0;
+            double castAt = -1;
+            RunSurvey(retry, sea, ref now, before: tick => { if (castAt < 0 && retry.Rays > 0) castAt = now; return true; });
+            Check(retry.State == "done" && retry.Unloaded.Count == 0 && retry.TilesWritten == 1, "the sea tile is written");
+            Check(castAt >= SurveyRun.WaterWaitS, $"an all-water tile waits {SurveyRun.WaterWaitS:g} s before casting ({castAt:F2} s)");
+            Check(Array.TrueForAll(ReadTile(folder, 1, 0), v => v == SurveyTile.NoHit), "its cells are no-hit");
+            Check(Math.Abs(sea.Focus[sea.Focus.Count - 1].Z) < 1e-9, "the focus goes to sea level over water");
+
+            // A probe point neither hit nor water keeps a tile from loading even when the others hit.
+            string dir2 = Path.Combine(dir, "partial");
+            Directory.CreateDirectory(dir2);
+            var holes = new SurveyWorld { Top = (x, y) => Math.Abs(x - (195 + 62.5)) < 1 && Math.Abs(y - (-933 + 62.5)) < 1 ? (double?)null : 30 };
+            var partial = NewSurvey(dir2, "{\"box\": [0, 0, 10, 10], \"cell_m\": 25, \"output\": \"out\", \"load_timeout_s\": 5, \"load_attempts\": 1}", holes);
+            partial.Begin(0);
+            now = 0;
+            RunSurvey(partial, holes, ref now);
+            Check(partial.Unloaded.Count == 1 && partial.Rays == 0, "one silent quadrant probe: unloaded, no cells cast");
+        }
+        finally { Directory.Delete(dir, true); }
     }
 }

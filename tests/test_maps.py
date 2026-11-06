@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,12 @@ class _Executor:
         pass
 
 
-def _fixture_map(tmp_path):
+def _fixture_map(tmp_path, **changes):
+    """The fixture map as the gta provider reads it: a tile directory (``changes`` add features to layers)."""
+    from horus.maps.model import load_map_file
+    from horus.maps.tiles import write_tile_directory
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "map.json"
     path.write_text(json.dumps({
         "schema": "horus-map/1",
@@ -37,7 +43,11 @@ def _fixture_map(tmp_path):
         "walkable": [{"kind": "footpath", "outline": [[90, -5], [90, 5], [110, 5], [110, -5]]}],
         "obstacles": [{"kind": "building", "outline": [[300, 300], [300, 310], [310, 310], [310, 300]]}],
     }))
-    return path
+    data = load_map_file(path)
+    for layer, features in changes.items():
+        data = replace(data, **{layer: getattr(data, layer) + tuple(features)})
+    write_tile_directory(data, tmp_path / "tiles", "gta")
+    return tmp_path / "tiles"
 
 
 def _mcp(map_settings, pose=Pose(0.0, 0.0, 10.0)):
@@ -104,8 +114,6 @@ def test_map_settings_reject_an_unknown_provider_and_a_provider_without_data():
         MapSettings(provider="google")
     with pytest.raises(ValueError, match="needs a data_path"):
         MapSettings(provider="gta")
-    with pytest.raises(ValueError, match="walkable_path needs a provider"):
-        MapSettings(walkable_path="walkable.json")
 
 
 def test_a_way_leaving_and_reentering_the_circle_is_split_into_its_inside_parts():
@@ -131,35 +139,42 @@ def test_gta_positions_convert_to_ned_as_the_mod_places_them():
     assert all(math.isclose(a, b, abs_tol=1e-9) for a, b in zip(game_to_ned(x, y, 195.0, -933.0, 35.0), (north, east)))
 
 
-def test_the_gta_map_is_cropped_to_the_radius_around_the_origin():
-    from horus.maps.gta import build_gta_map
+def test_the_gta_dumps_convert_to_ned_over_the_whole_map():
+    from horus.maps.gta import build_gta_map, overview_rule
 
     def node(x, y, street, links=(), **flags):
         return {"StreetName": street, "Position": {"X": x, "Y": y, "Z": 0.0},
                 "ConnectedNodes": [{"Node": other} for other in links], **flags}
 
     far = node(195.0, -333.0, "Far Rd")  # 600 m north
-    near = node(195.0, -903.0, "Strawberry Ave", IsPedCrossway=True)  # 30 m north
+    near = node(195.0, -903.0, "Strawberry Ave", IsPedCrossway=True, IsBackroad=True)  # 30 m north
     junction = node(225.0, -933.0, "Atlee St", links=[near, far], IsJunction=True)  # 30 m east
-    nodes = [{"Nodes": [far, near, junction]}]
+    track_end = node(500.0, -933.0, "Dirt Track", IsBackroad=True)
+    track = node(400.0, -933.0, "Dirt Track", links=[track_end], IsBackroad=True)
+    nodes = [{"Nodes": [far, near, junction, track_end, track]}]
     zones = [
         {"DisplayName": "Legion Square", "Bounds": [{"Minimum": {"X": 150, "Y": -980}, "Maximum": {"X": 250, "Y": -880}}]},
         {"DisplayName": "Far Zone", "Bounds": [{"Minimum": {"X": 1000, "Y": 1000}, "Maximum": {"X": 1100, "Y": 1100}}]},
     ]
     pois = {"worldBusStops": [{"Position": {"X": 195.0, "Y": -943.0}}, {"Position": {"X": 900.0, "Y": -933.0}}]}
+    origin = (195.0, -933.0, 0.0)
 
-    data = build_gta_map(nodes, zones, pois, (195.0, -933.0, 0.0), 100.0, "fixture", {})
+    data = build_gta_map(nodes, zones, pois, origin, "fixture", {})
 
     assert sorted((p.kind, p.name, p.north_m, p.east_m) for p in data.places) == [
         ("bus_stop", "Bus stop", -10.0, 0.0),
+        ("bus_stop", "Bus stop", 0.0, 705.0),
         ("crossing", "Crossing on Strawberry Ave", 30.0, 0.0),
         ("junction", "Atlee St / Far Rd / Strawberry Ave", 0.0, 30.0),
     ]
-    # Atlee St's two edges join into one polyline through the junction, cut at the 100 m circle.
-    (way,) = data.ways
-    assert way.name == "Atlee St" and way.points[:2] == ((30.0, 0.0), (0.0, 30.0))
-    assert math.isclose(math.dist(way.points[-1], (0.0, 0.0)), 100.0)
-    assert [a.name for a in data.areas] == ["Legion Square"]
+    # Atlee St's two edges join into one polyline through the junction; nothing is cropped.
+    ways = {way.name: way for way in data.ways}
+    assert ways["Atlee St"].points == ((30.0, 0.0), (0.0, 30.0), (600.0, 0.0))
+    assert ways["Dirt Track"].points == ((0.0, 205.0), (0.0, 305.0))
+    assert [a.name for a in data.areas] == ["Legion Square", "Far Zone"]
+    # The overview tiles keep roads that are mostly main-road nodes, not back roads.
+    overview = overview_rule(nodes, origin)
+    assert {name: overview(way) for name, way in ways.items()} == {"Atlee St": True, "Dirt Track": False}
 
 
 def test_navmesh_polygons_merge_into_outlines_with_holes():
@@ -179,20 +194,74 @@ def test_navmesh_polygons_merge_into_outlines_with_holes():
     assert road.contains((10.5, 0.5)) and road.contains((10.5, 1.5)) and not road.contains((10.5, 2.5))
 
 
-def test_the_walkable_layer_is_added_to_the_provider_from_its_own_file(tmp_path):
-    walkable = tmp_path / "walkable.json"
-    walkable.write_text(json.dumps({
-        "schema": "horus-map/1", "attribution": "navmesh fixture",
-        "walkable": [{"kind": "footpath", "outline": [[-5, -5], [-5, 5], [5, 5], [5, -5]],
-                      "holes": [[[-1, -1], [-1, 1], [1, 1], [1, -1]]]}],
-    }))
-    mcp = _mcp(MapSettings(provider="gta", data_path=str(_fixture_map(tmp_path)), walkable_path=str(walkable)))
+def _tile_mcp(tiles, executor=None, event_log=None):
+    return create_mcp(HorusConfig(map=MapSettings(provider="gta", data_path=str(tiles))), executor or _Executor(),
+                      FakeFlight(Pose(0.0, 0.0, 10.0)), None, event_log=event_log)
 
-    area = _call(mcp, "get_area_map", {"north_m": 0.0, "east_m": 0.0, "radius_m": 20.0})
 
-    assert area["attribution"] == "fixture; navmesh fixture"
-    (plaza,) = [w for w in area["walkable"] if w.get("holes")]
-    assert plaza["holes"] == [[[-1.0, -1.0], [-1.0, 1.0], [1.0, 1.0], [1.0, -1.0]]]
+def test_the_tiles_cover_the_map_at_three_levels_and_list_each_feature_once_per_level(tmp_path):
+    from horus.maps.model import Area, Place, Way
+
+    freeway = Way("freeway", tuple((0.0, float(e)) for e in range(-1000, 1001, 50)), "Del Perro Fwy")
+    mcp = _tile_mcp(_fixture_map(
+        tmp_path,
+        places=[Place("A St / B St", "junction", 300.0, 260.0), Place("Seat", "seat", 300.0, 270.0)],
+        ways=[freeway],
+        walkable=[Area("footpath", ((-300.0, -300.0), (-300.0, -240.0), (-240.0, -240.0), (-240.0, -300.0)))],
+    ))
+
+    def tile(level, x, y):
+        return _call(mcp, "get_map_tile", {"level": level, "x": x, "y": y, "passive": True})
+
+    def features(level, layer):
+        return {f["id"]: f for x, y, _ in index["tiles"][str(level)] for f in tile(level, x, y)[layer]}
+
+    index = _call(mcp, "get_map_index", {"passive": True})
+
+    assert index["levels"] == [{"level": 0, "size_m": 250}, {"level": 1, "size_m": 1000}, {"level": 2, "size_m": 4000}]
+    assert index["bounds"] == [-300.0, -1000.0, 900.0, 1000.0]
+    # Every listed tile answers with the index's version; its gzipped size adds up to the level's bytes.
+    for level, entries in index["tiles"].items():
+        assert index["bytes"][level] == sum(size for *_, size in entries)
+        assert {tile(int(level), x, y)["version"] for x, y, _ in entries} == {index["version"]}
+    # Tile (0, x, y) covers east [250x, 250x + 250) and north [250y, 250y + 250).
+    assert [json.loads(p["name"]) for p in tile(0, 1, 1)["places"]] == ["A St / B St", "Seat"]
+    assert (0, 1) not in {(x, y) for x, y, _ in index["tiles"]["0"]}
+    assert tile(0, 0, 1) == {"version": index["version"], "missing": True}
+    # A district in four tiles has one id in all of them.
+    assert len({f["id"] for x in (-1, 0) for y in (-1, 0) for f in tile(0, x, y)["areas"]}) == 1
+    # The freeway is cut into pieces at most a tile across that join end to start.
+    pieces = [f for _, f in sorted((tuple(map(int, i[1:].split("."))), f)
+                                   for i, f in features(0, "ways").items() if i.startswith("w2."))]
+    assert {json.loads(p["name"]) for p in pieces} == {"Del Perro Fwy"}
+    assert all(max(e for _, e in p["points"]) - min(e for _, e in p["points"]) <= 250 for p in pieces)
+    joined = [tuple(pieces[0]["points"][0])] + [tuple(point) for p in pieces for point in p["points"][1:]]
+    assert joined == list(freeway.points)
+    # Level 1: junctions but no seats, only large walkable ground; level 2: overview roads and areas.
+    assert sorted(json.loads(p["kind"]) for p in features(1, "places").values()) == ["junction"]
+    assert [f["outline"][0] for f in features(1, "walkable").values()] == [[-300.0, -300.0]]
+    assert sorted(json.loads(w["kind"]) for w in features(2, "ways").values()) == ["freeway", "road"]
+    assert [len(features(2, layer)) for layer in ("places", "walkable", "areas")] == [0, 0, 1]
+    with pytest.raises(Exception, match="level must be 0 to 2"):
+        tile(3, 0, 0)
+
+
+def test_get_area_map_and_find_place_answer_far_from_home_from_the_tiles(tmp_path):
+    from horus.maps.model import Place, Way
+
+    # A street 3.9 km from home crossing a tile edge, and a kiosk on it.
+    street = Way("road", ((3000.0, -2600.0), (3000.0, -2450.0), (3000.0, -2300.0)), "Far Street")
+    mcp = _tile_mcp(_fixture_map(tmp_path, places=[Place("Kiosk", "shop", 3000.0, -2450.0)], ways=[street]))
+
+    area = _call(mcp, "get_area_map", {"north_m": 3000.0, "east_m": -2450.0, "radius_m": 100.0})
+    (kiosk,) = _call(mcp, "find_place", {"query": "kiosk"})["places"]
+
+    assert [json.loads(p["name"]) for p in area["places"]] == ["Kiosk"]
+    # The street's pieces from two tiles come back as one way, clipped to the circle.
+    assert [(json.loads(w["name"]), w["points"]) for w in area["ways"]] == [
+        ("Far Street", [[3000.0, -2550.0], [3000.0, -2450.0], [3000.0, -2350.0]])]
+    assert (kiosk["north_m"], kiosk["east_m"], kiosk["distance_m"]) == (3000.0, -2450.0, round(math.hypot(3000, 2450), 1))
+    assert kiosk["bearing_deg"] == round(math.degrees(math.atan2(-2450, 3000)) % 360, 1)
 
 
 _OVERPASS_FIXTURE = Path(__file__).parent / "fixtures" / "overpass_small.json"  # synthetic, not OSM data
@@ -229,6 +298,10 @@ def test_an_osm_extract_maps_to_ned_layers_about_the_origin(tmp_path):
                              origin_longitude_deg=149.165237))
     (cafe,) = _call(moved, "find_place", {"query": "cafe"})["places"]
     assert (cafe["north_m"], cafe["east_m"]) == (-5.0, 15.0)
+    # The extract is served as tiles too.
+    index = _call(mcp, "get_map_index", {})
+    (x, y, _), *_ = index["tiles"]["0"]
+    assert index["provider"] == "osm" and _call(mcp, "get_map_tile", {"level": 0, "x": x, "y": y})["level"] == 0
 
 
 def test_the_flat_earth_conversion_round_trips():
@@ -264,3 +337,79 @@ def test_a_mark_survives_a_server_restart_in_the_same_run_and_its_name_stays_quo
     assert mark["name"] == json.dumps(_HOSTILE)
     # Another run starts empty.
     assert _call(_own_map_mcp(tmp_path / "other"), "find_place", {"query": "bus"})["places"] == []
+
+
+def test_the_tiles_are_versioned_and_rechecked_cheaply_without_counting_as_contact(tmp_path):
+    from horus.event_log import JsonlEventLog
+    from horus.maps.model import Place
+
+    class _SupervisedExecutor(_Executor):
+        contacts = 0
+
+        def note_supervisor_contact(self):
+            self.contacts += 1
+
+    executor = _SupervisedExecutor()
+    log = tmp_path / "events.jsonl"
+    mcp = _tile_mcp(_fixture_map(tmp_path), executor, JsonlEventLog(log))
+
+    index = _call(mcp, "get_map_index", {"passive": True})
+    version = index["version"]
+    assert (index["provider"], index["attribution"]) == ("gta", "fixture")
+    assert _call(mcp, "get_map_index", {"known_version": version, "passive": True}) == {
+        "version": version, "unchanged": True}
+    assert _call(mcp, "get_map_index", {"known_version": "stale", "passive": True}) == index
+    tile = _call(mcp, "get_map_tile", {"level": 0, "x": 0, "y": 0, "passive": True})
+    assert _call(mcp, "get_map_tile", {"level": 0, "x": 0, "y": 0, "known_version": version, "passive": True}) == {
+        "version": version, "unchanged": True}
+    assert (executor.contacts, log.exists()) == (0, False)
+
+    # The same map builds to the same bytes and version; a changed map gets a new version.
+    rebuilt = _fixture_map(tmp_path / "again")
+    assert (rebuilt / "index.json").read_bytes() == (tmp_path / "tiles" / "index.json").read_bytes()
+    assert (rebuilt / "0" / "0_0.json.gz").read_bytes() == (tmp_path / "tiles" / "0" / "0_0.json.gz").read_bytes()
+    assert _call(_tile_mcp(rebuilt), "get_map_tile", {"level": 0, "x": 0, "y": 0}) == tile
+    changed = _fixture_map(tmp_path / "changed", places=[Place("New kiosk", "shop", 5.0, 5.0)])
+    assert _call(_tile_mcp(changed), "get_map_index", {})["version"] != version
+    # Without a map provider there are no tiles, but the same shapes.
+    empty = _call(_mcp(MapSettings()), "get_map_index", {})
+    assert (empty["provider"], empty["tiles"], bool(empty["version"])) == ("none", {"0": [], "1": [], "2": []}, True)
+
+
+def test_the_live_map_carries_only_pose_marks_and_positioned_candidates(tmp_path):
+    from types import SimpleNamespace
+
+    from horus.event_log import JsonlEventLog
+
+    class _Perception:  # only what get_live_map reads
+        def list_candidates(self):
+            return [
+                SimpleNamespace(id=3, class_name=_HOSTILE, attributes={"distance_m": 12.345, "bearing": 0.1234567}),
+                SimpleNamespace(id=4, class_name="car", attributes={}),  # no ground position
+            ]
+
+    mcp = create_mcp(HorusConfig(), _Executor(), FakeFlight(Pose(1.234, -5.678, 9.999)), _Perception(),
+                     event_log=JsonlEventLog(tmp_path / "events.jsonl"))
+    _call(mcp, "mark_place", {"name": "pad", "north_m": 2.0, "east_m": 1.0})
+
+    live = _call(mcp, "get_live_map", {"passive": True})
+
+    assert live["vehicle_pose"] == {"north_m": 1.23, "east_m": -5.68, "up_m": 10.0}
+    assert live["candidates"] == [{"id": 3, "label": json.dumps(_HOSTILE), "distance_m": 12.3, "bearing": 0.1235}]
+    assert [(json.loads(mark["name"]), mark["north_m"]) for mark in live["marks"]] == [("pad", 2.0)]
+    assert set(live) == {"observed_at", "observation_age_s", "vehicle_pose", "heading_deg", "gimbal_yaw_deg",
+                         "marks", "candidates"}
+    assert live["gimbal_yaw_deg"] is None  # no gimbal: the camera faces the nose
+
+
+def test_the_live_map_reports_the_gimbal_pan_that_places_candidates(tmp_path):
+    from horus.event_log import JsonlEventLog
+    from tests.fakes import FakeGimbal
+
+    executor = _Executor()
+    executor.gimbal = FakeGimbal()
+    executor.gimbal.report(-30.0, 0.0, 60.04)
+    mcp = create_mcp(HorusConfig(), executor, FakeFlight(Pose(0.0, 0.0, 10.0)), None,
+                     event_log=JsonlEventLog(tmp_path / "events.jsonl"))
+
+    assert _call(mcp, "get_live_map", {"passive": True})["gimbal_yaw_deg"] == 60.0

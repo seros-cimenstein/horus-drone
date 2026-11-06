@@ -1,0 +1,67 @@
+#!/bin/sh
+# Turn the laptop panel off or on (Ctrl+Alt+] on Koko). Installed as
+# ~/.local/bin/screen-backlight-toggle; with no argument it toggles, `off` and `on` force a state
+# (`off` runs at login, so the panel stays off until you turn it on at the laptop).
+#
+# Two X screens (scripts/koko/display/horus-display two-screens): the panel is X screen :0.0's
+# only output, so switching that output off powers the panel down and leaves the HDMI dummy
+# (:0.1, the simulations) untouched; input does not wake it.
+#
+# One X screen (the old layout): xrandr cannot switch the panel off without Cinnamon stopping on
+# the dummy too, so it falls back to DPMS off (the same state as closing the lid) with a guard
+# that forces it off again after any input wakes it, until the next toggle. DPMS is per X server:
+# it switches the HDMI dummy off as well. The guard stops by itself when the lock screen is
+# active, so unlocking is never blind.
+set -eu
+
+two_screens() { xdpyinfo -display :0.1 >/dev/null 2>&1; }
+
+if two_screens; then
+  panel_on() { xrandr -d :0.0 | grep -q '^eDP connected [^(]*[0-9]x[0-9]'; }
+  case "${1:-toggle}" in
+    on) want=on ;;
+    off) want=off ;;
+    *) if panel_on; then want=off; else want=on; fi ;;
+  esac
+  if [ "$want" = off ]; then xrandr -d :0.0 --output eDP --off; else xrandr -d :0.0 --output eDP --auto; fi
+  exit
+fi
+
+PIDFILE="${XDG_RUNTIME_DIR:-/tmp}/screen-backlight-toggle.pid"
+DPMS=$(ls /sys/class/drm/card*-eDP-*/dpms | sed q)
+
+pid=$(cat "$PIDFILE" 2>/dev/null || true)
+guarding=no
+if [ -n "$pid" ] && grep -qs screen-backlight-toggle "/proc/$pid/cmdline"; then guarding=yes; fi
+case "${1:-toggle}" in
+  on) [ "$guarding" = yes ] || exit 0 ;;
+  off) [ "$guarding" = no ] || exit 0 ;;
+esac
+if [ "$guarding" = yes ]; then
+    kill "$pid"
+    while kill -0 "$pid" 2>/dev/null; do sleep 0.05; done
+    rm -f "$PIDFILE"
+    xset dpms force on
+    exit
+fi
+
+locked() {
+    gdbus call --session --dest org.cinnamon.ScreenSaver --object-path /org/cinnamon/ScreenSaver \
+        --method org.cinnamon.ScreenSaver.GetActive 2>/dev/null | grep -q true
+}
+
+(
+    trap 'exit 0' TERM
+    while :; do
+        read -r state <"$DPMS"
+        if [ "$state" = On ]; then
+            if locked; then
+                rm -f "$PIDFILE"
+                exit 0
+            fi
+            xset dpms force off
+        fi
+        sleep 0.1
+    done
+) </dev/null >/dev/null 2>&1 &
+echo $! >"$PIDFILE"

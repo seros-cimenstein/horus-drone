@@ -428,14 +428,14 @@ def test_gta_sweep_becomes_the_payload_sensors_distance_readings():
         _gta_datagram((1.0, 1.0, -0.5, 1.0, 1.0, 1.0, 1.0)),
     ],
 )
-def test_gta_bridge_rejects_anything_but_a_well_formed_sweep(datagram):
+def test_gta_range_bridge_rejects_anything_but_a_well_formed_sweep(datagram):
     from horus.tof_bridge.gta import decode_range_packet
 
     with pytest.raises(ValueError):
         decode_range_packet(datagram)
 
 
-def test_gta_bridge_forwards_sweeps_from_udp_and_reports_a_malformed_one_once():
+def test_gta_range_bridge_forwards_sweeps_from_udp_and_reports_a_malformed_one_once():
     import socket
     import time
 

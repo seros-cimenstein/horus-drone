@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>HORUS</title>
+  <rect width="512" height="512" rx="104" fill="#10233f"/>
+  <g id="mark">
+    <path d="M136 136L376 376M376 136L136 376" stroke="#7d93b2" stroke-width="40" stroke-linecap="round"/>
+    <circle cx="136" cy="136" r="76" fill="#3d7fd6"/>
+    <circle cx="376" cy="136" r="76" fill="#3d7fd6"/>
+    <circle cx="136" cy="376" r="76" fill="#3d7fd6"/>
+    <circle cx="376" cy="376" r="76" fill="#3d7fd6"/>
+    <path d="M128 256Q256 120 384 256Q256 392 128 256Z" fill="#ffffff"/>
+    <circle cx="256" cy="256" r="60" fill="#f5b301"/>
+    <circle cx="256" cy="256" r="28" fill="#10233f"/>
+  </g>
+</svg>

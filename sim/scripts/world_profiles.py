@@ -7,8 +7,9 @@ file. Paths are container paths; the parameter files form
 a colon-separated list that start_sim.sh concatenates in order (the HORUS_SITL_PARAM_FILE
 format). Generated worlds (horus_<kind>_p<seed>) get the procedural profile, the canonical
 horus_forest/horus_urban worlds the outdoor one and horus_indoor the indoor one; ``gta`` (the
-GTA V renderer, ``run.sh start --gta``, whose start_gta_sitl.sh appends gta.parm itself) gets
-horus_gta. Other worlds (e.g. upstream iris_runway) have no profile.
+GTA V world, ``run.sh start --gta``, whose start_gta_sitl.sh writes its own SITL overrides)
+gets horus_gta and no parameter fragments. Other worlds (e.g. upstream iris_runway) have no
+profile.
 
 Usage:
   world_profiles.py WORLD                     prints "CONFIG PARAM_FILES" on one line, or
@@ -38,12 +39,10 @@ class WorldProfile(NamedTuple):
 
 # (world stem pattern, config stem, parameter fragments in load order); first match wins.
 _PROFILES = (
-    (re.compile(GTA_WORLD), "horus_gta", ("gta",)),
+    (re.compile(GTA_WORLD), "horus_gta", ()),
     (re.compile(r"horus_indoor"), "horus", ("common", "indoor")),
-    (re.compile(r"horus_(?P<kind>forest|urban)_p.*"), "horus_procedural_{kind}",
-     ("common", "outdoor", "procedural_fence")),
-    (re.compile(r"horus_(?P<kind>forest|urban).*"), "horus_{kind}",
-     ("common", "outdoor", "canonical_fence")),
+    (re.compile(r"horus_(?P<kind>forest|urban)_p.*"), "horus_procedural_{kind}", ("common", "outdoor")),
+    (re.compile(r"horus_(?P<kind>forest|urban).*"), "horus_{kind}", ("common", "outdoor")),
 )
 
 

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=HORUS: laptop panel off
+Comment=With two X screens, switch the laptop panel off at login (Ctrl+Alt+] turns it on)
+Exec=sh -c 'xdpyinfo -display :0.1 >/dev/null 2>&1 && exec "$HOME/.local/bin/screen-backlight-toggle" off'
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=5
+NoDisplay=true

@@ -3,8 +3,4 @@
 !README.md
 !horus/
 !horus/**
-!sim/
-!sim/gui/
-!sim/gui/**
-sim/gui/**/__pycache__/
 horus/**/__pycache__/

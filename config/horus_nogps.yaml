@@ -1,6 +1,5 @@
 # GPS-free flight (optical flow) with AprilTag precision landing (perception on).
-# Propeller masks as config/horus.yaml (explained there); the altitude fence is ArduPilot's
-# (config/ardupilot/indoor.parm).
+# Propeller masks as config/horus.yaml (explained there).
 flight:
   gps_free_mode: true
 gimbal:

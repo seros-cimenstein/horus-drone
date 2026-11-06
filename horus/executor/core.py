@@ -157,8 +157,13 @@ class HorusExecutor:
         self._observed_mode: str | None = None
         self._pending_mode: tuple[str, float] | None = None
         self._pilot_override: str | None = None
-        # Earth-frame camera pitch HORUS keeps the gimbal at outside precision landing (look).
+        # The operator's last emergency (hold/rth/land) while it keeps control: the AI's flight
+        # tools are refused until the operator's next mission releases it (operator_release).
+        self._operator_lock: str | None = None
+        # Earth-frame camera pitch and nose-relative yaw HORUS keeps the gimbal at outside
+        # precision landing (look).
         self._look_pitch_deg = float(settings.default_gimbal_pitch_deg)
+        self._look_yaw_deg = 0.0
         self._precision = PrecisionLanding(self)
         self._worker: threading.Thread | None = None
         if autostart:
@@ -218,7 +223,9 @@ class HorusExecutor:
                 "observed_at": telemetry.observed_at,
                 "precision_landing": {"active": self._precision.active, **self._precision.stats},
                 "pilot_override": self._pilot_override,
+                "operator_lock": self._operator_lock,
                 "camera_pitch_deg": self._look_pitch_deg,
+                "camera_yaw_deg": self._look_yaw_deg,
             }
         attitude = None if self.gimbal is None else self.gimbal.attitude()
         snapshot["gimbal"] = None if attitude is None else attitude.as_dict()
@@ -263,6 +270,8 @@ class HorusExecutor:
         with self._lock:
             if self._pilot_override is not None:
                 raise RuntimeError(self._pilot_override_message())
+            if self._operator_lock is not None:
+                raise RuntimeError(self._operator_lock_message())
             if expected_epoch is not None and expected_epoch != self._emergency_epoch:
                 raise RuntimeError("an emergency or pilot override superseded this request")
             self._tasks[task_id] = task
@@ -320,7 +329,7 @@ class HorusExecutor:
     def _observe_mode(self, mode: str, armed: bool) -> None:
         """Yield to any armed flight-mode change HORUS did not command.
 
-        A pilot's RC mode switch or an autopilot failsafe (battery, fence, EKF) owns the vehicle
+        A pilot's RC mode switch or an autopilot failsafe (battery, EKF) owns the vehicle
         from then on: HORUS cancels its work and refuses flight commands instead of re-commanding
         GUIDED at the next task start, hold or command-TTL expiry. Switching back to GUIDED, or
         disarming, returns authority to HORUS.
@@ -709,27 +718,37 @@ class HorusExecutor:
         settings = self.gimbal.settings
         return max(settings.pitch_min_deg, min(settings.pitch_max_deg, requested))
 
+    def _gimbal_yaw(self, requested: float) -> float:
+        """``requested`` clamped to the gimbal's yaw range around the nose (call only with a gimbal)."""
+        limit = self.gimbal.settings.yaw_limit_deg
+        return max(-limit, min(limit, requested))
+
     def _aim_camera(self) -> None:
-        """Point the gimbal at the commanded pitch (``look``, else the configured default), nose-aligned."""
+        """Point the gimbal at the commanded pitch and yaw (``look``, else the configured default pitch, facing the nose)."""
         if self.gimbal is None:
             return
         with self._lock:
             pitch = self._gimbal_pitch(self._look_pitch_deg)
+            yaw = self._gimbal_yaw(self._look_yaw_deg)
         try:
-            self.gimbal.point(pitch, 0.0)
+            self.gimbal.point(pitch, yaw)
         except Exception as exc:  # camera aiming must never block flight
-            logger.warning("could not set gimbal pitch: %s", exc)
+            logger.warning("could not aim the gimbal: %s", exc)
 
-    def look(self, pitch_deg: float) -> dict[str, Any]:
-        """Tilt the gimbal to an earth-frame ``pitch_deg`` (negative down, -90 straight down).
+    def look(self, pitch_deg: float, yaw_deg: float = 0.0) -> dict[str, Any]:
+        """Point the gimbal: earth-frame ``pitch_deg`` (negative down, -90 straight down) and
+        ``yaw_deg`` relative to the nose (positive right, 0 = straight ahead).
 
-        The pitch holds through later skills, take-off and a preempted precision landing until
+        The direction holds through later skills, take-off and a preempted precision landing until
         changed. Refused without a gimbal (a fixed camera) or while it reports no attitude, under a
         pilot override, and while RTH/LAND own the camera for precision landing.
         """
         requested = float(pitch_deg)
+        requested_yaw = float(yaw_deg)
         if not math.isfinite(requested):
             raise ValueError("pitch_deg must be a finite number")
+        if not math.isfinite(requested_yaw):
+            raise ValueError("yaw_deg must be a finite number")
         if self.gimbal is None:
             raise RuntimeError(
                 "no gimbal is configured, so the camera is fixed; turn the vehicle to look around"
@@ -740,6 +759,7 @@ class HorusExecutor:
                 "treated as fixed; turn the vehicle to look around"
             )
         pitch = self._gimbal_pitch(requested)
+        yaw = self._gimbal_yaw(requested_yaw)
         with self._command_lock:
             with self._lock:
                 if self._pilot_override is not None:
@@ -747,14 +767,20 @@ class HorusExecutor:
                 if self._precision.fallback_mode is not None or self._precision.gimbal_requested_at is not None:
                     raise RuntimeError("RTH/LAND owns the camera for precision landing; look after it ends")
                 self._look_pitch_deg = pitch
-            self.gimbal.point(pitch, 0.0)
+                self._look_yaw_deg = yaw
+            self.gimbal.point(pitch, yaw)
         settings = self.gimbal.settings
+        limits = []
+        if pitch != requested:
+            limits.append(f"gimbal pitch limited to {settings.pitch_min_deg:g}..{settings.pitch_max_deg:g} deg")
+        if yaw != requested_yaw:
+            limits.append(f"gimbal yaw limited to ±{settings.yaw_limit_deg:g} deg from the nose")
         return {
             "requested_pitch_deg": requested,
             "pitch_deg": pitch,
-            "clamp_reason": None if pitch == requested else (
-                f"gimbal pitch limited to {settings.pitch_min_deg:g}..{settings.pitch_max_deg:g} deg"
-            ),
+            "requested_yaw_deg": requested_yaw,
+            "yaw_deg": yaw,
+            "clamp_reason": "; ".join(limits) or None,
         }
 
     def _safe_hold(self) -> None:
@@ -855,11 +881,17 @@ class HorusExecutor:
             with self._lock:
                 if expected_epoch is not None and expected_epoch != self._emergency_epoch:
                     return None
+                # Only the operator (or HORUS itself: source None, the link-loss RTH) may act on
+                # an operator emergency; the AI's own hold/rth/land would undo it.
+                if self._operator_lock is not None and source not in (None, "operator"):
+                    raise RuntimeError(self._operator_lock_message())
                 if self._pilot_override is not None:
                     if expected_epoch is not None:
                         return None
                     raise RuntimeError(self._pilot_override_message())
                 self._emergency_epoch += 1
+                if source == "operator":
+                    self._operator_lock = action
                 preempted = self._cancel_all_tasks_locked(f"preempted by emergency {action}")
                 self._holding_since = time.monotonic()
                 self._auto_rth_after_hold = action == "hold"
@@ -893,6 +925,18 @@ class HorusExecutor:
 
     def land(self, *, source: str | None = "executor") -> dict[str, Any]:
         return self._emergency("land", source=source)
+
+    def release_operator_lock(self) -> dict[str, Any]:
+        """End the operator's control after an operator emergency; the AI may fly again."""
+        with self._lock:
+            released, self._operator_lock = self._operator_lock, None
+        return {"released": released}
+
+    def _operator_lock_message(self) -> str:
+        return (
+            f"operator emergency {self._operator_lock} in effect: the operator has the drone, and "
+            "flight commands from the AI are refused until the operator's next mission"
+        )
 
     def _cancel_all_tasks_locked(self, reason: str) -> list[SkillTask]:
         """Cancel every queued/running task and clear the queue; call with _lock held."""

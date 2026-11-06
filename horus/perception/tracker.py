@@ -600,15 +600,27 @@ def _mark_seen(track: Track, step: _Step) -> None:
 
 
 def _camera_yaw_deg(pose: Any, max_age_s: float) -> float | None:
-    """Fresh vehicle heading at frame capture (the camera's yaw in a level-gimbal airframe)."""
+    """Fresh camera yaw at frame capture: the vehicle heading plus the gimbal's measured pan
+    (``gimbal_yaw_deg``, nose-relative). A frame without gimbal fields comes from a camera fixed to
+    the nose; a stale heading or gimbal sample leaves the yaw unknown."""
     if not isinstance(pose, Mapping):
         return None
-    heading, age = pose.get("heading_deg"), pose.get("heading_age_s")
-    if isinstance(heading, bool) or not isinstance(heading, (int, float)) or not math.isfinite(heading):
+    heading = _fresh_angle(pose, "heading_deg", "heading_age_s", max_age_s)
+    if heading is None:
+        return None
+    if "gimbal_yaw_deg" not in pose:
+        return heading
+    pan = _fresh_angle(pose, "gimbal_yaw_deg", "gimbal_age_s", max_age_s)
+    return None if pan is None else heading + pan
+
+
+def _fresh_angle(pose: Mapping[str, Any], key: str, age_key: str, max_age_s: float) -> float | None:
+    value, age = pose.get(key), pose.get(age_key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return None
     if isinstance(age, (int, float)) and not isinstance(age, bool) and age > max_age_s:
         return None
-    return float(heading)
+    return float(value)
 
 
 def _focal_px(frame_size: tuple[int, int] | None, hfov_deg: float | None) -> float | None:

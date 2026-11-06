@@ -1,6 +1,6 @@
 # Shared by every HORUS SITL profile (see sim/scripts/world_profiles.py for the compositions).
-# No fragment sets a key another fragment of the same load order sets; only alternatives for one
-# slot (indoor|outdoor, canonical_fence|procedural_fence) set the same keys, to different values.
+# No fragment sets a key another fragment of the same load order sets; only the alternatives for
+# one slot (indoor|outdoor) set the same keys, to different values.
 
 # MAVLink-backed horizontal proximity sectors: the ToF bridge sends DISTANCE_SENSOR, and
 # ArduPilot's simple avoidance brakes before obstacles instead of flying through them.
@@ -23,3 +23,8 @@ RNGFND1_MAX 4.0
 # touchdown starts with "PrecLand: Failsafe Measures" and hovers 7 s before descending. HORUS
 # runs its own AprilTag precision landing in GUIDED and hands touchdown to plain LAND.
 PLND_ENABLED 0
+
+# Simulated battery that never runs out (decided 2026-11-02): SITL's default 3.3 Ah pack drains
+# to 0 % in a few hours of hovering. 100,000 Ah lasts thousands of hours; the percentage stays
+# near 100 and no battery failsafe is configured.
+BATT_CAPACITY 100000000

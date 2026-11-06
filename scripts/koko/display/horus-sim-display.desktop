@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=HORUS: simulation screen at 1920x1080
+Comment=With two X screens, run the HDMI dummy (:0.1) at 1920x1080; it reports 3840x2160 as its preferred mode
+Exec=sh -c 'xdpyinfo -display :0.1 >/dev/null 2>&1 && exec xrandr -d :0.1 --output HDMI-A-0 --mode 1920x1080'
+X-GNOME-Autostart-enabled=true
+NoDisplay=true

@@ -1,6 +1,6 @@
 """The device side of the MAVLink gimbal-device protocol, for simulated gimbals.
 
-A simulator (the Gazebo gimbal, the GTA pose bridge) runs one endpoint: it announces itself with a
+A simulator (the Gazebo gimbal, the GTA gimbal bridge) runs one endpoint: it announces itself with a
 gimbal HEARTBEAT, takes HORUS's GIMBAL_DEVICE_SET_ATTITUDE setpoints and reports the attitude it
 measures as GIMBAL_DEVICE_ATTITUDE_STATUS, horizon-locked with nose-relative yaw. Setpoints in
 another frame are ignored.

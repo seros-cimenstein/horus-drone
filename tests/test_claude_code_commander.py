@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import sys
 from pathlib import Path
@@ -11,6 +12,10 @@ import pytest
 from horus.commander.agent import CommanderEvent, HorusCommander
 from horus.commander.backends import APICommanderBackend, ClaudeCodeSession
 from horus.config import CommanderSettings, ServerSettings
+from horus.event_log import JsonlEventLog
+
+# A stand-in camera picture: the bytes an MCP image block carries base64-encoded.
+_PICTURE = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 16
 
 
 def _fake_claude(tmp_path: Path, monkeypatch, *, crash_first: bool = False) -> tuple[Path, Path, Path, Path]:
@@ -95,7 +100,10 @@ def test_persistent_session_maps_queued_operator_messages_to_results(tmp_path, m
     assert "--verbose" in args and "--include-partial-messages" in args
     assert args[args.index("--allowedTools") + 1] == "mcp__horus__*"
     disallowed = args[args.index("--disallowedTools") + 1 : args.index("--append-system-prompt")]
-    assert "mcp__horus__wait_events" in disallowed
+    assert {
+        "mcp__horus__wait_events", "mcp__horus__operator_emergency", "mcp__horus__operator_release",
+        "mcp__horus__get_map_index", "mcp__horus__get_map_tile", "mcp__horus__get_live_map",
+    } <= set(disallowed)
     assert "mcp__horus__wait_for_event" not in disallowed
     assert args[args.index("--append-system-prompt") + 1] == "HORUS safety prompt"
     assert args[args.index("--max-turns") + 1] == "37"
@@ -140,6 +148,133 @@ def test_persistent_session_restarts_after_process_crash(tmp_path, monkeypatch):
     assert any(record["kind"] == "session_restarted" for record in records)
 
 
+# Behaves like Claude Code's stream-json input (probed 2026-11-01): each turn (one system/init,
+# one result) starts with the oldest queued message, even when several are queued; a message
+# that arrives during a turn is folded into it at the next tool-call boundary; one that arrives
+# after the last boundary waits and starts the next turn. So one `result` can answer several.
+_FOLDING_CLAUDE = """\
+import json, sys, threading, time
+queued, lock = [], threading.Lock()
+def read():
+    for line in sys.stdin:
+        message = json.loads(line)
+        if message.get('type') == 'user':
+            with lock:
+                queued.append(message['message']['content'][0]['text'])
+threading.Thread(target=read, daemon=True).start()
+def take(everything):
+    with lock:
+        taken = list(queued) if everything else queued[:1]
+        del queued[:len(taken)]
+    return taken
+turn = 0
+while True:
+    texts = take(False)
+    if not texts:
+        time.sleep(0.02)
+        continue
+    turn += 1
+    print(json.dumps({'type': 'system', 'subtype': 'init', 'mcp_servers': [{'name': 'horus'}]}), flush=True)
+    for boundary in range(2):  # two tool calls; queued messages are folded in after each
+        time.sleep(0.3)
+        texts += take(True)
+    time.sleep(0.3)  # the final answer: anything arriving now waits for the next turn
+    print(json.dumps({'type': 'result', 'subtype': 'success', 'result': f'turn {turn}: ' + ' | '.join(texts)}), flush=True)
+"""
+
+
+def test_messages_folded_into_a_running_turn_are_answered_instead_of_waiting_out_the_timeout(
+    tmp_path, monkeypatch
+):
+    import horus.commander.backends as backends
+
+    monkeypatch.setattr(backends, "_FOLDED_MESSAGE_GRACE_S", 0.3, raising=False)
+    executable = tmp_path / "folding-claude"
+    executable.write_text(f"#!{sys.executable}\n{_FOLDING_CLAUDE}", encoding="utf-8")
+    executable.chmod(0o755)
+    session = ClaudeCodeSession(
+        "http://127.0.0.1:8000/mcp", "token",
+        CommanderSettings(claude_command=str(executable), timeout_s=5.0), "system prompt",
+    )
+
+    async def scenario():
+        records = asyncio.create_task(_records(session))
+        # Two messages at once: the second is folded into the first one's turn.
+        both = await asyncio.gather(session.send("[operator] one"), session.send("[operator] two"))
+        # A mission, and an event that arrives while its turn runs (the GTA run's task_finished).
+        mission = asyncio.create_task(session.send("[operator] fly north"))
+        await asyncio.sleep(0.1)
+        folded = asyncio.create_task(session.send("[HORUS event] take_off finished"))
+        first = await asyncio.gather(mission, folded)
+        # HOME: its event starts a turn, the operator notice is folded into it, and the landing
+        # event arrives during the final answer, so it starts the next turn.
+        rth = asyncio.create_task(session.send("[HORUS event] emergency rth"))
+        await asyncio.sleep(0.05)
+        notice = asyncio.create_task(session.send("[operator emergency] rth executed"))
+        await asyncio.sleep(0.7)
+        landed = asyncio.create_task(session.send("[HORUS event] landed"))
+        second = await asyncio.gather(rth, notice, landed)
+        await session.close()
+        await records
+        return both, first, second
+
+    (one, two), (mission, folded), (rth, notice, landed) = asyncio.run(scenario())
+
+    # Every message is answered, none waits out timeout_s (before: TimeoutError, then a reset).
+    assert one == two == "turn 1: [operator] one | [operator] two"
+    assert mission.startswith("turn 2:") and "fly north" in mission
+    assert folded == mission  # folded into the mission's turn, answered by its result
+    assert rth.startswith("turn 3:") and "emergency rth" in rth
+    assert landed.startswith("turn 4:") and "landed" in landed
+    assert notice.startswith(("turn 3:", "turn 4:"))
+
+
+_SLOW_CLAUDE = """\
+import json, sys, time
+for line in sys.stdin:
+    if json.loads(line).get('type') != 'user':
+        continue
+    print(json.dumps({'type': 'system', 'subtype': 'init', 'mcp_servers': [{'name': 'horus'}]}), flush=True)
+    for step in range(STEPS):  # a long mission: a tool call and its result every 0.2 s
+        time.sleep(0.2)
+        print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': f'step {step}'}]}}), flush=True)
+    time.sleep(SILENCE)
+    print(json.dumps({'type': 'result', 'subtype': 'success', 'result': 'arrived'}), flush=True)
+"""
+
+
+@pytest.mark.parametrize(("steps", "silence", "answered"), [(8, 0.0, True), (0, 2.0, False)])
+def test_timeout_bounds_silence_not_a_long_mission_that_keeps_working(tmp_path, steps, silence, answered):
+    executable = tmp_path / "slow-claude"
+    executable.write_text(
+        f"#!{sys.executable}\n" + _SLOW_CLAUDE.replace("STEPS", str(steps)).replace("SILENCE", str(silence)),
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    session = ClaudeCodeSession(
+        "http://127.0.0.1:8000/mcp", "token",
+        CommanderSettings(claude_command=str(executable), timeout_s=0.8), "system prompt",
+    )
+
+    async def scenario():
+        records = asyncio.create_task(_records(session))
+        try:
+            return await session.send("[operator] fly to P1")
+        except TimeoutError as exc:
+            return exc
+        finally:
+            await session.close()
+            await records
+
+    outcome = asyncio.run(scenario())
+
+    # 8 steps take 1.6 s, twice timeout_s, but output never pauses for 0.8 s; 2 s of silence does.
+    if answered:
+        assert outcome == "arrived"
+    else:
+        assert isinstance(outcome, TimeoutError) and "wrote nothing" in str(outcome)
+
+
 def test_claude_stream_records_keep_thinking_tool_and_final_result_details():
     from horus.commander.backends import _claude_stream_records
 
@@ -157,6 +292,85 @@ def test_claude_stream_records_keep_thinking_tool_and_final_result_details():
     assert records[0]["text"] == "The pose is stale; read state first."
     result = _claude_stream_records({"type": "result", "subtype": "success", "result": "Done"})
     assert result == [{"kind": "final_result", "text": "Done", "subtype": "success"}]
+
+
+# Claude Code's stream-json for one HORUS tool call that returns a picture (its tool_result
+# carries Anthropic image blocks), plus one image from a tool that is not a HORUS tool.
+_LOOKING_CLAUDE = """\
+import json, os, sys
+picture = os.environ['HORUS_FAKE_PICTURE']
+print(json.dumps({'type': 'system', 'subtype': 'init', 'mcp_servers': [{'name': 'horus'}]}), flush=True)
+for line in sys.stdin:
+    image = {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': picture}}
+    print(json.dumps({'type': 'assistant', 'message': {'content': [
+        {'type': 'tool_use', 'id': 'toolu_look', 'name': 'mcp__horus__list_candidates', 'input': {}},
+        {'type': 'tool_use', 'id': 'toolu_other', 'name': 'mcp__other__screenshot', 'input': {}},
+    ]}}), flush=True)
+    print(json.dumps({'type': 'user', 'message': {'content': [
+        {'type': 'tool_result', 'tool_use_id': 'toolu_look', 'content': [{'type': 'text', 'text': '{"frame_id": 7}'}, image]},
+        {'type': 'tool_result', 'tool_use_id': 'toolu_other', 'content': [image]},
+    ]}}), flush=True)
+    print(json.dumps({'type': 'result', 'subtype': 'success', 'result': 'I see a plaza.'}), flush=True)
+"""
+
+
+def test_claude_code_image_results_become_ai_views_kept_out_of_events_and_the_log(tmp_path, monkeypatch):
+    encoded = base64.b64encode(_PICTURE).decode("ascii")
+    monkeypatch.setenv("HORUS_FAKE_PICTURE", encoded)
+    executable = tmp_path / "looking-claude"
+    executable.write_text(f"#!{sys.executable}\n{_LOOKING_CLAUDE}", encoding="utf-8")
+    executable.chmod(0o755)
+    settings = CommanderSettings(claude_command=str(executable), timeout_s=5.0)
+    events = []
+    log_path = tmp_path / "events.jsonl"
+    commander = HorusCommander(
+        "http://127.0.0.1:8000/mcp", "secret-token", settings,
+        event_log=JsonlEventLog(log_path), event_callback=events.append,
+    )
+    backend = ClaudeCodeSession("http://127.0.0.1:8000/mcp", "secret-token", settings, "prompt")
+    commander.backend = backend
+
+    async def scenario():
+        forward = asyncio.create_task(commander._forward_backend_records(backend))
+        response = asyncio.get_running_loop().create_future()
+        await commander._process_message(CommanderEvent("look once", response))
+        answer = await response
+        await backend.close()
+        await forward
+        return answer
+
+    assert asyncio.run(scenario()) == "I see a plaza."
+    views = [event for event in events if event["kind"] == "ai_view"]
+    # Only the HORUS tool's picture counts; the other tool's image is not what the AI pilot saw.
+    assert len(views) == 1
+    view = views[0]
+    assert {key: view[key] for key in ("source", "tool", "tool_use_id", "mime_type", "bytes")} == {
+        "source": "claude-code", "tool": "list_candidates", "tool_use_id": "toolu_look",
+        "mime_type": "image/jpeg", "bytes": len(_PICTURE),
+    }
+    assert commander.ai_views.get(view["view_id"]).data == _PICTURE
+    assert commander.ai_views.latest().view_id == view["view_id"] and len(commander.ai_views) == 1
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "ai_view" in log_text
+    assert all("image" not in event for event in events)
+    for serialized in (json.dumps(events), log_text):
+        assert encoded[:64] not in serialized
+
+
+def test_claude_stream_records_decode_image_tool_results_and_skip_invalid_ones():
+    from horus.commander.backends import _claude_stream_records
+
+    encoded = base64.b64encode(_PICTURE).decode("ascii")
+    records = _claude_stream_records({"type": "user", "message": {"content": [{
+        "type": "tool_result", "tool_use_id": "toolu_1", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": encoded}},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "not base64!"}},
+            {"type": "image", "source": {"type": "url", "url": "https://example.invalid/x.jpg"}},
+        ],
+    }]}})
+    assert [record["kind"] for record in records] == ["tool_result", "ai_view"]
+    assert records[0]["summary"] == "[3 image(s), payload omitted]"
+    assert records[1] == {"kind": "ai_view", "tool_use_id": "toolu_1", "mime_type": "image/png", "image": _PICTURE}
 
 
 def test_mcp_server_defaults_to_loopback_only():
@@ -307,7 +521,8 @@ def test_cancelling_a_queued_turn_keeps_the_active_turn_history(monkeypatch):
     assert _dangling_tool_calls(requests[-1]) == []
 
 
-def test_anthropic_backend_retains_images_returned_by_mcp_tools(monkeypatch):
+def test_anthropic_backend_retains_images_returned_by_mcp_tools_and_reports_them_as_ai_views(monkeypatch):
+    encoded = base64.b64encode(_PICTURE).decode("ascii")
     requests = []
     responses = [
         SimpleNamespace(content=[
@@ -333,7 +548,7 @@ def test_anthropic_backend_retains_images_returned_by_mcp_tools(monkeypatch):
                 isError=False,
                 content=[
                     SimpleNamespace(type="text", text='{"frame_id":7}'),
-                    SimpleNamespace(type="image", mimeType="image/jpeg", data="frame-data"),
+                    SimpleNamespace(type="image", mimeType="image/jpeg", data=encoded),
                 ],
             )
 
@@ -349,16 +564,22 @@ def test_anthropic_backend_retains_images_returned_by_mcp_tools(monkeypatch):
     async def scenario():
         result = await backend.send("[operator] inspect the current frame")
         await backend.close()
-        return result
+        return result, [dict(record) async for record in backend.stream_records()]
 
-    assert asyncio.run(scenario()) == "The frame is clear."
+    result, records = asyncio.run(scenario())
+    assert result == "The frame is clear."
     tool_result = requests[1][2]["content"][0]
     assert tool_result["type"] == "tool_result"
     assert tool_result["content"][1]["source"] == {
         "type": "base64",
         "media_type": "image/jpeg",
-        "data": "frame-data",
+        "data": encoded,
     }
+    # The picture the model received, for the control app (HorusCommander keeps it by id).
+    assert [record for record in records if record["kind"] == "ai_view"] == [{
+        "source": "anthropic", "kind": "ai_view", "tool": "get_frame", "tool_use_id": "frame-call",
+        "mime_type": "image/jpeg", "image": _PICTURE,
+    }]
 
 
 def test_api_backend_interrupt_cancels_active_and_lock_waiting_turns(monkeypatch):
@@ -434,8 +655,56 @@ def test_emergency_discards_operator_requests_queued_before_it_but_not_later_one
 
     result, (before, after) = asyncio.run(scenario())
 
-    assert session.calls == ["hold"]
+    assert session.calls == ["operator_emergency"]
     assert '"state":"HOLDING"' in result
     assert isinstance(before, RuntimeError) and "interrupted by an emergency" in str(before)
     assert after == "done"
     assert backend.sent == ["[operator] inspect the tree"]
+
+
+def test_the_operators_next_mission_or_reset_releases_the_emergency_lock_before_the_model_acts(
+    monkeypatch,
+):
+    monkeypatch.delenv("HORUS_EVENT_LOG", raising=False)
+    monkeypatch.delenv("HORUS_RUN_DIR", raising=False)
+    order = []
+
+    class Session:
+        async def call_tool(self, name, arguments):
+            order.append(("tool", name, dict(arguments)))
+            return SimpleNamespace(isError=False, content=[SimpleNamespace(type="text", text="{}")])
+
+    class Backend:
+        async def send(self, text):
+            order.append(("model", text))
+            return "done"
+
+        async def interrupt(self):
+            pass
+
+        async def reset(self):
+            order.append(("model", "reset"))
+
+    commander = HorusCommander("http://127.0.0.1:8000/mcp", "token", CommanderSettings())
+    commander._mcp_session = Session()
+    commander.backend = Backend()
+
+    async def scenario():
+        await commander.emergency("land")
+        mission = asyncio.create_task(commander.submit_task("take off again"))
+        await asyncio.sleep(0)
+        await commander._process_message(commander._events.get_nowait())
+        await mission
+        await commander.emergency("hold")
+        await commander.reset()
+
+    asyncio.run(scenario())
+
+    assert [entry for entry in order if entry[0] == "tool"] == [
+        ("tool", "operator_emergency", {"action": "land"}),
+        ("tool", "operator_release", {}),
+        ("tool", "operator_emergency", {"action": "hold"}),
+        ("tool", "operator_release", {}),
+    ]
+    # The lock ends before the model gets the operator's new mission, never after it.
+    assert order.index(("tool", "operator_release", {})) < order.index(("model", "[operator] take off again"))
