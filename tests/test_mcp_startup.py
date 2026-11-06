@@ -132,6 +132,28 @@ def test_flight_and_state_tools_work_with_perception_disabled():
     call_tool(mcp, "hold")
 
 
+def test_ai_flight_tools_are_refused_while_an_operator_emergency_holds_the_drone():
+    from horus.executor import HorusExecutor
+    from tests.fakes import executor_settings
+
+    flight = FakeFlight()
+    executor = HorusExecutor(flight, executor_settings(), autostart=False)
+    mcp = create_mcp(HorusConfig(), executor, flight, None, perception_unavailable_reason="off")
+
+    assert json.loads(call_tool(mcp, "operator_emergency", {"action": "rth"}))["state"] == "RTH"
+    assert json.loads(call_tool(mcp, "get_state"))["operator_lock"] == "rth"
+    for tool, arguments in (("hold", {}), ("land", {}), ("take_off", {"altitude_m": 2.0})):
+        with pytest.raises(Exception, match="operator emergency rth in effect"):
+            call_tool(mcp, tool, arguments)
+    assert flight.commands[-1] == ("rth",)
+    with pytest.raises(Exception, match="hold, rth or land"):
+        call_tool(mcp, "operator_emergency", {"action": "take_off"})
+
+    assert json.loads(call_tool(mcp, "operator_release")) == {"released": "rth"}
+    assert json.loads(call_tool(mcp, "hold"))["state"] == "HOLDING"
+    executor.close()
+
+
 def test_mission_brief_resource_returns_the_commander_prompt_text():
     import asyncio
 
@@ -399,6 +421,62 @@ def test_passive_state_polls_neither_count_as_supervision_nor_fill_the_event_log
     assert executor.contacts == 2
     assert [json.loads(line)["tool"] for line in path.read_text(encoding="utf-8").splitlines()] == [
         "get_state"
+    ]
+
+
+def test_passive_candidate_polls_neither_supervise_log_nor_replace_the_models_view(tmp_path):
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+    from mcp.types import ImageContent, TextContent
+
+    from horus.event_log import JsonlEventLog
+
+    candidate = Candidate(
+        id=7, bbox=(10.0, 20.0, 100.0, 150.0), class_name="person", confidence=0.9,
+        frame_id=9, timestamp=time.monotonic(),
+    )
+    frame = Frame(
+        frame_id=9, timestamp=time.monotonic(), image=np.zeros((480, 640, 3), dtype=np.uint8),
+        pose={"north_m": 1.0}, candidates=(candidate,),
+    )
+
+    class Perception:
+        def camera_status(self):
+            return {"camera": "streaming", "last_frame_age_s": 0.0, "reason": None}
+
+        def get_frame(self, frame_id=None):
+            return frame
+
+    class _SupervisedExecutor(_Executor):
+        contacts = 0
+
+        def note_supervisor_contact(self):
+            self.contacts += 1
+
+    class Publisher:
+        published = 0
+
+        def publish(self, payload):
+            self.published += 1
+
+    executor, publisher = _SupervisedExecutor(), Publisher()
+    path = tmp_path / "events.jsonl"
+    mcp = create_mcp(
+        HorusConfig(), executor, FakeFlight(), Perception(),
+        event_log=JsonlEventLog(path), image_publisher=publisher,
+    )
+
+    content = call_tool(mcp, "list_candidates", {"passive": True}, convert_result=True)
+    assert any(isinstance(block, ImageContent) and block.mimeType == "image/jpeg" for block in content)
+    table = json.loads(next(b for b in content if isinstance(b, TextContent)).text)["candidate_table"]
+    assert [row["id"] for row in table] == [7]
+    assert (executor.contacts, publisher.published) == (0, 0)
+    assert not path.exists() or path.read_text(encoding="utf-8") == ""
+
+    call_tool(mcp, "list_candidates", convert_result=True)
+    assert (executor.contacts, publisher.published) == (2, 1)
+    assert [json.loads(line)["tool"] for line in path.read_text(encoding="utf-8").splitlines()] == [
+        "list_candidates"
     ]
 
 

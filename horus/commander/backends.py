@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 from uuid import uuid4
 
+from horus.commander.ai_views import decode_image
 from horus.config import CommanderSettings
 from horus.mcp_client import tool_text
 
@@ -36,8 +37,18 @@ class CommanderBackend(Protocol):
 
 
 CLAUDE_STREAM_LINE_LIMIT = 32 * 1024 * 1024
-# HORUS MCP tools no backend offers the model: the commander's own event pump owns wait_events.
-MODEL_DISALLOWED_TOOLS = frozenset({"wait_events"})
+# How long after a turn's result a message written during that turn waits for Claude Code to
+# start a new turn with it; without one, the message was folded into the finished turn.
+_FOLDED_MESSAGE_GRACE_S = 2.0
+# HORUS MCP tools no backend offers the model: the commander's own event pump owns wait_events,
+# and the operator's emergency lock tools and the display map reads belong to the control apps.
+MODEL_DISALLOWED_TOOLS = frozenset({
+    "wait_events", "operator_emergency", "operator_release", "get_map_index", "get_map_tile", "get_live_map",
+})
+# Claude Code names the HORUS MCP tools mcp__horus__<tool>.
+_HORUS_TOOL_PREFIX = "mcp__horus__"
+# tool_use ids kept to name the tool behind an image result.
+_TOOL_NAMES_KEPT = 256
 
 
 class ClaudeCodeSession:
@@ -59,13 +70,30 @@ class ClaudeCodeSession:
         self._stderr_task: asyncio.Task[None] | None = None
         self._temp_dir: tempfile.TemporaryDirectory[str] | None = None
         self._config_path: Path | None = None
-        self._pending: deque[asyncio.Future[str]] = deque()
+        # The messages written to Claude Code and not yet answered: (write number, future), in
+        # write order. Each turn (one system/init, one result) starts with the oldest queued
+        # message; a message that arrives during a turn is folded into it at its next tool call,
+        # or, after the last one, waits and starts the next turn. So results do not map one to
+        # one onto messages.
+        self._pending: deque[tuple[int, asyncio.Future[str]]] = deque()
+        self._written = 0
+        # The message the current turn started with (None when its init came before any
+        # message), and the inits read so far.
+        self._turn_initiator: int | None = None
+        self._turns = 0
+        self._init_since_result = False
+        self._settle_tasks: set[asyncio.Task[None]] = set()
+        # When Claude Code last wrote anything (loop time). commander.timeout_s bounds silence, not
+        # a whole response: a long mission keeps streaming tool calls and results for many minutes.
+        self._last_output = 0.0
         self._records: asyncio.Queue[Mapping[str, Any] | None] = asyncio.Queue()
         self._start_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
         self._has_started = False
         self._restart_pending = False
         self._closing = False
+        # tool_use id -> tool name, to name the tool whose result carries an image.
+        self._tool_names: dict[str, str] = {}
 
     async def _ensure_started(self) -> asyncio.subprocess.Process:
         async with self._start_lock:
@@ -147,7 +175,9 @@ class ClaudeCodeSession:
         async with self._write_lock:
             if process.returncode is not None or process.stdin is None:
                 raise RuntimeError("Claude Code session exited before receiving the message")
-            self._pending.append(response)
+            self._written += 1
+            self._pending.append((self._written, response))
+            self._last_output = loop.time()
             message = {
                 "type": "user",
                 "message": {"role": "user", "content": [{"type": "text", "text": text}]},
@@ -159,7 +189,16 @@ class ClaudeCodeSession:
                 self._remove_pending(response)
                 raise RuntimeError("Claude Code session exited while sending a message") from exc
         try:
-            return await asyncio.wait_for(asyncio.shield(response), timeout=self.settings.timeout_s)
+            while True:
+                quiet_for = loop.time() - self._last_output
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.shield(response), timeout=max(0.0, self.settings.timeout_s - quiet_for)
+                    )
+                except asyncio.TimeoutError:
+                    if loop.time() - self._last_output < self.settings.timeout_s:
+                        continue  # Claude Code is still working: it wrote something meanwhile
+                    raise
         except asyncio.CancelledError:
             self._remove_pending(response)
             raise
@@ -171,7 +210,7 @@ class ClaudeCodeSession:
                 pass
             await self.reset()
             raise TimeoutError(
-                f"Claude Code commander exceeded timeout_s={self.settings.timeout_s:g}"
+                f"Claude Code wrote nothing for timeout_s={self.settings.timeout_s:g}"
             ) from exc
 
     async def interrupt(self) -> None:
@@ -194,6 +233,9 @@ class ClaudeCodeSession:
         self._closing = True
         self._process = None
         self._reader_task = None
+        for task in tuple(self._settle_tasks):
+            task.cancel()
+        self._init_since_result = False
         self._fail_pending(RuntimeError("Claude Code mission was reset"))
         if process is not None and process.returncode is None:
             process.kill()
@@ -204,6 +246,7 @@ class ClaudeCodeSession:
             await asyncio.gather(self._stderr_task, return_exceptions=True)
             self._stderr_task = None
         self._cleanup_temp_dir()
+        self._tool_names.clear()
         self._has_started = False
         self._restart_pending = False
         self._closing = False
@@ -217,6 +260,7 @@ class ClaudeCodeSession:
         try:
             assert process.stdout is not None
             while line := await process.stdout.readline():
+                self._last_output = asyncio.get_running_loop().time()
                 raw = line.decode("utf-8", errors="replace").strip()
                 if self.bearer_token:
                     raw = raw.replace(self.bearer_token, "[REDACTED]")
@@ -234,14 +278,27 @@ class ClaudeCodeSession:
                 for record in records:
                     if record["kind"] == "mcp_init":
                         self._validate_mcp_init(record)
+                    elif record["kind"] == "tool_use":
+                        self._remember_tool(record)
+                    elif record["kind"] == "ai_view":
+                        # Only images a HORUS tool returned to the model count as what the AI saw.
+                        name = self._tool_names.get(str(record.get("tool_use_id")), "")
+                        if not name.startswith(_HORUS_TOOL_PREFIX):
+                            continue
+                        record["tool"] = name.removeprefix(_HORUS_TOOL_PREFIX)
                     self._record(record)
                     _print_stream_record(record)
+                if event.get("type") == "system" and event.get("subtype") == "init":
+                    # A turn starts with the oldest message no earlier turn answered.
+                    self._turns += 1
+                    self._turn_initiator = self._pending[0][0] if self._pending else None
+                    self._init_since_result = True
                 if event.get("type") == "result":
                     if event.get("subtype", "success") != "success":
                         failure = RuntimeError(
                             f"Claude Code turn ended with {event.get('subtype', 'unknown')}"
                         )
-                    self._resolve_next(str(event.get("result", "")), failure)
+                    self._resolve_turn(str(event.get("result", "")), failure)
                     failure = None
         except asyncio.CancelledError:
             raise
@@ -281,28 +338,61 @@ class ClaudeCodeSession:
                 f"loaded servers: {sorted(names)}"
             )
 
-    def _resolve_next(self, text: str, error: Exception | None) -> None:
-        while self._pending:
-            response = self._pending.popleft()
-            if response.done():
-                continue
-            if error is not None:
-                response.set_exception(error)
-            else:
-                response.set_result(text)
+    def _remember_tool(self, record: Mapping[str, Any]) -> None:
+        tool_use_id = record.get("tool_use_id")
+        if not isinstance(tool_use_id, str):
             return
+        self._tool_names[tool_use_id] = str(record.get("tool", ""))
+        while len(self._tool_names) > _TOOL_NAMES_KEPT:
+            self._tool_names.pop(next(iter(self._tool_names)))
+
+    def _resolve_turn(self, text: str, error: Exception | None) -> None:
+        """Answer the message a finished turn started with, and later the ones it folded in."""
+        started = [
+            entry for entry in self._pending
+            if self._init_since_result and entry[0] == self._turn_initiator
+        ] or list(self._pending)[:1]  # no init seen for this turn: the oldest message
+        self._init_since_result = False
+        for entry in started:
+            self._settle(entry, text, error)
+        written, turns = self._written, self._turns
+        if any(seq <= written for seq, _ in self._pending):
+            task = asyncio.create_task(self._settle_folded(written, turns, text, error))
+            self._settle_tasks.add(task)
+            task.add_done_callback(self._settle_tasks.discard)
+
+    async def _settle_folded(self, written: int, turns: int, text: str, error: Exception | None) -> None:
+        # Messages written before the result either started a new turn right away (its result
+        # answers them) or were folded into the finished one: answer those with its result.
+        await asyncio.sleep(_FOLDED_MESSAGE_GRACE_S)
+        if self._turns != turns:
+            return
+        for entry in [entry for entry in self._pending if entry[0] <= written]:
+            self._settle(entry, text, error)
+
+    def _settle(self, entry: tuple[int, asyncio.Future[str]], text: str, error: Exception | None) -> None:
+        try:
+            self._pending.remove(entry)
+        except ValueError:
+            return
+        response = entry[1]
+        if response.done():
+            return
+        if error is not None:
+            response.set_exception(error)
+        else:
+            response.set_result(text)
 
     def _fail_pending(self, error: Exception) -> None:
         while self._pending:
-            response = self._pending.popleft()
+            _, response = self._pending.popleft()
             if not response.done():
                 response.set_exception(error)
 
     def _remove_pending(self, response: asyncio.Future[str]) -> None:
-        try:
-            self._pending.remove(response)
-        except ValueError:
-            pass
+        for entry in tuple(self._pending):
+            if entry[1] is response:
+                self._pending.remove(entry)
 
     def _record(self, event: Mapping[str, Any]) -> None:
         record = redact_secret({"source": "claude-code", **dict(event)}, self.bearer_token)
@@ -404,8 +494,10 @@ class APICommanderBackend:
                 self._record({"kind": "final_result", "text": result})
                 return result
             results = []
+            tool_results = []
             for call in calls:
                 tool_result = await self.session.call_tool(call.name, call.input)
+                tool_results.append(tool_result)
                 summary = tool_text(tool_result)
                 is_error = bool(getattr(tool_result, "isError", False))
                 self._record({"kind": "tool_result", "summary": summary[:500], "is_error": is_error})
@@ -416,6 +508,8 @@ class APICommanderBackend:
                     "is_error": is_error,
                 })
             self._history.append({"role": "user", "content": results})
+            for call, tool_result in zip(calls, tool_results):
+                self._record_ai_views(call.name, call.id, tool_result)
         raise self._turn_limit_error()
 
     async def _send_openai(self, text: str) -> str:
@@ -474,6 +568,7 @@ class APICommanderBackend:
                         "image_url": {"url": f"data:{mime_type};base64,{data}"},
                     } for mime_type, data in images)
                     self._history.append({"role": "user", "content": content})
+                    self._record_ai_views(call.function.name, call.id, tool_result)
         raise self._turn_limit_error()
 
     def _turn_limit_error(self) -> RuntimeError:
@@ -495,6 +590,19 @@ class APICommanderBackend:
     async def close(self) -> None:
         await self.interrupt()
         self._records.put_nowait(None)
+
+    def _record_ai_views(self, tool: str, tool_use_id: Any, result: Any) -> None:
+        """The images this tool result put in the model's history, for the control app."""
+        for mime_type, data in _tool_images(result):
+            image = decode_image(data)
+            if image is not None:
+                self._record({
+                    "kind": "ai_view",
+                    "tool": tool,
+                    "tool_use_id": tool_use_id if isinstance(tool_use_id, str) else None,
+                    "mime_type": mime_type,
+                    "image": image,
+                })
 
     def _record(self, event: Mapping[str, Any]) -> None:
         self._records.put_nowait({"source": self.provider, **dict(event)})
@@ -549,6 +657,15 @@ def _claude_stream_records(event: Any) -> list[dict[str, Any]]:
                     "summary": _summarize_tool_result(block.get("content")),
                     "is_error": bool(block.get("is_error", False)),
                 })
+                # The images the model received with this result; the bytes stay in this record
+                # and never reach the event stream (HorusCommander keeps them by id).
+                for mime_type, image in _claude_result_images(block.get("content")):
+                    records.append({
+                        "kind": "ai_view",
+                        "tool_use_id": block.get("tool_use_id"),
+                        "mime_type": mime_type,
+                        "image": image,
+                    })
     elif event_type == "result":
         record = {
             "kind": "final_result",
@@ -648,6 +765,28 @@ def _tool_images(result: Any) -> list[tuple[str, str]]:
         data = getattr(block, "data", None)
         if isinstance(data, str):
             images.append((str(getattr(block, "mimeType", None) or "image/jpeg"), data))
+    return images
+
+
+def _claude_result_images(content: Any) -> list[tuple[str, bytes]]:
+    """Decoded images of a stream-json tool_result: Anthropic ``{"type": "image", "source":
+    {"type": "base64", "media_type", "data"}}`` blocks (MCP-style ``data``/``mimeType`` too)."""
+    if not isinstance(content, list):
+        return []
+    images = []
+    for block in content:
+        if not isinstance(block, Mapping) or block.get("type") != "image":
+            continue
+        source = block.get("source")
+        if isinstance(source, Mapping):
+            if source.get("type", "base64") != "base64":
+                continue
+            data, mime_type = source.get("data"), source.get("media_type")
+        else:
+            data, mime_type = block.get("data"), block.get("mimeType")
+        image = decode_image(data)
+        if image is not None:
+            images.append((str(mime_type or "image/jpeg"), image))
     return images
 
 

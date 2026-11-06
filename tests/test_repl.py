@@ -147,7 +147,9 @@ def test_repl_slash_hold_interrupts_a_running_commander_turn_while_input_stays_l
     assert [(e["kind"], e["action"], e["status"]) for e in operator] == [("emergency", "hold", "executed")]
 
 
-def test_repl_home_without_a_commander_is_logged_as_an_operator_emergency(tmp_path, serve):
+def test_repl_home_without_a_commander_is_logged_as_an_operator_emergency_and_hand_flight_ends_it(
+    tmp_path, serve
+):
     flight = FakeFlight(Pose(0.0, 0.0, 2.0), armed=True, mode="GUIDED")
     executor = HorusExecutor(flight, HorusConfig().executor, autostart=False)
     server = serve(create_application(create_mcp(HorusConfig(), executor, flight, None), token=TOKEN))
@@ -166,7 +168,7 @@ def test_repl_home_without_a_commander_is_logged_as_an_operator_emergency(tmp_pa
              "--config", str(ROOT / "config" / "horus.yaml")],
             cwd=tmp_path,
             env=env,
-            input="/home\n/quit\n",
+            input="/home\n/take_off 3\n/quit\n",
             capture_output=True,
             text=True,
             timeout=30,
@@ -176,6 +178,9 @@ def test_repl_home_without_a_commander_is_logged_as_an_operator_emergency(tmp_pa
 
     assert repl.returncode == 0, repl.stderr
     assert ("rth",) in flight.commands
+    # The operator flying by hand takes the drone back from its own emergency.
+    assert '"skill": "take_off"' in repl.stdout
+    assert executor.get_state()["operator_lock"] is None
     # No model was started: the operator's emergency is the only record.
     records = _claude_log(event_log)
     assert len(records) == 1, records

@@ -28,13 +28,11 @@ Usage: ./sim/run.sh <build|start [--procedural [--seed N] [--kind forest|urban] 
 
   build             Build the Ubuntu 22.04 + Gazebo Harmonic + ArduPilot image
   start [--gui] [--gui-client] [world]
-  start --gta       GTA V renderer mode: ArduCopter SITL (built-in quad physics, no Gazebo) and
-                    horus-gta-bridge (serial1 tcp:5762 -> udp HORUS_GTA_TARGET, default
-                    127.0.0.1:5611); HORUS flies on tcp:5760 (gta/horus_mod/README.md)
-  start --gta --json-physics
-                    GTA V physics mode: ArduCopter SITL on its JSON backend; HorusGta.dll in GTA
-                    (udp HORUS_GTA_PHYSICS_ADDRESS:9002, default 127.0.0.1) flies the quad and
-                    feeds SITL its sensors; no bridge. HORUS flies on tcp:5760
+  start --gta       GTA V world, always with collisions: ArduCopter SITL on its JSON backend (no
+                    Gazebo); HorusGta.dll in GTA (udp HORUS_GTA_PHYSICS_ADDRESS:9002, default
+                    127.0.0.1) flies the quad as a physical object and feeds SITL its sensors,
+                    and its seven ToF beams feed ArduPilot's proximity avoidance. HORUS flies on
+                    tcp:5760 (gta/horus_mod/README.md)
   --procedural      Generate a randomized world (sim/generated) and start it; without
                     --seed a random 5-digit seed is chosen and printed for reproduction
   --seed N          Procedural seed (implies --procedural)
@@ -45,7 +43,7 @@ Usage: ./sim/run.sh <build|start [--procedural [--seed N] [--kind forest|urban] 
                     HORUS_SIM_GUI_CONFIG=/horus/sim/gui/<layout>.config picks the panel layout
                     (default horus_demo.config; horus_compact.config: untitled corner insets)
                     HORUS_SIM_GUI_SCALE=<factor> scales the GUI chrome (Qt scale, default 1)
-  gui-client        Run only the local Gazebo GUI and commander bridge for a remote server
+  gui-client        Run only the local Gazebo GUI for a remote server
   HORUS_SIM_GPU=auto|amd|mesa|on|off selects NVIDIA/Mesa rendering or CPU fallback
   stop [--purge]    Stop the container; optionally delete its active run directory
   status            Show whether the simulation container is running
@@ -102,7 +100,6 @@ case "${command}" in
     seed=""
     kind=""
     gta=0
-    json_physics=0
     stratum=""
     while (( $# > 0 )); do
       case "$1" in
@@ -142,9 +139,6 @@ case "${command}" in
         --gta)
           gta=1
           ;;
-        --json-physics)
-          json_physics=1
-          ;;
         --gui)
           gui_enabled=1
           ;;
@@ -173,11 +167,6 @@ case "${command}" in
       esac
       shift
     done
-    if (( json_physics == 1 && gta == 0 )); then
-      printf -- '--json-physics is a GTA mode option; use start --gta --json-physics.\n' >&2
-      usage >&2
-      exit 2
-    fi
     if (( gta == 1 )) && (( procedural == 1 || gui_enabled == 1 || world_set == 1 )); then
       printf -- '--gta runs SITL without Gazebo; it takes no world, --procedural or --gui option.\n' >&2
       usage >&2
@@ -222,17 +211,6 @@ case "${command}" in
         printf 'gui-client requires a local Ethernet GZ_IP; set HORUS_LOCAL_IP or HORUS_LOCAL_GZ_IP.\n' >&2
         exit 2
       fi
-      if [[ -z "${HORUS_MCP_TOKEN:-}" && -r "${HORUS_REMOTE_STATE_DIR}/mcp-token" ]]; then
-        IFS= read -r HORUS_MCP_TOKEN < "${HORUS_REMOTE_STATE_DIR}/mcp-token"
-      fi
-      if [[ -z "${HORUS_MCP_TOKEN:-}" || -z "${HORUS_COMMANDER_TOKEN:-}" ]]; then
-        printf 'gui-client requires HORUS_MCP_TOKEN and HORUS_COMMANDER_TOKEN.\n' >&2
-        exit 2
-      fi
-      export HORUS_MCP_TOKEN HORUS_COMMANDER_TOKEN
-      HORUS_MCP_URL="${HORUS_MCP_URL:-http://127.0.0.1:${HORUS_MCP_LOCAL_PORT}/mcp}"
-      HORUS_COMMANDER_URL="${HORUS_COMMANDER_URL:-http://127.0.0.1:8765}"
-      export HORUS_MCP_URL HORUS_COMMANDER_URL
       CONTAINER="${GUI_CLIENT_CONTAINER}"
       RUN_ROOT="${SIM_DIR}/run/gui-client"
       container_run_root=/horus/sim/run/gui-client
@@ -244,8 +222,8 @@ case "${command}" in
       container_run_dir="${container_run_root}/${run_id}"
       container_workdir=/horus
       container_command=(/horus/sim/scripts/start_gta_sitl.sh)
-      # The GTA profile becomes the container default, so the bridge sends its camera FOV and any
-      # HORUS process started in the container loads the same profile.
+      # The GTA profile becomes the container default, so any HORUS process started in the
+      # container loads it.
       read -r profile_config _ <<< "$(horus_world_profile gta)"
       export HORUS_CONFIG="${HORUS_CONFIG:-${profile_config}}"
     else
@@ -301,6 +279,13 @@ case "${command}" in
         exit 1
       fi
       xauthority_file="$(realpath -e -- "${xauthority_source}")"
+      # Koko's two X screens (scripts/koko/display): the Gazebo window goes to :0.1, the HDMI
+      # dummy; with one screen to :0.
+      gui_display=:0
+      if command -v xdpyinfo >/dev/null 2>&1 \
+        && XAUTHORITY="${xauthority_file}" xdpyinfo -display :0.1 >/dev/null 2>&1; then
+        gui_display=:0.1
+      fi
       gui_config="${HORUS_SIM_GUI_CONFIG:-/horus/sim/gui/horus_demo.config}"
       if [[ ! "${gui_config}" =~ ^/horus/[A-Za-z0-9_./-]+\.config$ ]]; then
         printf 'HORUS_SIM_GUI_CONFIG must be a .config path under /horus (got %s).\n' "${gui_config}" >&2
@@ -313,7 +298,7 @@ case "${command}" in
       fi
       gui_args=(
         --user "$(id -u):$(id -g)"
-        --env DISPLAY=:0
+        --env "DISPLAY=${gui_display}"
         --env "XAUTHORITY=${xauthority_file}"
         --env QT_QPA_PLATFORM=xcb
         --env "QT_SCALE_FACTOR=${gui_scale}"
@@ -326,7 +311,7 @@ case "${command}" in
     fi
     mkdir -p "${RUN_ROOT}" "${SIM_DIR}/logs"
     gpu_mode="${HORUS_SIM_GPU:-auto}"
-    # SITL's built-in physics renders nothing; GTA draws the camera view on the host.
+    # SITL renders nothing; GTA draws the camera view on the host.
     (( gta == 1 )) && gpu_mode=off
     gpu_args=()
     nvidia_enabled=false
@@ -434,20 +419,11 @@ case "${command}" in
     fi
     gta_env_args=()
     if (( gta == 1 )); then
-      gta_env_args=(--env "HORUS_GTA_TARGET=${HORUS_GTA_TARGET:-127.0.0.1:5611}")
-      if (( json_physics == 1 )); then
-        gta_env_args+=(--env HORUS_GTA_PHYSICS=json --env "HORUS_GTA_PHYSICS_ADDRESS=${HORUS_GTA_PHYSICS_ADDRESS:-127.0.0.1}")
-      fi
+      gta_env_args=(--env "HORUS_GTA_PHYSICS_ADDRESS=${HORUS_GTA_PHYSICS_ADDRESS:-127.0.0.1}")
     fi
     gui_client_env_args=()
     if (( gui_client_enabled == 1 )); then
-      gui_client_env_args=(
-        --env HORUS_MCP_TOKEN
-        --env HORUS_COMMANDER_TOKEN
-        --env "HORUS_MCP_URL=${HORUS_MCP_URL}"
-        --env "HORUS_COMMANDER_URL=${HORUS_COMMANDER_URL}"
-        --env "HORUS_GUI_WORLD=${HORUS_GUI_WORLD:-horus_indoor}"
-      )
+      gui_client_env_args=(--env "HORUS_GUI_WORLD=${HORUS_GUI_WORLD:-horus_indoor}")
     fi
     resource_args=()
     if (( gui_client_enabled == 0 )); then
@@ -501,7 +477,7 @@ case "${command}" in
           break
         fi
         if [[ "$(docker inspect --format '{{.State.Running}}' "${CONTAINER}" 2>/dev/null || true)" != true ]]; then
-          printf 'GUI client stopped during startup; inspect %s/logs/gui.log and gz_bridge.log.\n' \
+          printf 'GUI client stopped during startup; inspect %s/logs/gui.log.\n' \
             "${run_dir}" >&2
           break
         fi
@@ -542,12 +518,9 @@ case "${command}" in
       printf 'Started %s. Runtime files: %s/run/%s/ (SITL logs are in logs/).\n' \
         "${CONTAINER}" "${SIM_DIR}" "${run_id}"
       printf 'MAVLink flight endpoint (single TCP client): tcp:127.0.0.1:5760\n'
-      if (( gta == 1 && json_physics == 1 )); then
+      if (( gta == 1 )); then
         printf 'GTA physics: SITL JSON backend -> udp %s:9002 (HorusGta.dll in GTA answers with the quad state)\n' \
           "${HORUS_GTA_PHYSICS_ADDRESS:-127.0.0.1}"
-      elif (( gta == 1 )); then
-        printf 'GTA pose stream: horus-gta-bridge on tcp:127.0.0.1:5762 -> udp %s (logs/gta_bridge.log)\n' \
-          "${HORUS_GTA_TARGET:-127.0.0.1:5611}"
       elif [[ "${world}" == "horus_indoor.sdf" ]]; then
         printf 'Indoor ToF bridge endpoint: tcp:127.0.0.1:5763\n'
       fi

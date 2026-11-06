@@ -1,15 +1,9 @@
 # Outdoor GPS flight (canonical horus_forest/horus_urban and generated worlds): loaded after
-# common.parm, followed by canonical_fence.parm or procedural_fence.parm for FENCE_RADIUS.
-# Home-centred circular fence and maximum altitude. The canonical worlds top out at 24.13 m forest
-# canopy and 32.23 m urban rooftop HVAC; generated worlds at 23 m forest canopy and 34 m urban
-# building/roof-equipment height (see config/horus_procedural_*.yaml).
-FENCE_ENABLE 1
-FENCE_TYPE 3
-FENCE_ACTION 1
-FENCE_MARGIN 5
-FENCE_ALT_MAX 55
+# common.parm.
 
-# Return above the tallest forest canopy and urban rooftop hazards.
+# Return above the tallest forest canopy and urban rooftop hazards. The canonical worlds top out
+# at 24.13 m forest canopy and 32.23 m urban rooftop HVAC; generated worlds at 23 m forest canopy
+# and 34 m urban building/roof-equipment height (see config/horus_procedural_*.yaml).
 RTL_ALT_M 45
 
 # Moderate wind from the west with variable gust/turbulence strength.

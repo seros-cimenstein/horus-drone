@@ -57,9 +57,8 @@ container whatever its `HORUS_SIM_CONTAINER_NAME` (world containers carry the
 label `horus.world=gazebo|gta`). It also refuses a `HORUS_CONFIG` from the other
 world: a `gta://` frame source or the `gta` map provider in a Gazebo run, or any
 other source in a GTA run (`sim/scripts/world_profiles.py check-config`). The
-`gui-client` only observes a remote world and is not checked. The flight limits
-of every world are ArduPilot's: each world profile's parameter fragments carry
-its `FENCE_*` settings, and HORUS clamps nothing.
+`gui-client` only observes a remote world and is not checked. No world has a
+geofence: no parameter fragment sets `FENCE_*`, and HORUS clamps nothing.
 
 `run.sh build` monitors root free space and stops the Docker CLI below 1 GB.
 On a failed or aborted build it removes only newly-created dangling images and
@@ -75,8 +74,8 @@ The image resolves runtime, server, perception, and test dependencies from
 and the image sets `PYTHONPATH=/horus`, so Python source edits are live without
 running `pip` against the bind mount. Dependency or entry-point changes require
 rebuilding the image. It provides `horus`, `horus-mcp`, `horus-mcp-call`,
-`horus-commander-serve`, `horus-gz-bridge`, `horus-gz-gimbal`, and
-`horus-tof-bridge` entry points.
+`horus-commander-serve`, `horus-gz-gimbal`, and `horus-tof-bridge` entry
+points.
 
 Optional text-grounding weights are kept outside the image. Run `docker exec horus-sim bash /horus/scripts/setup_grounder.sh` inside the sim container to create `/horus/models/grounder-venv` and cache model weights in `/horus/models/hf`; no image rebuild is needed. `start_sim.sh` starts the service on loopback port 8100 before MCP when the venv is installed. Logs are in `/horus/sim/logs/horus-grounder.log`, and a missing venv is non-fatal. When huggingface.co is unreachable, copy an `HF_HOME` cache from another machine — the `hub/models--IDEA-Research--grounding-dino-tiny` and `hub/models--google--owlv2-base-patch16-ensemble` directories, whose `model.safetensors` sha256s are pinned in the root README — and set `HORUS_GROUNDER_HF_CACHE` to it, which the setup reads with `HF_HUB_OFFLINE=1`. `HF_ENDPOINT=<mirror-url>` works only for a mirror that serves the full Hub file metadata (`Content-Length` and `X-Repo-Commit`) required by `huggingface_hub` 0.36.2; a mirror that omits either header fails with a message naming both options. ModelScope's mirrors of the two repos serve the same files (their `X-Linked-Etag` sha256 matches the Hub's LFS hashes), so they can fill that cache.
 
@@ -111,11 +110,11 @@ Generation is deterministic per seed and takes about 10-40 s. An existing
 fly the procedural profile: HORUS connects with
 `config/horus_procedural_forest.yaml` or `config/horus_procedural_urban.yaml`
 (`HORUS_CONFIG=/horus/config/horus_procedural_<kind>.yaml` inside the
-container), and `start_sim.sh` loads `config/ardupilot/common.parm`,
-`outdoor.parm` and `procedural_fence.parm` for the `horus_<kind>_p<seed>` stem
+container), and `start_sim.sh` loads `config/ardupilot/common.parm` and
+`outdoor.parm` for the `horus_<kind>_p<seed>` stem
 (`sim/scripts/world_profiles.py`). Canonical `horus_forest.sdf`/`horus_urban.sdf`
-keep `config/horus_{forest,urban}.yaml` with `common.parm`, `outdoor.parm` and
-`canonical_fence.parm`.
+keep `config/horus_{forest,urban}.yaml` with the same `common.parm` and
+`outdoor.parm`.
 `run.sh start --procedural` also exports the procedural `HORUS_CONFIG` and
 `HORUS_SITL_PARAM_FILE` (into the container too), so a later
 `docker exec horus-sim /opt/horus-venv/bin/horus-mcp` loads the matching
@@ -152,22 +151,18 @@ manifest carries `areas.trails/creeks/clearings/camps` and `actor_geofence_m`.
 When a matching scenario and `sim/scripts/civilian_life.py` are present,
 `start_sim.sh` starts its `ambient` group and records pose traces in that run's
 `logs/civilians.jsonl`. The outdoor worlds keep GPS enabled and do not start
-the indoor serial2 ToF bridge. The launcher loads `common.parm`, `outdoor.parm`
-and `canonical_fence.parm` for canonical worlds and `procedural_fence.parm` in
-place of `canonical_fence.parm` for generated ones; set
+the indoor serial2 ToF bridge. The launcher loads `common.parm` and
+`outdoor.parm` for canonical and generated worlds alike; set
 `HORUS_SITL_PARAM_FILE` to override it. Use `config/horus_forest.yaml` /
 `config/horus_urban.yaml` with HORUS for the canonical worlds, and
 `config/horus_procedural_forest.yaml` / `config/horus_procedural_urban.yaml`
 for generated ones; each profile carries its own controller speeds and
-perception settings, and the parameter fragments its ArduPilot fence.
+perception settings.
 
 ### Procedural flight profile
 
-The procedural worlds are a 1.2 km map bounded by ArduPilot: `outdoor.parm`
-sets a home-centred circular fence (`FENCE_TYPE 3`, `FENCE_ALT_MAX 55`,
-`FENCE_ACTION 1` returns home, `FENCE_MARGIN 5`) and `procedural_fence.parm`
-its `FENCE_RADIUS 870`, which covers the map corners (600 * sqrt(2) = 848.5 m)
-with margin. HORUS sends every target unclamped. `command_ttl_s` is 360 s,
+The procedural worlds are a 1.2 km map with no geofence: HORUS sends every
+target unclamped and ArduPilot sets no boundary or ceiling. `command_ttl_s` is 360 s,
 sized for a map-crossing goto in wall-clock time: an 850 m goto at the 8 m/s
 cruise is 850 / 8 = 106 s of simulation time, i.e. ~304 s of wall time at
 RTF 0.35, plus acceleration (~3 s), yaw alignment and the arrival slowdown; a
@@ -201,23 +196,20 @@ The outdoor camera is 640×480 with an 84° horizontal FOV. The Gazebo gimbal
 holds −45° until HORUS sends a setpoint, and `take_off` applies the outdoor config's
 `default_gimbal_pitch_deg: -45`; the indoor default remains 0°.
 
-## GTA V renderer mode (no Gazebo)
+## GTA V world (no Gazebo)
 
-GTA V Enhanced can render the drone camera instead of Gazebo (`gta/horus_mod/README.md`).
-`run.sh start --gta` starts only ArduCopter SITL, using its built-in quad physics, and
-`horus-gta-bridge`. Gazebo, the GUI, world files and the GPU are not used:
-
-```bash
-./sim/run.sh start --gta     # SITL + bridge in the horus-sim container (HORUS_SIM_IMAGE as usual)
-./sim/run.sh s0              # 5 m takeoff and land on tcp:5760, as with Gazebo
-./sim/run.sh stop            # stops SITL and the bridge and removes the container
-```
-
-With real drone physics in GTA instead (`gta/horus_mod/README.md` "Physics"):
+GTA V Enhanced can be the test world instead of Gazebo (`gta/horus_mod/README.md`). `run.sh start
+--gta` starts only ArduCopter SITL, on its JSON backend: HorusGta.dll in GTA flies the quad as a
+physical object, so it collides with the game's world, and its seven ToF beams feed ArduPilot's
+proximity avoidance (`gta/horus_mod/README.md` "Physics"). Collisions are always on: the earlier
+camera-only pose mode (SITL's flat-plane quad and `horus-gta-bridge`) was removed on 2026-11-02.
+Gazebo, the GUI, world files and the GPU are not used:
 
 ```bash
-./sim/run.sh start --gta --json-physics   # SITL on its JSON backend, no bridge
-scripts/koko/gta_game.sh start             # GTA with HorusGta.dll answers SITL on udp 9002
+./sim/run.sh start --gta          # SITL on its JSON backend in the horus-sim container
+scripts/koko/gta_game.sh start    # GTA with HorusGta.dll answers SITL on udp 9002
+./sim/run.sh s0                   # 5 m takeoff and land on tcp:5760, as with Gazebo
+./sim/run.sh stop                 # stops SITL and the range bridge and removes the container
 ```
 
 - SITL runs `--model JSON:${HORUS_GTA_PHYSICS_ADDRESS:-127.0.0.1}`. `sitl-overrides.parm` adds
@@ -227,25 +219,28 @@ scripts/koko/gta_game.sh start             # GTA with HorusGta.dll answers SITL 
   lowest rate that arms: at 400 Hz, `PreArm: Gyro 0 rate 400Hz < loop rate*1.8 720Hz`.
 - SITL boots only once a MAVLink client holds tcp:5760, and sends no servo frames before then.
   HorusGta logs `physics: no SITL frame for 1.9 s` in that gap, and HORUS (or any client) on 5760
-  starts it. No keeper is used, because no bridge needs serial1.
+  starts it. No keeper is used.
 - Without GTA, `gta/horus_mod/build/physics_sim/horus-gta-physics-sim` answers instead, over flat
   ground.
 - HORUS's first `GLOBAL_POSITION_INT` arrives before the EKF has a position (lat = lon = 0),
   because HORUS connects before SITL boots. `horus/flight/link.py` ignores such messages; taking
   one as the origin had put HORUS's pose 4000 km off.
-- No gimbal device answers HORUS in physics mode. Until HorusGta.dll takes gimbal setpoints, ArduPilot's
-  servo mount (`MNT1_TYPE 1`, SERVO9–11, set by `start_gta_sitl.sh` for this mode only) is a
-  temporary stand-in that HORUS never commands: it rests at −45° pitch, yaw 0. The mount already
-  subtracts the vehicle's lean from SERVO9–11, so HorusGta treats those outputs as angles relative
-  to the body.
+- HORUS points the camera through `horus-gta-gimbal` (`horus/gimbal/gta.py`), a MAVLink gimbal
+  device on `udpout:127.0.0.1:14600` (`gimbal.connection` in `config/horus_gta.yaml`, as in the
+  Gazebo profiles) that relays HORUS's setpoints to HorusGta.dll on udp
+  `${HORUS_GTA_PHYSICS_ADDRESS}:5613` and the mod's measured attitude back from udp 5614
+  (`gta/horus_mod/README.md` "Gimbal"). ArduPilot takes no part. Until HORUS points it the gimbal
+  rests at −45° pitch, yaw 0. The device publishes only what the mod measures, so before the
+  game's first status HORUS has no gimbal attitude and refuses `look`.
 - ArduPilot's clock is the sum of HorusGta's timestamp steps. Its `time_boot_ms` is physics
   time, which runs slower than wall time when the real-time factor is below 1 (0.46–1.00 per 5 s
   in a checked session). Compare telemetry with GTA traces by physics time, not by receive time.
 
 Checked on Koko on 2026-10-20:
 
-- **Start:** `start --gta --json-physics`, then GTA. A pymavlink client on 5760 armed and hovered
-  at 5 m for 120 s, with roll/pitch RMS 0.10°/0.10°, EKF flags 0x33f and no failsafe.
+- **Start:** `start --gta --json-physics` (today's `start --gta`), then GTA. A pymavlink client
+  on 5760 armed and hovered at 5 m for 120 s, with roll/pitch RMS 0.10°/0.10°, EKF flags 0x33f and
+  no failsafe.
 - **HORUS:** `horus-mcp` then took off to 15 m, flew to the NW corner and landed. The camera stayed
   `streaming` (`last_frame_age_s` 0.10–0.23), and `list_candidates` found a car.
 - **Frame timing:** from a state answered to SITL to its frame reaching HORUS took 53.0 ms p50 and
@@ -257,33 +252,25 @@ Checked on Koko on 2026-10-20:
 
 - SITL runs from the run directory (`sim/run/<id>/`), because it writes `eeprom.bin` and its logs
   to its cwd. From `/opt/ardupilot` ArduCopter fails with "PreArm: Param storage failed".
-- In pose mode `sitl-overrides.parm` holds `LOG_DISARMED 0`, no mount parameters
-  (`horus-gta-bridge` is HORUS's gimbal device) and GTA's ArduPilot fence from
-  `config/ardupilot/gta.parm` (in both modes). The Gazebo proximity and rangefinder fragments
-  depend on Gazebo sensors and are left out; physics mode takes those lines from `common.parm`.
-- SITL boots, and opens serial1 (5762), only once a client holds serial0 (5760). A keeper client
-  holds 5760 until the bridge is connected on 5762, then releases it. `sim.ready` follows, and HORUS
-  (or `s0`) can connect to 5760.
-- The bridge runs from the mounted checkout (`python -m horus.gta_bridge`) and sends to
-  `HORUS_GTA_TARGET` (default `127.0.0.1:5611`, HorusGta.dll in GTA on the same host). Its output
-  is in `logs/gta_bridge.log`. If SITL or the bridge exits, the container stops.
+- `sitl-overrides.parm` holds `LOG_DISARMED 0`, the battery, the X frame at 800 Hz, and the
+  proximity and rangefinder lines from `common.parm` (HorusGta emulates the ToF payload) with
+  `PRX_FILT 0`; the other Gazebo fragments depend on Gazebo sensors and are left out. ArduPilot
+  has no camera mount here.
+- `sim.ready` follows as soon as SITL's serial0 (5760) is open, and HORUS (or `s0`) can connect.
+- The gimbal device `horus.gimbal.gta` and the range bridge `horus.tof_bridge.gta` run from the
+  mounted checkout. The gimbal device starts with SITL (it needs nothing from it) and logs to
+  `logs/gimbal.log` (each setpoint, and the measured camera attitude once it reaches it); the
+  range bridge takes HorusGta's beams on udp 127.0.0.1:5612 and sends them to SITL serial2 (5763)
+  as `DISTANCE_SENSOR`, logging to `logs/range_bridge.log`. If SITL, the
+  gimbal device or the range bridge exits, the container stops.
 - Unlike `start_sim.sh`, it does not start the grounder (`scripts/start_grounder.sh`), which keeps
   memory free for GTA on the same host.
 - `HORUS_CONFIG` defaults to `/horus/config/horus_gta.yaml` in the container (the `gta` row of
-  `sim/scripts/world_profiles.py`), as `--procedural` does with its profile. The bridge takes its
-  FOV (84°) and default pitch (-45°) from it, and HORUS processes started in the container load
-  it; it reads frames from `gta://127.0.0.1:5610`. GTA's flight limits are ArduPilot's
-  `gta.parm`: a 40 m circle around home (the Legion Square origin in `HorusGta.ini`), a 48 m
-  ceiling and a 6 m floor above the kiosk roof and low street furniture (`FENCE_TYPE 11`,
-  `FENCE_ALT_MIN 6`; Copter arms the floor only after the first climb above it and drops it when
-  LAND or RTL starts), with `FENCE_ACTION 1`. Obstacles are left to ArduPilot's proximity
-  avoidance on the emulated ToF beams in physics mode.
-
-Checked on Koko on 2026-10-20 (image `horus-sim:local-s1s2`, GTA not running). `start --gta` was
-ready in 2.3 s. The bridge sends nothing until the EKF has a position; it started 45 s after
-start and then logged `250 packets in 5 s`. `s0` took off to 4.86 m and landed, and the bridge
-followed with down = -4.62 m. `stop` removed the container, and no SITL or bridge process was
-left. That run predates the bridge's gimbal device, so it checked no gimbal setpoints.
+  `sim/scripts/world_profiles.py`), as `--procedural` does with its profile. HORUS processes
+  started in the container load it; it reads frames from `gta://127.0.0.1:5610`, and its camera
+  FOV (84°) must match HorusGta.ini's `[physics] hfov_deg`. GTA has no geofence: no boundary
+  around home, no ceiling and no floor. Obstacles are left to ArduPilot's proximity avoidance on
+  the emulated ToF beams.
 
 HORUS itself runs in the same container, against SITL on 5760 and GTA frames on 5610. A GTA run
 is smoked like this, with Gazebo stopped (`run.sh` refuses otherwise). Run it on Koko in `~/horus`,
@@ -293,14 +280,14 @@ SSH:
 ```bash
 HORUS_SIM_IMAGE=horus-sim:local-s1s2 ./sim/run.sh start --gta
 export HORUS_MCP_TOKEN=$(openssl rand -hex 24)
-config=""   # "": the container's own horus_gta.yaml, which needs data/maps/gta/map.json
-if [[ ! -f data/maps/gta/map.json ]]; then
-  # No GTA map in this checkout: build a scratch map and config under sim/run/, not data/ or config/.
+config=""   # "": the container's own horus_gta.yaml, which needs data/maps/gta/tiles
+if [[ ! -f data/maps/gta/tiles/index.json ]]; then
+  # No GTA map in this checkout: build scratch tiles and config under sim/run/, not data/ or config/.
   scratch=sim/run/gta-scratch-map
   mkdir -p "$scratch"
-  docker exec -w /horus horus-sim /opt/horus-venv/bin/python scripts/maps/fetch_gta_map.py \
-    --out "/horus/$scratch/map.json"
-  sed -e "s#data/maps/gta/map.json#/horus/$scratch/map.json#" -e '/walkable_path:/d' \
+  docker exec -w /horus horus-sim /opt/horus-venv/bin/python scripts/maps/build_gta_tiles.py \
+    --no-walkable --out "/horus/$scratch/tiles"
+  sed -e "s#data/maps/gta/tiles#/horus/$scratch/tiles#" \
     config/horus_gta.yaml > "$scratch/horus_gta_smoke.yaml"
   config="/horus/$scratch/horus_gta_smoke.yaml"
 fi
@@ -318,13 +305,15 @@ rm -rf sim/run/gta-scratch-map
 `start_mcp.sh` with an empty config argument keeps the container's `HORUS_CONFIG`
 (`horus_gta.yaml`), and with a `/horus/….yaml` path it uses that config instead; its log
 (`sim/logs/horus-mcp.log`) names the loaded config and frame source. `config/horus_gta.yaml` needs
-the GTA map at `data/maps/gta/map.json`, or the server refuses to start. `rsync` to Koko leaves out
-`data/`, so there the block builds a scratch map instead: `fetch_gta_map.py --out` keeps its
-download cache beside the output, and the scratch config drops `map.walkable_path` (GTA's ped
-navmesh, which `fetch_gta_walkable.py --out` builds from a 466 MB archive and a 659 MB extracted
-file). With a `gta://` source the server builds no Gazebo image publisher. Pose mode works without
-the game for SITL, bridge, fence and flight checks. `run.sh frame` grabs the Gazebo camera and
-refuses a GTA container; use `get_frame`.
+the GTA map tiles at `data/maps/gta/tiles`, or the server refuses to start. `rsync` to Koko leaves
+out `data/`, so a checkout without them builds scratch tiles instead: `build_gta_tiles.py --out`
+keeps its download cache beside the output, and `--no-walkable` leaves out GTA's ped navmesh (a
+466 MB archive and a 659 MB extracted file, and packages HORUS does not install). The full tiles
+are built on the laptop (README, Maps) and copied to `data/maps/gta/tiles` in a Koko checkout
+(`~/horus-loop` has them since 2026-11-02). With a `gta://` source the server builds no Gazebo
+image publisher. `s0` and flights need the game (or `horus-gta-physics-sim`): SITL steps only
+while HorusGta answers. `run.sh frame` grabs the Gazebo camera and refuses a GTA container; use
+`get_frame`.
 
 The checkout needs `models/yolov8n.onnx` and `models/osnet_x0_25_msmt17.onnx` (not synced by the
 usual rsync, which excludes `/models`) and a `runs/` directory. Without a grounder, perception runs
@@ -332,27 +321,21 @@ detector-only and `get_state` reports the grounder `unavailable`. With no MCP ca
 `link_loss_rth_delay_s` (30 s) the hovering vehicle returns home. Results from the checked run are
 in `gta/horus_mod/README.md` "Checked in game".
 
-## Visual commander demo
+## Visual demo
 
-The GUI plugin is built into the canonical image as a final layer. For quick
-local iteration on an existing `horus-sim:local-s1s2` image, build only that
-layer instead of rebuilding Gazebo and SITL:
+GUI runs use the image named by `HORUS_SIM_GUI_IMAGE` (default
+`horus-sim:local-s1s2-gui`), built from the same Dockerfile as the headless
+image (`HORUS_SIM_IMAGE` remains the headless image setting):
 
 ```bash
-docker build -f sim/docker/Dockerfile.gui-overlay \
-  -t horus-sim:local-s1s2-gui .
+HORUS_SIM_IMAGE=horus-sim:local-s1s2-gui ./sim/run.sh build
 ```
 
-The GUI launcher selects this overlay automatically; set `HORUS_SIM_GUI_IMAGE`
-to override its tag (`HORUS_SIM_IMAGE` remains the headless image setting).
-
-The image installs the `HorusCommander` gz-gui8 plugin under
-`/opt/horus-gui/lib`, exports `GZ_GUI_PLUGIN_PATH`, and installs the layout at
-`$HORUS_GUI_CONFIG` (`/opt/horus-gui/horus_demo.config`). The layout contains
-the scene, WorldStats (sim time and real-time factor), CameraTracking, three
-ImageDisplay panels (the raw indoor camera, the live perception view on
-`/horus/perception/live`, and Claude's last set-of-mark view on
-`/horus/som_image`), and the commander task/event/status panel with HOLD, LAND, RTH, and NEW MISSION controls.
+The layout `sim/gui/horus_demo.config` is read from the mounted source, so
+layout edits need no rebuild. It contains the scene, WorldStats (sim time and
+real-time factor), CameraTracking, and three ImageDisplay panels (the raw
+indoor camera, the live perception view on `/horus/perception/live`, and
+Claude's last set-of-mark view on `/horus/som_image`).
 WorldControl is omitted on purpose: its Space shortcut pauses the world whenever the 3D view has
 focus, and a paused world freezes lockstep SITL, the MAVLink heartbeat and the
 camera. Resume an accidentally paused world with
@@ -369,9 +352,9 @@ GUI mode mounts `${XAUTHORITY:-$HOME/.Xauthority}` read-only and
 `QT_QPA_PLATFORM=xcb`, and adds NVIDIA GPU access when available. It does not
 use `xhost`.
 
-For the host commander, use the root README's standard `.venv` or lean
-`.venv-host` installation; the `commander` extra includes Uvicorn for the host
-HTTP/SSE endpoint. Set `HORUS_HOST_VENV` to select another suitable venv.
+For the host AI pilot service (or the `horus` terminal with `--terminal`), use
+the root README's standard `.venv` or lean `.venv-host` installation. Set
+`HORUS_HOST_VENV` to select another venv that provides `horus`.
 
 Then run the demo:
 
@@ -381,57 +364,42 @@ Then run the demo:
 ```
 
 The default deployment keeps Gazebo/SITL, the automatic ToF bridge, and
-perception MCP on Koko, while the laptop displays Gazebo and runs
-`horus-commander-serve` and `horus-gz-bridge`. Use `--remote HOST` to select
-another server, or `--local` to explicitly run the entire stack locally.
-The camera stream is enabled automatically. Press Ctrl-C to stop the managed
-processes. GUI runtime logs are under `sim/run/gui-client/` while it runs;
-shutdown purges the active GUI-client run directory. Server logs remain on
-Koko and are fetched into `sim/logs/` and `runs/`.
+perception MCP on Koko, while the laptop displays Gazebo. Use `--remote HOST`
+to select another server, or `--local` to explicitly run the entire stack
+locally. The camera stream is enabled automatically. Once the stack is up, the
+script starts the AI pilot service on the laptop and prints the HORUS control
+app address with the login token in the URL fragment
+(`http://127.0.0.1:8765/#token=…`; a fragment never reaches the server, and the
+page moves the token into the tab's `sessionStorage`). Open it in a browser on
+the laptop: the page shows a mission box and news feed, the live camera with
+the numbered objects, the drone state, a map, and HOLD, LAND and HOME buttons
+that skip the AI. Its camera, state and map reads are passive drone board calls
+made by the service, so the page never counts as AI contact and never replaces
+the AI's last set-of-mark view (`/horus/som_image`); see the root README, "The
+control app". Ctrl-C stops the managed processes. `HORUS_COMMANDER_URL` picks
+the port (the script refuses one already in use;
+`HORUS_COMMANDER_URL=http://127.0.0.1:8766` when 8765 is taken). `--terminal`
+opens the `horus` terminal instead (`/hold`, `/land` and `/home` skip the AI;
+`/quit`, Ctrl-D or Ctrl-C stops the managed processes); the script never starts
+both. `--phone` also publishes the control app on your Tailscale tailnet
+(`scripts/phone_serve.sh`, HTTPS certificates enabled for the tailnet) and
+prints the phone address with its own phone token and a QR code; see the root
+README, "The phone app". GUI runtime logs are under `sim/run/gui-client/` while it runs; shutdown
+purges the active GUI-client run directory. Server logs remain on Koko and are
+fetched into `sim/logs/` and `runs/`.
 
 `--record` uses ffmpeg `x11grab`. When `xwininfo` is available it captures the
 Gazebo window region; otherwise it captures the full XWayland display `:0`.
 Native Wayland windows are not included in the recording.
 
-Start `horus-commander-serve` on the host with `HORUS_MCP_URL` and
-`HORUS_MCP_TOKEN` set for the container's authenticated MCP endpoint, and set
-a separate `HORUS_COMMANDER_TOKEN`. The server invokes the host's authenticated
-Claude Code CLI; it does not require an LLM API key. In the host-networked
-simulation container, run `horus-gz-bridge` with the same
-`HORUS_COMMANDER_TOKEN` and the MCP URL/token. The bridge forwards `/horus/task`
-to the host, renders commander SSE events on `/horus/events` as readable lines
-(task, Claude text, `→` tool calls, `←`/`✗` results, final answer; per-token
-deltas are omitted), and publishes `get_state` results to `/horus/state` at
-2 Hz. The MCP server publishes the set-of-mark image returned by `get_frame` /
-`list_candidates` on `/horus/som_image`, and every processed perception frame on
-`/horus/perception/live`: tracked boxes with tracker ID, detector class and
-confidence, shaded ignore regions, and a footer with
-median detector and tracker/ReID milliseconds, processed fps, and detection
-counts. The same throughput figures appear under `perception.processing` in
+The AI pilot invokes the host's authenticated Claude Code CLI; it does not
+require an LLM API key. The MCP server publishes the set-of-mark image returned
+by `get_frame` / `list_candidates` on `/horus/som_image`, and every processed
+perception frame on `/horus/perception/live`: tracked boxes with tracker ID,
+detector class and confidence, shaded ignore regions, and a footer with median
+detector and tracker/ReID milliseconds, processed fps, and detection counts.
+The same throughput figures appear under `perception.processing` in
 `get_state` and as a `perception … fps` INFO line in the MCP log every 10 s.
-
-HOLD, LAND, and RTH publish their action strings to `/horus/emergency`; NEW MISSION publishes on `/horus/reset`. `horus-gz-bridge` forwards these topics to the authenticated host `POST /emergency` and `POST /reset` endpoints. Text tasks still use `POST /task`; short imperatives such as `stop`, `land now`, and `return home` are recognized as direct emergencies, while longer sentences go to the model. The host keeps one Claude Code stream-json process (or API conversation history) per mission, sends executor/perception events from MCP `wait_events` into the active mission, and exposes readable emergency/session events over its SSE stream. Use `commander.max_turns` (default 40) for the per-response tool-call budget and `commander.timeout_s` for the per-response timeout.
-
-For example, with the container MCP server already running, start the host
-commander:
-
-```bash
-export HORUS_MCP_URL=http://127.0.0.1:8000/mcp
-export HORUS_MCP_TOKEN='replace-with-the-container-MCP-token'
-export HORUS_COMMANDER_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
-horus-commander-serve
-```
-
-In another host terminal, forward the same credentials to the bridge process:
-
-```bash
-docker exec --interactive --tty \
-  --env HORUS_COMMANDER_URL=http://127.0.0.1:8765 \
-  --env "HORUS_COMMANDER_TOKEN=${HORUS_COMMANDER_TOKEN}" \
-  --env "HORUS_MCP_URL=${HORUS_MCP_URL}" \
-  --env "HORUS_MCP_TOKEN=${HORUS_MCP_TOKEN}" \
-  "${HORUS_SIM_CONTAINER_NAME:-horus-sim}" horus-gz-bridge
-```
 
 ### Local runs
 
@@ -448,8 +416,9 @@ it is absent.
 
 `./scripts/demo.sh` defaults to this split; `--remote koko` selects it explicitly.
 It runs the headless Gazebo/SITL world, ToF
-bridge, and perception MCP on Koko, while the laptop runs only the `horus-gui`
-container with Gazebo GUI and `horus-gz-bridge`. The local
+bridge, and perception MCP on Koko, while the laptop runs the `horus-gui`
+container with the Gazebo GUI and the AI pilot service (or the `horus`
+terminal) on the host. The local
 `./sim/run.sh gui-client` mode does not start a server, SITL, or ToF bridge;
 its run data is isolated under `sim/run/gui-client/`. The Koko server keeps its
 normal `horus-sim` name and run/log data. `remote_up.sh` syncs source while
@@ -500,8 +469,11 @@ scripts/koko/remote_fetch_logs.sh
 
 `remote_down.sh` stops only the managed Koko server and laptop `horus-gui`
 container, closes the SSH tunnel, and preserves remote run data. Log retrieval
-copies only Koko's `sim/logs/` and `runs/`; existing laptop files with the same
-names are retained as `.before-koko` backups.
+copies only the files in Koko's `sim/logs/` and `runs/` modified since the last
+`remote_up.sh` started its session (Koko's clock, kept in
+`$HORUS_REMOTE_STATE_DIR/session-start` after `remote_down.sh`); without that
+marker it copies nothing. Existing laptop files with the same names are
+retained as `.before-koko` backups.
 
 The deployment uses SSH configuration plus `getent` to find Koko's address,
 `ip -4 route get` on the laptop to select its interface, and the same route
@@ -522,12 +494,12 @@ through an SSH tunnel bound to `127.0.0.1:${HORUS_MCP_LOCAL_PORT}` (default
 `8000`, remote port `8000`); choose another unprivileged local port if needed.
 Do not expose MCP on the LAN.
 
-Indoor SITL loads its proximity and fence parameters automatically:
+Indoor SITL loads its proximity parameters automatically:
 `./sim/run.sh start horus_indoor.sdf` resolves `common.parm` and `indoor.parm`
-through `sim/scripts/world_profiles.py`. `indoor.parm` is the room's ArduPilot
-fence, altitude only (`FENCE_ALT_MAX 2.2` below the 2.5 m walls,
-`FENCE_ACTION 2` lands, `FENCE_MARGIN 0.2`), and proximity avoidance
-(`AVOID_MARGIN 1.0`) holds the walls. The launcher appends the fragments to the
+through `sim/scripts/world_profiles.py`. `indoor.parm` sets the 2 m return
+altitude; the room has no geofence, so nothing stops a climb into the 2.5 m
+ceiling, and proximity avoidance (`AVOID_MARGIN 1.0`) holds the walls. The
+launcher appends the fragments to the
 run-local SITL overrides, preserving `LOG_DISARMED 0`; `HORUS_SITL_PARAM_FILE`
 overrides the list. `common.parm` also sets `PLND_ENABLED 0`: the `gazebo-iris`
 SITL defaults enable ArduPilot precision landing for an IR-lock beacon nothing
@@ -570,8 +542,7 @@ data. The indoor airframe is a vendored copy of `iris_with_gimbal`
 included under the same name, so camera topics are unchanged. Diagnostics are in
 `logs/gimbal.log`; if the device exits, the simulation stops.
 
-The outdoor fragment sets (`common.parm` with `outdoor.parm` and
-`canonical_fence.parm` or `procedural_fence.parm`) load the same
+The outdoor fragment set (`common.parm` with `outdoor.parm`) loads the same
 `PRX1_TYPE 2` / `AVOID_ENABLE 3` / `AVOID_MARGIN 1.0` proximity-avoidance
 settings as the indoor profile (all from `common.parm`), so ArduPilot's simple
 avoidance brakes before trees, buildings and vehicles instead of flying through them.

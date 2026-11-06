@@ -41,7 +41,7 @@ namespace HorusGta
         public ulong Ticks => view.ReadUInt64(SequenceOffset) / 2;
 
         /// <summary>
-        /// One tick's state: whether the drone camera renders this tick's frame, the pose packet it
+        /// One tick's state: whether the drone camera renders this tick's frame, the seq of the pose it
         /// shows, the game frame, and the view mode (<see cref="ViewDrone"/> or <see cref="ViewShared"/>).
         /// </summary>
         public void Publish(bool active, ulong poseSeq, ulong gameFrame, uint viewMode)

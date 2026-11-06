@@ -19,8 +19,7 @@ executor:
   cruise_speed_m_s: 8.0
   cruise_min_altitude_m: 26.0
   vertical_speed_m_s: 1.5
-  # The generator's transit altitude stays >= cruise_min_altitude_m. ArduPilot's fence
-  # (config/ardupilot/outdoor.parm, procedural_fence.parm) bounds the map and altitude.
+  # The generator's transit altitude stays >= cruise_min_altitude_m.
   arrival_tolerance_m: 0.4
   camera_horizontal_fov_deg: 84.0
   default_gimbal_pitch_deg: -45.0

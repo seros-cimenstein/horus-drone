@@ -1,8 +1,8 @@
 # Indoor room-and-corridor profile. Only non-default settings are listed; horus/config.py holds
 # the defaults and documents each executor field.
 gimbal:
-  # The simulated gimbal device (horus-gz-gimbal, or horus-gta-bridge in GTA pose mode) sends to
-  # this port; HORUS drives it directly, not through ArduPilot.
+  # The simulated gimbal device (horus-gz-gimbal) sends to this port; HORUS drives it directly,
+  # not through ArduPilot.
   connection: udpin:127.0.0.1:14600
 perception:
   # Frames are kept by wall time. The commander often thinks 10-25 s between get_frame and point,

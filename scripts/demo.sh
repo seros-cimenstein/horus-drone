@@ -8,24 +8,25 @@ source "${SIM_DIR}/scripts/procedural_world.sh"
 CONTAINER="${HORUS_SIM_CONTAINER_NAME:-horus-sim}"
 MCP_URL="${HORUS_MCP_URL:-http://127.0.0.1:8000/mcp}"
 COMMANDER_URL="${HORUS_COMMANDER_URL:-http://127.0.0.1:8765}"
-if [[ ! "${COMMANDER_URL}" =~ ^http://127\.0\.0\.1:([0-9]{1,5})/?$ ]]; then
-  printf 'HORUS_COMMANDER_URL must be http://127.0.0.1:<port> (got %s).\n' "${COMMANDER_URL}" >&2
-  exit 2
-fi
-COMMANDER_PORT="${BASH_REMATCH[1]}"
 remote_mode=1
 remote_host="${HORUS_REMOTE:-koko}"
 sim_cleanup_needed=0
 remote_cleanup_needed=0
 record_path=""
 procedural=0
+terminal_mode=0
+phone_mode=0
+phone_serve_started=0
 procedural_seed=""
 procedural_kind=""
 procedural_stratum=""
 
 usage() {
-  printf 'Usage: %s [--remote [host] | --local] [--procedural [--seed N] [--kind forest|urban] [--stratum baseline|chaotic]] [--record out.mp4]\n' "${0##*/}"
+  printf 'Usage: %s [--remote [host] | --local] [--terminal | --phone] [--procedural [--seed N] [--kind forest|urban] [--stratum baseline|chaotic]] [--record out.mp4]\n' "${0##*/}"
   printf '%s\n' 'Default: visible laptop GUI with simulation and perception on Koko.'
+  printf '%s\n' 'Missions go through the HORUS control app, a page served by horus-commander-serve at HORUS_COMMANDER_URL (default http://127.0.0.1:8765; set e.g. HORUS_COMMANDER_URL=http://127.0.0.1:8766 when that port is taken).'
+  printf '%s\n' '--terminal opens the horus terminal instead of the control app; never both, each has its own AI pilot.'
+  printf '%s\n' '--phone also publishes the control app on your tailnet (scripts/phone_serve.sh) with its own phone token and prints the phone address; needs HTTPS certificates enabled for the tailnet.'
   printf '%s\n' '--procedural starts a generated outdoor world instead of the indoor demo; in remote mode it is generated here and synced to the remote.'
 }
 
@@ -42,6 +43,14 @@ while (( $# > 0 )); do
       ;;
     --local)
       remote_mode=0
+      shift
+      ;;
+    --terminal)
+      terminal_mode=1
+      shift
+      ;;
+    --phone)
+      phone_mode=1
       shift
       ;;
     --record)
@@ -110,6 +119,29 @@ if [[ -n "${record_path}" ]]; then
     exit 1
   fi
 fi
+if (( terminal_mode == 1 && phone_mode == 1 )); then
+  printf '%s\n' '--phone needs the control app; it cannot be combined with --terminal.' >&2
+  exit 2
+fi
+if (( phone_mode == 1 )); then
+  # Before any world starts: HTTPS certificates on the tailnet, no foreign serve configuration.
+  HORUS_COMMANDER_URL="${COMMANDER_URL}" "${PROJECT_DIR}/scripts/phone_serve.sh" check
+fi
+
+if (( terminal_mode == 0 )); then
+  if [[ ! "${COMMANDER_URL}" =~ ^http://127\.0\.0\.1:([1-9][0-9]{0,4})/?$ ]] \
+    || (( BASH_REMATCH[1] > 65535 )); then
+    printf 'HORUS_COMMANDER_URL must be http://127.0.0.1:<port> (got %s).\n' "${COMMANDER_URL}" >&2
+    exit 2
+  fi
+  COMMANDER_PORT="${BASH_REMATCH[1]}"
+  # Another listener there would receive the page's token; never share or stop it.
+  if (exec 3<>"/dev/tcp/127.0.0.1/${COMMANDER_PORT}") 2>/dev/null; then
+    printf 'Control app port 127.0.0.1:%s is already in use by another process; set HORUS_COMMANDER_URL=http://127.0.0.1:<free port>, for example http://127.0.0.1:8766.\n' \
+      "${COMMANDER_PORT}" >&2
+    exit 1
+  fi
+fi
 
 cd -- "${PROJECT_DIR}"
 if (( remote_mode == 1 )); then
@@ -128,19 +160,27 @@ else
   host_venv_candidates=("${PROJECT_DIR}/.venv" "${PROJECT_DIR}/.venv-host")
 fi
 host_venv=""
+# Run HORUS from this checkout (cwd is PROJECT_DIR), not the venv's console scripts: a venv
+# created at another path keeps a stale launcher shebang.
+if (( terminal_mode == 1 )); then
+  host_import='import horus.repl.app'
+  host_need='the horus terminal'
+else
+  host_import='import horus.commander.server, uvicorn'
+  host_need='horus-commander-serve and uvicorn'
+fi
 for candidate in "${host_venv_candidates[@]}"; do
-  if [[ -x "${candidate}/bin/horus-commander-serve" \
-    && -x "${candidate}/bin/python" ]] \
-    && "${candidate}/bin/python" -c 'import uvicorn' >/dev/null 2>&1; then
+  if [[ -x "${candidate}/bin/python" ]] \
+    && "${candidate}/bin/python" -c "${host_import}" >/dev/null 2>&1; then
     host_venv="${candidate}"
     break
   fi
 done
 if [[ -z "${host_venv}" ]]; then
-  printf '%s\n' 'Host venv needs horus-commander-serve and uvicorn. Use the root README .venv or .venv-host install, or set HORUS_HOST_VENV to a venv with the commander extra.' >&2
+  printf 'Host venv needs %s. Use the root README .venv or .venv-host install, or set HORUS_HOST_VENV to a venv with the commander extra.\n' \
+    "${host_need}" >&2
   exit 1
 fi
-commander_bin="${host_venv}/bin/horus-commander-serve"
 host_python="${host_venv}/bin/python"
 if ! command -v docker >/dev/null 2>&1; then
   printf '%s\n' 'docker is required to run the GUI demo.' >&2
@@ -150,12 +190,20 @@ fi
 if [[ -z "${HORUS_MCP_TOKEN:-}" ]]; then
   HORUS_MCP_TOKEN="$("${host_python}" -c 'import secrets; print(secrets.token_urlsafe(32))')"
 fi
-if [[ -z "${HORUS_COMMANDER_TOKEN:-}" ]]; then
-  HORUS_COMMANDER_TOKEN="$("${host_python}" -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export HORUS_MCP_TOKEN
+if (( terminal_mode == 0 )); then
+  if [[ -z "${HORUS_COMMANDER_TOKEN:-}" ]]; then
+    HORUS_COMMANDER_TOKEN="$("${host_python}" -c 'import secrets; print(secrets.token_urlsafe(32))')"
+  fi
+  export HORUS_COMMANDER_TOKEN
+  if (( phone_mode == 1 )) && [[ -z "${HORUS_COMMANDER_PHONE_TOKEN:-}" ]]; then
+    HORUS_COMMANDER_PHONE_TOKEN="$("${host_python}" -c 'import secrets; print(secrets.token_urlsafe(32))')"
+  fi
+  if (( phone_mode == 1 )); then
+    export HORUS_COMMANDER_PHONE_TOKEN
+  fi
 fi
-export HORUS_MCP_TOKEN HORUS_COMMANDER_TOKEN
 export HORUS_MCP_URL="${MCP_URL}"
-export HORUS_COMMANDER_URL="${COMMANDER_URL}"
 export HORUS_SIM_CONTAINER_NAME="${CONTAINER}"
 if (( procedural == 1 )); then
   procedural_kind="${procedural_kind:-forest}"
@@ -165,12 +213,12 @@ if (( procedural == 1 )); then
   fi
   procedural_stem="$(procedural_world_stem "${procedural_kind}" "${procedural_seed}")"
   # The SITL parameters and the remote MCP config follow the world (run.sh, start_sim.sh and
-  # remote_up.sh resolve them); the MCP started here and the host commander need the config.
+  # remote_up.sh resolve them); the MCP started here and the host terminal need the config.
   world_profile="$(horus_world_profile "${procedural_stem}")"
   read -r profile_config _ <<< "${world_profile}"
-  # Container path for the MCP; the host commander gets the same profile at its host path.
+  # Container path for the MCP; the host terminal gets the same profile at its host path.
   mcp_config="${HORUS_CONFIG:-${profile_config}}"
-  commander_config="${PROJECT_DIR}/${profile_config#/horus/}"
+  host_config="${PROJECT_DIR}/${profile_config#/horus/}"
 fi
 
 if (( procedural == 1 )) && (( remote_mode == 1 )); then
@@ -181,12 +229,11 @@ if (( procedural == 1 )) && (( remote_mode == 1 )); then
   export HORUS_REMOTE_WORLD="${procedural_sdf}"
   export HORUS_GUI_WORLD="${procedural_stem}"
 fi
-# The MCP run pointer holds a container path (/horus/...); the host commander needs a host path.
+# The MCP run pointer holds a container path (/horus/...); the host AI pilot needs a host path.
 export HORUS_EVENT_LOG="${HORUS_EVENT_LOG:-${PROJECT_DIR}/runs/demo/$(date -u +%Y%m%dT%H%M%SZ)-commander-events.jsonl}"
 
 mcp_exec_pid=""
 commander_pid=""
-bridge_exec_pid=""
 gui_wait_pid=""
 record_pid=""
 
@@ -208,6 +255,12 @@ cleanup() {
   local status=$?
   trap - EXIT INT TERM
   stop_background_pid "${record_pid}"
+  if (( phone_serve_started == 1 )); then
+    HORUS_COMMANDER_URL="${COMMANDER_URL}" "${PROJECT_DIR}/scripts/phone_serve.sh" stop || true
+  fi
+  # The AI pilot stops first (it ends its Claude Code process), before its drone board goes away.
+  stop_background_pid "${commander_pid}"
+  stop_background_pid "${gui_wait_pid}"
   if (( remote_mode == 1 )); then
     if (( remote_cleanup_needed == 1 )); then
       if ! "${PROJECT_DIR}/scripts/koko/remote_down.sh" && (( status == 0 )); then
@@ -217,15 +270,12 @@ cleanup() {
         status=1
       fi
     fi
-    stop_background_pid "${gui_wait_pid}"
   else
     if (( sim_cleanup_needed == 1 )); then
       "${SIM_DIR}/run.sh" stop || true
     fi
     stop_background_pid "${mcp_exec_pid}"
-    stop_background_pid "${bridge_exec_pid}"
   fi
-  stop_background_pid "${commander_pid}"
   exit "${status}"
 }
 trap cleanup EXIT
@@ -301,24 +351,17 @@ start_recording() {
   if [[ -n "${video_size}" ]]; then
     printf 'Recording Gazebo XWayland window %s (%s) to %s.\n' \
       "${window_id}" "${video_size}+${x}+${y}" "${record_path}"
-    ffmpeg -n -f x11grab -framerate 30 -video_size "${video_size}" \
+    ffmpeg -nostdin -n -f x11grab -framerate 30 -video_size "${video_size}" \
       -i "${input_source}" -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
       "${record_path}" &
   else
     printf 'Recording full XWayland display :0 to %s. Native Wayland windows are not captured.\n' \
       "${record_path}"
-    ffmpeg -n -f x11grab -framerate 30 -i :0 \
+    ffmpeg -nostdin -n -f x11grab -framerate 30 -i :0 \
       -c:v libx264 -preset ultrafast -pix_fmt yuv420p "${record_path}" &
   fi
   record_pid=$!
 }
-
-# A listener already on the port would receive the commander token and pass the readiness probe.
-if (exec 3<>"/dev/tcp/127.0.0.1/${COMMANDER_PORT}") 2>/dev/null; then
-  printf 'Commander port 127.0.0.1:%s is already in use by another process; set HORUS_COMMANDER_URL=http://127.0.0.1:<free port>.\n' \
-    "${COMMANDER_PORT}" >&2
-  exit 1
-fi
 
 if docker container inspect "${CONTAINER}" >/dev/null 2>&1; then
   printf 'Simulation container %s already exists; stop it before starting the demo.\n' \
@@ -356,40 +399,51 @@ else
   bash "${SIM_DIR}/scripts/enable_camera_stream.sh" "${CONTAINER}"
 fi
 
-if [[ -n "${commander_config:-}" ]]; then
-  HORUS_CONFIG="${commander_config}" "${commander_bin}" --port "${COMMANDER_PORT}" &
-else
-  "${commander_bin}" --port "${COMMANDER_PORT}" &
-fi
-commander_pid=$!
-wait_for_port "${COMMANDER_PORT}" 'host horus-commander-serve' "${commander_pid}"
-
 if (( remote_mode == 1 )); then
-  printf 'Starting local GUI client and commander bridge...\n'
+  printf 'Starting local GUI client...\n'
   "${SIM_DIR}/run.sh" gui-client
-  docker wait "${CONTAINER}" >/dev/null &
-  gui_wait_pid=$!
-else
-  docker exec --workdir /horus \
-    --env "HORUS_COMMANDER_URL=${HORUS_COMMANDER_URL}" \
-    --env "HORUS_COMMANDER_TOKEN=${HORUS_COMMANDER_TOKEN}" \
-    --env "HORUS_MCP_URL=${HORUS_MCP_URL}" \
-    --env "HORUS_MCP_TOKEN=${HORUS_MCP_TOKEN}" \
-    "${CONTAINER}" /opt/horus-venv/bin/python -m horus.gz_bridge &
-  bridge_exec_pid=$!
 fi
-printf '\nDemo ready. Enter a mission request in the Horus Commander panel, for example:\n'
-printf '  Take off and hover near the center of the room.\n'
 if [[ -n "${record_path}" ]]; then
   start_recording
-  printf 'Press Ctrl-C to finish the recording and stop all demo processes.\n'
-else
-  printf 'Press Ctrl-C to stop all demo processes.\n'
+fi
+host_args=()
+if [[ -n "${host_config:-}" ]]; then
+  host_args+=(--config "${host_config}")
+fi
+if (( terminal_mode == 1 )); then
+  printf '\nDemo ready. Type a mission in the HORUS terminal below, for example:\n'
+  printf '  Take off and hover near the center of the room.\n'
+  printf '/hold, /land and /home skip the AI. /quit or Ctrl-D stops all demo processes.\n'
+  "${host_python}" -c 'from horus.repl.app import main; main()' \
+    --server-url "${MCP_URL}" "${host_args[@]}"
+  exit 0
 fi
 
+# It prints the page address, with the token in the URL fragment, once it listens.
+"${host_python}" -c 'from horus.commander.server import main; main()' \
+  --port "${COMMANDER_PORT}" "${host_args[@]}" &
+commander_pid=$!
+wait_for_port "${COMMANDER_PORT}" 'horus-commander-serve' "${commander_pid}"
+if (( remote_mode == 1 )); then
+  # Closing the Gazebo window ends the demo.
+  docker wait "${CONTAINER}" >/dev/null &
+  gui_wait_pid=$!
+fi
+if (( phone_mode == 1 )); then
+  # Prints the phone address with the phone token in its fragment (and a QR code).
+  HORUS_COMMANDER_URL="${COMMANDER_URL}" "${PROJECT_DIR}/scripts/phone_serve.sh" start
+  phone_serve_started=1
+fi
+printf '\nDemo ready. Open the HORUS control app address printed above in a browser on this laptop\n'
+if (( phone_mode == 1 )); then
+  printf 'or the phone address on your phone,\n'
+fi
+printf 'and type a mission, for example:\n'
+printf '  Take off and hover near the center of the room.\n'
+printf 'HOLD, LAND and HOME on the page skip the AI. Press Ctrl-C to stop all demo processes.\n'
+
 children=()
-for pid in "${mcp_exec_pid}" "${commander_pid}" "${bridge_exec_pid}" \
-  "${gui_wait_pid}" "${record_pid}"; do
+for pid in "${mcp_exec_pid}" "${commander_pid}" "${gui_wait_pid}" "${record_pid}"; do
   [[ -n "${pid}" ]] && children+=("${pid}")
 done
 finished_pid=""
@@ -402,7 +456,6 @@ fi
 case "${finished_pid:-}" in
   "${mcp_exec_pid}") mcp_exec_pid="" ;;
   "${commander_pid}") commander_pid="" ;;
-  "${bridge_exec_pid}") bridge_exec_pid="" ;;
   "${gui_wait_pid}") gui_wait_pid="" ;;
   "${record_pid}") record_pid="" ;;
 esac

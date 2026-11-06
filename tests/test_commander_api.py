@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import sys
 from types import ModuleType, SimpleNamespace
@@ -15,7 +16,7 @@ from horus.config import CommanderSettings
 
 _MCP_TOOLS = [
     SimpleNamespace(name=name, description=f"{name} tool", inputSchema={"type": "object"})
-    for name in ("get_state", "wait_events", "wait_for_event", "hold")
+    for name in ("get_state", "wait_events", "wait_for_event", "hold", "operator_emergency", "operator_release")
 ]
 
 
@@ -157,7 +158,8 @@ def test_api_backend_offers_only_the_tools_claude_code_allows(monkeypatch, provi
 
     tools = requests[0]["tools"]
     names = [tool["function"]["name"] if provider == "openai" else tool["name"] for tool in tools]
-    assert "wait_events" in MODEL_DISALLOWED_TOOLS
+    assert {"wait_events", "operator_emergency", "operator_release", "get_map_index", "get_map_tile",
+            "get_live_map"} <= MODEL_DISALLOWED_TOOLS
     assert names == ["get_state", "wait_for_event", "hold"]
 
 
@@ -176,3 +178,37 @@ def test_api_backend_stops_after_max_turns_tool_call_rounds(monkeypatch, provide
     assert len(requests) == 3
     assert len(session.calls) == 3
     assert backend._history == []  # the failed turn is rolled back entirely
+
+
+def test_openai_backend_reports_the_images_it_gives_the_model_as_ai_views(monkeypatch):
+    picture = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4
+    encoded = base64.b64encode(picture).decode("ascii")
+    requests = []
+    _install_fake_provider(
+        monkeypatch, "openai",
+        lambda index: ("tool", "get_frame", {}) if index == 0 else ("text", "a plaza"),
+        requests, [],
+    )
+
+    class Session:
+        async def call_tool(self, name, arguments):
+            return SimpleNamespace(isError=False, content=[
+                SimpleNamespace(type="text", text='{"frame_id": 3}'),
+                SimpleNamespace(type="image", mimeType="image/png", data=encoded),
+            ])
+
+    backend = _backend("openai", Session())
+
+    async def scenario():
+        result = await backend.send("[operator] look")
+        return result, await _drain(backend)
+
+    result, records = asyncio.run(scenario())
+
+    assert result == "a plaza"
+    image_message = requests[1]["messages"][-1]
+    assert image_message["content"][1]["image_url"]["url"] == f"data:image/png;base64,{encoded}"
+    assert [record for record in records if record["kind"] == "ai_view"] == [{
+        "source": "openai", "kind": "ai_view", "tool": "get_frame", "tool_use_id": "call-0",
+        "mime_type": "image/png", "image": picture,
+    }]
