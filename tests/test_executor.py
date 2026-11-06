@@ -181,6 +181,50 @@ def test_supervisor_contact_keeps_hold_and_its_loss_triggers_rth():
     executor.close()
 
 
+def test_operator_emergency_refuses_the_ai_until_released_but_not_the_operator():
+    flight = FakeFlight()
+    executor = HorusExecutor(flight, _settings(), autostart=False)
+    executor.submit_skill("goto", {"pose": {"north_m": 2, "east_m": 0, "up_m": 2}})
+
+    assert executor.rth(source="operator")["state"] == "RTH"
+    assert executor.get_state()["operator_lock"] == "rth"
+
+    # The AI's own emergencies and moves would undo the operator's RTH: refused, RTH kept.
+    for undo in (
+        lambda: executor.hold(source="mcp"),
+        lambda: executor.land(source="mcp"),
+        lambda: executor.submit_skill("goto", {"pose": {"north_m": 1, "east_m": 0, "up_m": 2}}),
+    ):
+        with pytest.raises(RuntimeError, match="operator emergency rth in effect"):
+            undo()
+    assert executor.state == ExecutorState.RTH
+    assert flight.commands[-1] == ("rth",)
+
+    # The operator can change its mind at any time; the lock follows the latest action.
+    assert executor.hold(source="operator")["state"] == "HOLDING"
+    assert executor.get_state()["operator_lock"] == "hold"
+
+    assert executor.release_operator_lock() == {"released": "hold"}
+    assert executor.get_state()["operator_lock"] is None
+    assert executor.hold(source="mcp")["state"] == "HOLDING"
+    executor.submit_skill("goto", {"pose": {"north_m": 1, "east_m": 0, "up_m": 2}})
+    executor.close()
+
+
+def test_link_loss_rth_still_fires_during_an_operator_hold():
+    flight = FakeFlight()
+    executor = HorusExecutor(flight, _settings(link_loss_rth_delay_s=0.01), autostart=False)
+    executor.hold(source="operator")
+    executor.tick()
+    time.sleep(0.02)
+
+    executor.tick()
+
+    assert executor.state == ExecutorState.RTH
+    assert flight.commands[-1] == ("rth",)
+    executor.close()
+
+
 def test_task_that_ends_on_a_disarmed_vehicle_never_arms_link_loss_rth():
     flight = FakeFlight(Pose(0.0, 0.0, 0.2))  # on the ground, never armed
     executor = HorusExecutor(flight, _settings(link_loss_rth_delay_s=0.01), autostart=False)
@@ -531,6 +575,38 @@ def test_look_tilts_the_gimbal_and_the_pitch_survives_take_off_and_a_released_la
     assert gimbal.points[-1] == (-20.0, 0.0)
     assert executor.look(0.0)["pitch_deg"] == 0.0
     executor.close()
+
+
+def test_look_pans_the_gimbal_clamps_yaw_and_keeps_the_direction_for_later_skills():
+    flight = FakeFlight(Pose(0.0, 0.0, 0.2))
+    gimbal = FakeGimbal(pitch_deg=-45.0)
+    executor = HorusExecutor(flight, _settings(default_gimbal_pitch_deg=-45.0), gimbal=gimbal, autostart=False)
+    assert executor.get_state()["camera_yaw_deg"] == 0.0
+
+    result = executor.look(-30.0, 60.0)
+    assert (result["pitch_deg"], result["yaw_deg"], result["clamp_reason"]) == (-30.0, 60.0, None)
+    assert gimbal.points[-1] == (-30.0, 60.0)
+    state = executor.get_state()
+    assert (state["camera_pitch_deg"], state["camera_yaw_deg"]) == (-30.0, 60.0)
+
+    # Beyond the gimbal's yaw travel (gimbal.yaw_limit_deg, 160 by default) it stops at the limit.
+    clamped = executor.look(-30.0, -200.0)
+    assert (clamped["requested_yaw_deg"], clamped["yaw_deg"]) == (-200.0, -160.0)
+    assert "yaw limited to ±160" in clamped["clamp_reason"] and "pitch" not in clamped["clamp_reason"]
+    assert gimbal.points[-1] == (-30.0, -160.0)
+    with pytest.raises(ValueError, match="yaw_deg"):
+        executor.look(-30.0, float("nan"))
+    assert gimbal.points[-1] == (-30.0, -160.0)
+
+    executor.look(-30.0, 75.0)
+    executor.submit_skill("take_off", {"altitude_m": 2.0}, ttl_s=5.0)
+    executor.tick()  # take-off re-aims the camera: the commanded pitch and yaw, not the defaults
+    assert gimbal.points[-1] == (-30.0, 75.0)
+    # A pitch-only call (as before pan existed) faces the nose again.
+    assert executor.look(-10.0)["yaw_deg"] == 0.0
+    assert gimbal.points[-1] == (-10.0, 0.0)
+    executor.close()
+
 
 
 def test_executor_publishes_task_finished_once_on_terminal_transition():

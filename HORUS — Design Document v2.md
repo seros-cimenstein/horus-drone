@@ -25,16 +25,20 @@ HORUS is a drone you direct instead of pilot: a cloud AI decides *what* to do, a
 The priority order is Safety > Failsafe/RTH > Local executor > Cloud brain, and the core must fly safely with zero modules and zero cloud.
 
 - **Semantics in the cloud, geometry onboard.** The drone never needs to understand what things are; it handles space, motion, identity-by-comparison and "that tracked thing."
-- **Safety is deterministic.** ArduPilot holds the flight limits (fence, altitude ceiling), collision avoidance and failsafes; none of them depends on a model, and HORUS has no limit layer of its own.
-- **The AI never sends raw motor or velocity commands.** It picks one base move at a time (take off, go to, move, turn, look, hold, land, return home); the executor flies it in closed loop with velocity setpoints that ArduPilot's avoidance and fence bound.
+- **Safety is deterministic.** ArduPilot holds collision avoidance and failsafes; none of them depends on a model, and HORUS has no limit layer of its own. There is no geofence: no boundary, altitude ceiling or floor.
+- **The AI never sends raw motor or velocity commands.** It picks one base move at a time (take off, go to, move, turn, look, hold, land, return home); the executor flies it in closed loop with velocity setpoints that ArduPilot's avoidance bounds.
 - **Simulation first.** Every feature runs in SITL + Gazebo before real flight.
 
 ```mermaid
 flowchart TD
-  Y["You"] --> R["Terminal<br/>horus/repl"]
-  R --> C["AI pilot<br/>horus/commander"]
+  Y["You"] --> R["Control app<br/>web page (horus/commander/web) or horus terminal"]
+  R --> C["AI pilot<br/>horus/commander, the commander"]
+  C -->|ask_planner| K["Crew<br/>planner (pilot, spotter, safety officer planned), one chat each"]
   R -.hold / land / home skip the AI.-> M
-  C -->|MCP over tunnel| M["Drone remote<br/>horus/mcp_server"]
+  C <-->|asks / next move| LLM["AI model<br/>Claude Code, Anthropic or OpenAI"]
+  K <-->|asks| LLM
+  C -->|MCP over tunnel| M["Drone board<br/>horus/mcp_server, computer on the drone"]
+  K -->|MCP, own role token| M
   M --> E["Flight moves<br/>horus/executor, one move at a time"]
   M --> P["Camera vision<br/>horus/perception, numbered objects"]
   P -.fallback.-> G["Grounding model<br/>loopback grounder"]
@@ -54,6 +58,61 @@ The AI pilot plans and reports; emergency words skip it; the grounding model is 
 | Flight control | ArduPilot on a dedicated flight controller | 400 Hz | Stabilization, avoidance, failsafes |
 
 Executor states (`ExecutorState` in `horus/executor/core.py`): `IDLE → EXECUTING → HOLDING → RTH`, plus `PILOT` whenever a pilot or autopilot failsafe takes over. `OFFLINE_MISSION` and `RETURNING_TO_LINK` are planned states for disconnected autonomy (stretch) and do not exist yet. Every command has a time-to-live: a queued command that expires is dropped, and a running one that expires is stopped and the executor holds in GUIDED.
+
+### Built and planned
+
+The diagram above is the target architecture. For three of its parts the table shows what is built today and what is still planned:
+
+| Part | Built | Planned |
+| --- | --- | --- |
+| Control app (`horus/commander/web/`, `horus/repl/`) | The HORUS control app, built 2026-10-31: a web page on the laptop, served by the AI pilot service (see "Control app design" below), with mission box, news feed, live camera, drone state, map and HOLD / LAND / HOME buttons that skip the AI. Since 2026-11-01 the same page is also the phone app, installed from the user's tailnet (see "Phone app design" below). Since 2026-11-02 both show the pictures the AI received in the feed, and the phone has a Camera tab with them and an optional live view. The `horus` terminal remains a second control app: free text goes to the AI pilot, emergency words skip the AI. Any MCP client, such as Claude Code or Codex, can also connect to the drone board directly. | Decide the laptop's live camera cost on a real drone link (open question in "Phone app design"). |
+| Drone board (`horus/mcp_server/`) | Runs in the simulation container, on the laptop or on Koko. | Runs on the AM67A-class companion computer on the drone (see Flight controller and Hardware). |
+| Drone board link | Bearer token on every request, loopback-only listener; between machines an SSH tunnel carries and encrypts it. | Encryption built into the drone board's link, for the radio link to a real drone. |
+
+#### Control app design (decided and built 2026-10-31)
+
+Built by the loop `LOOP_CONTROL_APP.md`; the root README, "The control app", is the user guide.
+
+- **Form:** a web page served on the laptop at `127.0.0.1` and opened in a browser. Laptop only: no phone or network access in the first version (the phone came on 2026-11-01, see "Phone app design"). Built: plain HTML, CSS and JavaScript in `horus/commander/web/`, no build step and no outside downloads, so it works offline.
+- **Back end:** the AI pilot service `horus-commander-serve` serves the page and is the only thing the browser talks to. The browser never holds the drone board token; the service reads the drone board for the page. Built: the service prints `http://127.0.0.1:<port>/#token=<token>` to its own terminal once it listens; the token travels in the URL fragment, which never reaches a server, and the page keeps it in `sessionStorage` and sends it as a bearer token. Only the three static files are served without the token. The page's reads go through `GET /api/state`, `/api/frame` and `/api/map` on a second drone board session of the service (`horus/commander/display.py`), never the AI pilot's. `scripts/demo.sh` starts the service and prints the address; `--terminal` opens the `horus` terminal instead, never both.
+- **First version screens (all built):**
+  - mission box and news feed: missions go to `POST /task`, the AI's words and moves arrive on `GET /events`, read with a streaming `fetch` that reconnects with `Last-Event-ID`; "New mission" posts `POST /reset`;
+  - live camera with the numbered objects, refreshed about once a second; "No camera" without frames;
+  - drone state: height, rangefinder, battery, flight mode, executor state, link status and data age, stale values marked;
+  - map: drone with heading and trail, home, marks and candidates, plus roads and named places when the world has a street map (GTA V). Since 2026-11-01 (user request) it moves like a street-map app (drag, pinch, wheel, +/-, a centre button that follows the drone again) and has Mission Planner-style selections: points P1.. (Point tool, long-press, right-click) and areas A1.. (polygon by corners, rectangle by drag), movable by their handles. Decided with the user: selections act only through the AI, never as a direct operator flight command. A selected point offers "Fly here", an area "Search area": a ready-made mission sent on a second tap (a mission also ends an operator lock); "Use in mission" puts the name in the mission box, and any mission naming a selection carries its coordinates in metres from home. Since 2026-11-02 (user decision) the street map covers the whole GTA map: both views fetch only the tiles on screen at the zoom's level of detail and keep them in IndexedDB (browsed tiles up to a 2 MB cap, least recently used first; an "Offline map" download of every tile is kept until removed), plus the small live poll; `/api/map` and `/api/map/static` are gone;
+  - emergency buttons hold, land and home, always visible, sent to `POST /emergency` and never through the AI, never disabled by a running mission or a lost feed.
+- **Safety constraints:**
+  - The page's reads are display-only. Like `get_state(passive=True)`, they must not count as AI contact; otherwise a page left open would keep the "AI goes quiet: hold, then home" failsafe from firing. Built: `list_candidates`, `get_map_index`, `get_map_tile` and `get_live_map` have the same `passive` parameter, and the service passes `passive=True` on every display read; a passive call is neither logged nor counted as contact. (`get_map` and `get_area_map` had it until 2026-11-01, when the page stopped calling them.)
+  - Camera reads for the page must not replace the AI's last set-of-mark view. Built: `list_candidates(passive=True)` does not publish the set-of-mark image.
+  - The AI must not undo an operator emergency (decided 2026-11-01, after the AI cancelled the operator's HOME with its own `hold` in a GTA run). Built: the control apps send emergencies as `operator_emergency`, which locks out the AI's `take_off`, `goto`, `move`, `turn`, `hold`, `rth` and `land` in the executor until `operator_release`, sent with the operator's next mission or New mission; the model is never offered these two tools, and the page shows the lock. The link-loss return home still fires during the lock.
+- **Worlds:** works the same in Gazebo and GTA V runs; it needs no Gazebo window.
+- **Terminal:** the `horus` terminal stays as a second control app, with its own AI pilot.
+
+#### Phone app design (decided and built 2026-11-01)
+
+Decided with the user on 2026-11-01 and built the same day (ledger `LOOP_PHONE_APP.md`, `PLAN.md` phase 6); the root README, "The phone app", is the user guide.
+
+- **Form:** the same page made phone-friendly and installable to the home screen (a web app manifest and a service worker), opened in a phone view. No app store and no second code base; still plain HTML, CSS and JavaScript with no build step and no outside downloads. Built: `?view=phone` or a home-screen start switches the page to the phone view; installed on the user's Galaxy XCover Pro through Brave ("Install app"), where it runs standalone.
+- **Access:** over the user's Tailscale tailnet: `tailscale serve` on the laptop gives the tailnet HTTPS address and forwards to the service, which keeps listening on `127.0.0.1` only. Only the user's own tailnet devices can connect, from anywhere. Prerequisite: HTTPS certificates enabled for the tailnet (Tailscale admin console, DNS; enabled 2026-11-01; the machine names then appear in public certificate transparency logs). Built: `scripts/phone_serve.sh start|stop|status|check` and `scripts/demo.sh --phone`; the script never uses `tailscale funnel` and refuses a serve configuration it did not add.
+- **Login:** a separate phone token (`HORUS_COMMANDER_PHONE_TOKEN`), accepted next to the laptop's; restarting the service without it revokes the phone. Same rules as the laptop token: in the URL fragment of the printed address, never in logs or the event stream. Built: the phone view keeps it in the app's own storage so the home-screen app starts logged in, and drops it on a 401.
+- **What it can do:** everything the laptop page can: missions, New mission, HOLD / LAND / HOME (with the operator lock), the news feed and drone state.
+- **What it shows:**
+  - the camera, decided 2026-11-02: what the AI saw. The AI pilot service keeps the pictures its HORUS tools returned to the AI model (the newest 30, at most 8 MB, in memory); the feed shows each as a small thumbnail outside the folded commands, and a Camera tab shows the newest large with its age, the older ones a swipe away. The page downloads a picture only when it shows it, so these cost no extra drone link. An optional Live toggle, off by default, shows the drone camera now, one picture a second, only while the Camera tab is open, with its measured size per picture. Built: `GET /api/ai-view/<id>` and `GET /api/ai-view/latest`, `ai_view` feed events without picture bytes;
+  - the AI's work as a feed: the operator's requests and the AI's words in full, and each AI turn's commands and results folded into one collapsed "Show commands" block, opened on demand, like a thinking block in a chat app; emergencies and task results always visible;
+  - a compact state line (height, mode, battery, link, what the drone is doing, the operator lock);
+  - large HOLD / LAND / HOME within thumb reach, never disabled.
+- **Map, optimised for a phone link:** decided 2026-11-02: the map covers the whole GTA map (Los Santos and Blaine County), not a 600 m circle. It comes as square tiles at three levels (250 m with every feature, 1000 m simplified, 4000 m overview). The phone downloads tiles on demand, like Google Maps, and keeps recently used ones up to a cap; an option downloads every tile at once for offline use. Only small changing data travels while it runs (pose, heading, marks, positioned candidates). Built: `scripts/maps/build_gta_tiles.py` builds the tiles once (2249, 157 and 18 tiles; 5.9 MB gzipped in all); hidden passive drone board reads `get_map_index(known_version)`, `get_map_tile(level, x, y, known_version)` and `get_live_map()`; the service answers `GET /api/map/index` and `GET /api/map/tile` with ETag/304 and gzip, and `GET /api/map/live` (about 200 bytes every 2 s). The drone board reads tiles from disk, so the whole map costs it under 40 MB. Built in both control apps: the level is picked by metres per screen pixel (250 m tiles up to 1 m/px, 1 km tiles up to 4 m/px, 4 km beyond), the tiles on screen plus a one-tile margin are fetched four at a time, newest view first, with a coarser tile drawn while a finer one loads; IndexedDB keeps browsed tiles up to 2 MB (least recently used evicted) and the "Offline map" download (every tile, pinned until removed, with `navigator.storage.persist`); a new map version drops every stored tile.
+- **Open: camera bandwidth on a real drone (2026-11-01, still to discuss).** The laptop page's live camera reads a JPEG about once a second from the drone board, which on a real drone crosses the drone's radio or internet link on top of what the AI itself pulls. Options to weigh: keep it in simulation only, lower its rate or size, show it only on demand, or show only the frames the AI requested. The phone already does the last two (2026-11-02: what the AI saw, and Live only on demand).
+
+#### Crew, GTA gimbal and GTA route planner (decided 2026-11-03, phase 7)
+
+Decided with the user on 2026-11-03; ledger `LOOP_GTA_CREW_PLANNER.md`, `PLAN.md` phase 7. Not built yet.
+
+- **Crew.** The commander stays the only agent that talks to the operator. It hands jobs to crew members, each its own chat with the AI model, its own system prompt and its own drone board role token, so the drone board itself refuses every tool outside the member's job (a prompt never enforces scope). Members go from general to special and are added only where they take load off, never for their own sake. The base crew is planner, pilot, spotter and safety officer; specialists (radio operator, audio spotter and so on) join only when the drone carries their equipment. Every sensing job has at least one member, under the chain that uses it (the audio spotter under the spotter). Phase 7 builds the machinery and the **planner**; the commander keeps its flight tools until the pilot exists.
+- **One writer per actuator.** Sensor data is shared: any member may read the same camera frames. Pointing the camera, like flying, has exactly one owner at a time, enforced by the drone board: a second member's `look` is refused with the holder's name, and the commander hands the camera over per leg (pilot in transit, spotter while searching). Precision landing already takes the camera from the AI this way. The gimbal lease is built when a second member gets `look`; in phase 7 only the commander has it.
+- **GTA gimbal.** A gimbal device for GTA, `horus/gimbal/gta.py`, on the same MAVLink gimbal-device protocol as Gazebo's (`horus/gimbal/device.py`), talks to `HorusGta.dll` over two small UDP datagrams (setpoint in, measured camera attitude out). The mod points the camera with HORUS's setpoint instead of ArduPilot's placeholder servo mount, which goes. `look` gains pan: `look(pitch_deg, yaw_deg)` with yaw relative to the nose, in every world with a gimbal.
+- **GTA height map.** No GTA data on disk has obstacle heights (the navmesh has holes where buildings stand). The mod surveys the whole map once at 5 m cells by casting rays straight down after loading collision at each spot; the result is the top surface (roofs, trees, terrain) per 250 m tile. Rays from above miss what is under an overhang, so routes only ever go over obstacles, never under them.
+- **Route tool and planner.** A drone board tool `plan_route` (planner role only) runs A* on the height map and returns waypoints that the commander flies one `goto` at a time, so the AI still chooses each move. Two modes, both decided: one altitude for the whole route (around everything taller), or climbing over obstacles leg by leg. Every returned leg is checked along its whole length against the height map plus the margins before it is returned.
 
 ## Scope tiers
 
@@ -156,18 +215,18 @@ The executor runs the package as a rule-based behavior tree; it never invents ne
 
 ## Safety and MCP interface
 
-A bad AI decision cannot produce a dangerous maneuver: ArduPilot's fence, altitude ceiling, proximity avoidance and failsafes bound every move HORUS sends, and emergency tools bypass the task queue. HORUS itself only checks its inputs (finite numbers, take-off above 0 m, no target at or below home) and clamps nothing.
+ArduPilot's proximity avoidance and failsafes act on every move HORUS sends, and emergency tools bypass the task queue. There is no geofence, so nothing bounds how far or how high a move goes: a bad AI decision can fly the drone out of the area or into a ceiling. HORUS itself only checks its inputs (finite numbers, take-off above 0 m, no target at or below home) and clamps nothing.
 
 - **Collision avoidance:** ToF ring (4–6× VL53L1X) feeding ArduPilot proximity (`PRX_*`, `AVOID_ENABLE`). Monocular depth may add awareness but is never the only safeguard.
 - **Verify avoidance in Guided mode first.** The executor drives the drone in Guided mode, and avoidance behaves differently per flight mode. Milestone S3 in the simulation plan proves the proximity sensors stop executor-issued motion before anything else is built on it.
 - **Odometry and RTH:** GPS in the default profile; without GPS, optical flow + downward rangefinder into EKF3 (Section: Navigation source). Home set at takeoff, AprilTag pad for precise landing, breadcrumb retracing as backup (planned).
-- **Failsafes:** cloud link lost → the executor holds, and after `link_loss_rth_delay_s` (default 30 s) of hold with no MCP call it returns home (`auto_rth`): if the AI goes quiet, the drone holds still, then flies home. Planned (stretch): run a mission package if any, return to the link zone, then RTH. Low battery → RTH with enforced reserve. ArduPilot's fence breach action lands or returns home. Hardware RC override always available.
-- **Pilot override is final.** Any armed flight-mode change HORUS did not request (RC mode switch, GCS, ArduPilot battery/fence/EKF failsafe) cancels all HORUS work, enters `PILOT` state, publishes `pilot_override`, and refuses every flight tool, emergencies included, until the vehicle is switched back to GUIDED (`pilot_released`) or disarmed. HORUS only re-sends GUIDED when telemetry does not already report it, so a stale GUIDED report never undoes a pilot's switch.
+- **Failsafes:** cloud link lost → the executor holds, and after `link_loss_rth_delay_s` (default 30 s) of hold with no MCP call it returns home (`auto_rth`): if the AI goes quiet, the drone holds still, then flies home. Planned (stretch): run a mission package if any, return to the link zone, then RTH. Low battery → RTH with enforced reserve. Hardware RC override always available.
+- **Pilot override is final.** Any armed flight-mode change HORUS did not request (RC mode switch, GCS, ArduPilot battery/EKF failsafe) cancels all HORUS work, enters `PILOT` state, publishes `pilot_override`, and refuses every flight tool, emergencies included, until the vehicle is switched back to GUIDED (`pilot_released`) or disarmed. HORUS only re-sends GUIDED when telemetry does not already report it, so a stale GUIDED report never undoes a pilot's switch.
 
 | Category | Tools |
 | --- | --- |
 | State | `get_state`, `get_frame`, `get_raw_frame`, `list_candidates`, `get_map`, `get_link_status` |
-| Base moves | `take_off(altitude_m)`, `goto(pose)`, `move(forward_m, right_m, up_m)`, `turn(heading_deg|by_deg, rate_deg_s)`, `look(pitch_deg)`; one at a time |
+| Base moves | `take_off(altitude_m)`, `goto(pose)`, `move(forward_m, right_m, up_m)`, `turn(heading_deg|by_deg, rate_deg_s)`, `look(pitch_deg, yaw_deg)` (yaw from the nose); one at a time |
 | Grounding | `set_vocabulary(terms)` (continuous open-vocabulary detection), `point(frame_id, description|box)` (may seed a new tracker ID), `set_mode(name)` (`active`/`paused` detection) |
 | Scene | `get_candidate_motion(id)`, `watch_region(name, box, class_name)`, `list_region_watches`, `remove_region_watch(watch_id)` |
 | Maps | `find_place(query)`, `get_area_map(north_m, east_m, radius_m)`, `mark_place(name, north_m, east_m, note)` |
@@ -181,7 +240,7 @@ HORUS is a provider-agnostic MCP server: any MCP client and model can command it
 
 ### Navigation source
 
-GPS flight is the default on every shipped world: the indoor room (`horus_indoor`), the canonical outdoor worlds (`horus_forest`, `horus_urban`), generated procedural worlds (`horus_<kind>_p<seed>`) and the GTA V world (`gta`). The SITL parameters are composed from fragments in `config/ardupilot/`: `common.parm` (proximity avoidance, downward rangefinder) followed by `indoor.parm`, or by `outdoor.parm` plus `canonical_fence.parm` or `procedural_fence.parm`; each fragment set carries that world's ArduPilot fence. The GTA SITL (`sim/scripts/start_gta_sitl.sh`) appends `gta.parm`. `sim/scripts/world_profiles.py` maps each world to its executor config and fragment list; `HORUS_SITL_PARAM_FILE` overrides it. The GPS-free profile (optical flow into EKF3, barometer altitude, downward rangefinder) is `nogps.parm` loaded after `common.parm` and `indoor.parm` (`sim/scripts/s4_landing_trials.sh`); it stays maintained so the same stack can fly without GPS when needed.
+GPS flight is the default on every shipped world: the indoor room (`horus_indoor`), the canonical outdoor worlds (`horus_forest`, `horus_urban`), generated procedural worlds (`horus_<kind>_p<seed>`) and the GTA V world (`gta`). The SITL parameters are composed from fragments in `config/ardupilot/`: `common.parm` (proximity avoidance, downward rangefinder) followed by `indoor.parm` or `outdoor.parm`; no fragment sets a geofence. The GTA SITL (`sim/scripts/start_gta_sitl.sh`) writes its own overrides. `sim/scripts/world_profiles.py` maps each world to its executor config and fragment list; `HORUS_SITL_PARAM_FILE` overrides it. The GPS-free profile (optical flow into EKF3, barometer altitude, downward rangefinder) is `nogps.parm` loaded after `common.parm` and `indoor.parm` (`sim/scripts/s4_landing_trials.sh`); it stays maintained so the same stack can fly without GPS when needed.
 
 ### Flight controller
 
@@ -232,13 +291,13 @@ flowchart LR
 
 The agent runs in its own container so `tc netem` delay and loss apply only to the brain link, never to MAVLink.
 
-**Gazebo or GTA, one per run.** The test world is either Gazebo (`sim/`, the stack above) or GTA V (`gta/`): in GTA's pose mode ArduCopter SITL flies its own built-in quad and GTA V only renders the drone camera (`horus-gta-bridge` streams the camera pose to `HorusGta.dll`; `horus_capture.asi` serves the frames on `gta://`), and in its JSON-physics mode the quad flies inside the game, which also emulates the ToF payload. `sim/run.sh start --gta` starts GTA's SITL with no Gazebo and its own ArduPilot fence (`gta.parm`). The two never run together: `sim/run.sh start` refuses a second HORUS world container under any name and the other world's host process (`gz sim` or the GTA V game), a config whose `perception.source` belongs to the other world, and `scripts/koko/gta_game.sh start` refuses to start GTA while Gazebo runs. Running both would overload the host.
+**Gazebo or GTA, one per run.** The test world is either Gazebo (`sim/`, the stack above) or GTA V (`gta/`): in GTA the quad always flies inside the game as a physical object (ArduCopter SITL on its JSON backend, `HorusGta.dll` flying the quad and casting the emulated ToF beams; `horus_capture.asi` serves the frames on `gta://`), so it collides with GTA's world. `sim/run.sh start --gta` starts GTA's SITL with no Gazebo. The two never run together: `sim/run.sh start` refuses a second HORUS world container under any name and the other world's host process (`gz sim` or the GTA V game), a config whose `perception.source` belongs to the other world, and `scripts/koko/gta_game.sh start` refuses to start GTA while Gazebo runs. Running both would overload the host.
 
 ### World and sensors
 
 - **Indoor world (`horus_indoor`):** a room and corridor with furniture, a textured floor and an AprilTag pad; Gazebo actors (animated people) in different shirt colors, one lying on the floor.
-- **GTA V world (`gta`):** Legion Square in GTA V Enhanced around `HorusGta.ini [origin]`, either rendered only (pose mode) or flown in the game (JSON physics); its map tools read the GTA road graph, places and walkable navmesh (`config/horus_gta.yaml`).
-- **Outdoor worlds:** the canonical `horus_forest` and `horus_urban`, and procedurally generated forest/urban worlds (`horus_<kind>_p<seed>`), all flown on GPS with an ArduPilot fence.
+- **GTA V world (`gta`):** Legion Square in GTA V Enhanced around `HorusGta.ini [origin]`, flown in the game with collisions; the camera rides on HorusGta.dll's gimbal, which HORUS points through `horus-gta-gimbal` (`horus/gimbal/gta.py`) and which rests at -45° until it does. Its map tools read the GTA road graph, places and walkable navmesh (`config/horus_gta.yaml`).
+- **Outdoor worlds:** the canonical `horus_forest` and `horus_urban`, and procedurally generated forest/urban worlds (`horus_<kind>_p<seed>`), all flown on GPS with no geofence.
 - **GPS-free flight (S4):** `nogps.parm` disables the SITL GPS and flies on SITL's simulated optical flow into EKF3, with the downward rangefinder from the ToF bridge. Every other profile flies on GPS (Section: Navigation source).
 - **ToF ring:** six short-range Gazebo lidar sensors plus a downward range sensor indoors (one 8-beam ring lidar on the procedural payload), read by a small bridge that sends MAVLink `DISTANCE_SENSOR` messages, with ArduPilot proximity set to the MAVLink type (`PRX1_TYPE 2`).
 - **Perception in sim** runs on the dev PC (PyTorch / ONNX). Cap its frame rate to what the AI board's accelerator is expected to sustain, so behavior does not depend on desktop-class compute.
@@ -318,7 +377,7 @@ Hardware bring-up runs in parallel from week 5, so the go/no-go in week 8 is a r
 | Find the person in the red shirt | ≥ 80% correct target over 20 sim trials; report names the right location |
 | Keep that person in view | Through a 2 s occlusion the commander keeps the person framed with `turn`/`move`/`look` and re-seeds the ID with `point`, in ≥ 80% of trials |
 | Link cut, no package | Holds, returns home and lands within a set distance of the AprilTag center in every trial |
-| Unsafe command injected | Stopped by ArduPilot's fence or proximity avoidance in 100% of trials |
+| Unsafe command injected | Stopped by ArduPilot's proximity avoidance in 100% of trials |
 
 - [ ] Confirm the submission deadline and team size, then turn weeks into dates
 
@@ -342,4 +401,9 @@ Techniques HORUS builds on: dual-system control (Figure's Helix, NVIDIA GR00T N1
 
 ## History
 
+- **2026-11-03 — crew, GTA gimbal and GTA route planner decided** (phase 7, `LOOP_GTA_CREW_PLANNER.md`): the AI pilot gains a crew of members with their own chats and drone board role tokens, starting with the planner; GTA gains a gimbal with pitch and pan, a whole-map height survey at 5 m and a `plan_route` tool with a fixed-altitude and a climb-over mode. Diagram: the Crew block and its arrows.
+- **2026-11-02 — GTA always flies with collisions.** At the user's decision no session may start the GTA world without collisions: `sim/run.sh start --gta` is always the physics mode (the former `--gta --json-physics`). Removed: the camera-only pose mode, `horus-gta-bridge` (`horus/gta_bridge.py`) and its role as the GTA gimbal device, and the `--json-physics` option; `config/horus_gta.yaml` lost its `gimbal` connection. Accepted cost: the AI's `look` stays unavailable in GTA until a gimbal is built for physics mode. HorusGta.dll's unused pose receiver goes at the next mod rebuild.
+- **2026-11-02 — ArduPilot geofence removed** everywhere at the user's request (no circle, ceiling or floor in any world or for a real drone); the indoor drone can now reach the ceiling.
+- **2026-10-31 — HORUS control app built** (`LOOP_CONTROL_APP.md`). A web page served by the AI pilot service `horus-commander-serve` on the laptop (`horus/commander/web/`): mission box and news feed, live camera, drone state, map, and HOLD / LAND / HOME that go to `POST /emergency` and never through the AI. Login by the token in the URL fragment of the address the service prints. The service reads the drone board for the page on a second session with `passive=True` (new on `get_map`, `get_area_map` and `list_candidates`), so the page never counts as AI contact and never replaces the AI's last set-of-mark view. `scripts/demo.sh` now starts the service and prints the address (`--terminal` keeps the `horus` terminal); the service ends its Claude Code process on SIGTERM too.
+- **2026-10-31 — target architecture names and plan.** The terminal is now the control app and the drone remote the drone board, matching the approved diagram; the diagram gains the AI model the AI pilot asks. "Built and planned" records what is still missing: HORUS's own control app, the drone board on the companion computer, and encryption built into its link. Removed: the old "Horus Commander" Gazebo GUI panel (`sim/gui/horus_commander/`) and its relay `horus-gz-bridge`; `scripts/demo.sh` now opens the `horus` terminal instead.
 - **2026-10-29 — aligned to the approved architecture diagram** (`LOOP_DIAGRAM_ALIGN.md`). Removed: the target skills `approach`, `follow(id)` and `orbit` with their lost-target reflex, belief, ground track and trails; the area skills `scan` and `search`; the onboard plan runner `run_plan` (with `get_plan_status`, `wait_for_plan`, `cancel_plan`, the `plan_finished`/`plan_log` events and the TypeFly-style plan grammar); `get_lost_target` and `retarget`; re-identification of lost tracks and the validation grace window; target profiles and the embedding/tiny-head recognition modes (`set_target_profile`, recognition ladder steps 1–2); HORUS's own flight envelope (geofence polygon and inset, altitude band, leg-length clamps), the `set_speed` cap and the turn-rate maximum, which ArduPilot's fences, avoidance and yaw limits replace. Until then the must-have demo was "follow that person" (`follow(id)` surviving a 2 s occlusion); it is now "keep that person in view" with base moves and `point`.

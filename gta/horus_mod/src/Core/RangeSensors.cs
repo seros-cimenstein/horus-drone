@@ -18,7 +18,7 @@ namespace HorusGta
     /// <item>horizontal beams: the sphere radius (0.12 m), the body's collision reach sideways, so a
     /// reading of 0 means the collision sphere touches the obstacle (resting against a wall it reads
     /// the 1 mm rest gap). The visible props reach about 0.35 m from the centre but do not collide.</item>
-    /// <item>down beam: the resting centre height, radius + <see cref="RestGapM"/> (0.121 m), where
+    /// <item>down beam: the resting centre height, radius + <see cref="QuadBody.RestGapM"/> (0.121 m), where
     /// the collision step puts the centre above the landing contact, so landed on flat ground the
     /// down sensor reads 0.</item>
     /// </list>
@@ -29,8 +29,6 @@ namespace HorusGta
         /// <summary>Index of the down beam; 0..5 are horizontal.</summary>
         public const int Down = 6;
         public const double MaxRangeM = 4.0;
-        /// <summary>Gap the collision step leaves between the sphere and a surface it rests on (m).</summary>
-        public const double RestGapM = 0.001;
         public const double DefaultRateHz = 20, MinRateHz = 10, MaxRateHz = 20;
         public static readonly string[] Names = { "front", "front_right", "right", "rear", "left", "front_left", "down" };
         /// <summary>Yaw of each horizontal beam in the body frame, rad, positive left (counter-clockwise from above).</summary>
@@ -56,7 +54,7 @@ namespace HorusGta
             if (!(rateHz >= MinRateHz && rateHz <= MaxRateHz)) throw new ArgumentOutOfRangeException(nameof(rateHz), rateHz, "range sensor rate must be 10..20 Hz");
             this.ray = ray ?? throw new ArgumentNullException(nameof(ray));
             HorizontalHullM = frame.RadiusM;
-            DownHullM = frame.RadiusM + RestGapM;
+            DownHullM = frame.RadiusM + QuadBody.RestGapM;
             RateHz = rateHz;
             PeriodS = 1 / rateHz;
         }
@@ -150,13 +148,18 @@ namespace HorusGta
         }
 
         [StructLayout(LayoutKind.Explicit)]
-        struct F32 { [FieldOffset(0)] public float Value; [FieldOffset(0)] public uint Bits; }
+        struct F32Union { [FieldOffset(0)] public float Value; [FieldOffset(0)] public uint Bits; }
 
-        static uint F32Bits(float v) => new F32 { Value = v }.Bits;
+        /// <summary>IEEE 754 bits of <paramref name="v"/>, and back.</summary>
+        public static uint F32Bits(float v) => new F32Union { Value = v }.Bits;
+        public static float F32(uint bits) => new F32Union { Bits = bits }.Value;
 
-        static void WriteU32(byte[] b, int o, uint v)
+        /// <summary>Little-endian u32 at byte offset <paramref name="o"/>.</summary>
+        public static void WriteU32(byte[] b, int o, uint v)
         {
             for (int i = 0; i < 4; i++) b[o + i] = (byte)(v >> (8 * i));
         }
+
+        public static uint ReadU32(byte[] b, int o) => (uint)(b[o] | b[o + 1] << 8 | b[o + 2] << 16 | b[o + 3] << 24);
     }
 }

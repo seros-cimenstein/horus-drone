@@ -19,6 +19,8 @@ from horus.mcp_client import DEFAULT_MCP_URL, call_json, open_session
 EMERGENCY_TOOLS = {"hold", "rth", "land"}
 # Slash emergencies: the tool names plus /home, the operator's word for return-to-home.
 _SLASH_EMERGENCIES = {**{tool: tool for tool in EMERGENCY_TOOLS}, "home": "rth"}
+# Typed flight commands the operator sends by hand (/goto, /take_off).
+OPERATOR_FLIGHT_COMMANDS = {"goto", "take_off"}
 
 
 def _interactive_arguments(line: str) -> tuple[str, dict[str, Any]] | None:
@@ -133,7 +135,9 @@ async def interactive(server_url: str, token: str, config: HorusConfig) -> None:
                         discarded = _discard_queued(lines)
                         try:
                             if commander is None:
-                                result: Any = await call_json(session, parsed[0])
+                                result: Any = await call_json(
+                                    session, "operator_emergency", {"action": parsed[0]}
+                                )
                             else:
                                 # Interrupts the active model turn; uses this session until the
                                 # commander's own MCP session is connected.
@@ -146,6 +150,10 @@ async def interactive(server_url: str, token: str, config: HorusConfig) -> None:
                         if discarded:
                             print(f"discarded {discarded} queued commander request(s)", file=sys.stderr)
                     else:
+                        if parsed[0] in OPERATOR_FLIGHT_COMMANDS:
+                            # The operator flying by hand takes the drone back from an operator
+                            # emergency, as a new mission would.
+                            await call_json(session, "operator_release")
                         result = await call_json(session, parsed[0], parsed[1])
                         print(json.dumps(result, ensure_ascii=False, indent=2))
                 except Exception as exc:

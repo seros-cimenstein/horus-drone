@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 
 from horus.config import ExecutorSettings, load_config
-from sim.scripts.world_profiles import world_profile
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -38,6 +37,8 @@ def test_only_the_gta_profile_reads_gta_frames_and_the_gta_map() -> None:
     assert gta_profiles == {"horus_gta.yaml"}
     gta = load_config(ROOT / "config" / "horus_gta.yaml")
     assert gta.perception.source.startswith("gta://") and gta.map.provider == "gta"
+    # HorusGta.dll's gimbal answers through horus-gta-gimbal on the same port as Gazebo's device.
+    assert gta.gimbal.connection == "udpin:127.0.0.1:14600" and gta.executor.default_gimbal_pitch_deg == -45.0
 
 
 MAP_HALF_EXTENT_M = 600.0  # generated worlds span 1.2 km
@@ -46,21 +47,13 @@ MAP_HALF_EXTENT_M = 600.0  # generated worlds span 1.2 km
 @pytest.mark.parametrize("kind", ["forest", "urban"])
 def test_procedural_profiles_enable_city_scale_cruise_inside_the_map(kind: str) -> None:
     executor = load_config(ROOT / f"config/horus_procedural_{kind}.yaml").executor
-    fence: dict[str, float] = {}
-    for param_file in world_profile(f"horus_{kind}_p1").param_files.split(":"):
-        for line in (ROOT / param_file.removeprefix("/horus/")).read_text(encoding="utf-8").splitlines():
-            fields = line.split("#", 1)[0].split()
-            if len(fields) == 2 and fields[0].startswith("FENCE_"):
-                fence[fields[0]] = float(fields[1])
 
     assert executor.cruise_speed_m_s > executor.speed_m_s
-    # The cruise gate lies under ArduPilot's altitude fence, the only ceiling.
-    assert 0.0 < executor.cruise_min_altitude_m < fence["FENCE_ALT_MAX"]
-    # ArduPilot's circular fence bounds the map and must clear its corners...
-    assert fence["FENCE_RADIUS"] >= MAP_HALF_EXTENT_M * math.sqrt(2.0)
-    # ...and one command TTL must cover a goto from home to that fence in wall-clock time at
-    # RTF 0.35 on the 1.2 km worlds.
-    assert executor.command_ttl_s >= fence["FENCE_RADIUS"] / (executor.cruise_speed_m_s * 0.35)
+    assert executor.cruise_min_altitude_m > 0.0
+    # One command TTL must cover a goto from home to a map corner in wall-clock time at RTF 0.35
+    # on the 1.2 km worlds.
+    corner_m = MAP_HALF_EXTENT_M * math.sqrt(2.0)
+    assert executor.command_ttl_s >= corner_m / (executor.cruise_speed_m_s * 0.35)
 
 
 def test_cruise_speed_must_exceed_speed_m_s() -> None:

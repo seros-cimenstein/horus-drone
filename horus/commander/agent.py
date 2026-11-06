@@ -9,6 +9,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
+from horus.commander.ai_views import AIViewStore
 from horus.commander.backends import (
     APICommanderBackend, ClaudeCodeSession, CommanderBackend, redact_secret,
 )
@@ -30,7 +31,9 @@ class CommanderEvent:
 # Kinds that can repeat in bursts (flaky link): wake the commander at most once per cooldown and
 # report the suppressed count with the next forwarded batch.
 _REPEAT_LIMITED_KINDS = frozenset({"link_lost", "link_restored"})
-# Emergency events whose requester already informs the model; mirrored to the log/GUI only.
+# Emergency events whose requester already informs the model; mirrored to the log/GUI only:
+# the model's own (MCP) emergencies. This commander's operator emergencies are skipped by action
+# (`_own_operator_emergencies`) because it sends its own notice; another control app's are not.
 _ECHOED_EMERGENCY_SOURCES = frozenset({"mcp"})
 
 
@@ -108,6 +111,7 @@ class HorusCommander:
         api_key: str | None = None,
         event_log: JsonlEventLog | None = None,
         event_callback: Callable[[Mapping[str, Any]], None] | None = None,
+        ai_views: AIViewStore | None = None,
     ) -> None:
         self.server_url = server_url.rstrip("/")
         self.bearer_token = bearer_token
@@ -123,6 +127,8 @@ class HorusCommander:
             )
         self.event_log = event_log or event_log_from_environment()
         self.event_callback = event_callback
+        # The camera images the model received, kept for the control app; outlives missions.
+        self.ai_views = ai_views if ai_views is not None else AIViewStore()
         self._events: asyncio.Queue[CommanderEvent | None] = asyncio.Queue()
         self._failure: Exception | None = None
         self._stopped = asyncio.Event()
@@ -135,6 +141,11 @@ class HorusCommander:
         self._event_message_tasks: set[asyncio.Task[None]] = set()
         self._wake_policy = _EventWakePolicy()
         self._emergency_generation = 0
+        # Actions of operator_emergency calls this commander made whose event the pump has not
+        # seen yet; their notice already tells the model, so the event must not wake it again.
+        self._own_operator_emergencies: list[str] = []
+        self._last_event_error = ""
+        self._last_event_error_at = 0.0
 
     async def submit_task(self, text: str) -> str:
         """Queue a free-text operator request for the current mission."""
@@ -180,14 +191,23 @@ class HorusCommander:
         try:
             if self.backend is not None:
                 await self.backend.reset()
+            # A new mission gives the AI its flight tools back after an operator emergency.
+            await self._release_operator_lock()
         finally:
             self._session_ready.set()
 
-    async def emergency(self, action: str, *, session: Any = None) -> str:
-        """Execute an emergency MCP tool directly, independently of Claude/API work.
+    async def _release_operator_lock(self) -> None:
+        session = self._mcp_session
+        if session is not None:
+            raise_for_error(await session.call_tool("operator_release", {}), "operator_release")
 
-        ``session`` is the caller's own MCP session, used until the commander's is connected, so
-        an emergency never waits for commander startup.
+    async def emergency(self, action: str, *, session: Any = None) -> str:
+        """Execute an operator emergency MCP tool directly, independently of Claude/API work.
+
+        It goes through ``operator_emergency``, which also locks out the AI's own flight tools
+        until the operator's next mission (``submit_task`` or ``reset`` release it), so the model
+        cannot undo it. ``session`` is the caller's own MCP session, used until the commander's is
+        connected, so an emergency never waits for commander startup.
         """
         if action not in {"hold", "land", "rth"}:
             raise ValueError("emergency action must be hold, land, or rth")
@@ -200,9 +220,13 @@ class HorusCommander:
         backend = self.backend
         # Interrupt the active model turn alongside, never ahead of, the emergency tool call.
         interrupting = None if backend is None else asyncio.create_task(backend.interrupt())
+        # Before the call: the executor publishes the event while the tool runs.
+        self._own_operator_emergencies.append(action)
         try:
-            result = await mcp_session.call_tool(action, {})
+            result = await mcp_session.call_tool("operator_emergency", {"action": action})
         except BaseException:
+            if action in self._own_operator_emergencies:  # the pump may have seen its event
+                self._own_operator_emergencies.remove(action)
             if interrupting is not None:
                 await asyncio.gather(interrupting, return_exceptions=True)
             raise
@@ -211,7 +235,11 @@ class HorusCommander:
         raise_for_error(result, action)
         result_text = tool_text(result) or "completed"
         if backend is not None and self._mission_active:
-            notice = f"[operator emergency] {action} executed: {result_text}"
+            notice = (
+                f"[operator emergency] {action} executed: {result_text}. The operator has the "
+                "drone: your flight tools (take_off, goto, move, turn, hold, rth, land) are refused "
+                "until the operator's next message. Do not try to undo it."
+            )
             task = asyncio.create_task(self._send_emergency_notice(backend, notice, generation))
             self._track_task(task, self._event_message_tasks)
         return result_text
@@ -306,6 +334,8 @@ class HorusCommander:
             backend = self.backend
             if backend is None:
                 raise RuntimeError("commander backend is not ready")
+            # The operator's next mission ends an operator emergency's lock on the AI.
+            await self._release_operator_lock()
             self._mission_active = True
             result = await backend.send(f"[operator] {event.text.strip()}")
             if not event.response.done():
@@ -320,7 +350,31 @@ class HorusCommander:
 
     async def _forward_backend_records(self, backend: CommanderBackend) -> None:
         async for event in backend.stream_records():
+            if event.get("kind") == "ai_view":
+                kept = self._keep_ai_view(event)
+                if kept is not None:
+                    self._append_event(kept)
+                continue
             self._append_event(event)
+
+    def _keep_ai_view(self, event: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Store an image the model received; the event keeps only its id and size."""
+        image = event.get("image")
+        if not isinstance(image, bytes):
+            return None
+        tool_use_id = event.get("tool_use_id")
+        view = self.ai_views.add(
+            image,
+            str(event.get("mime_type") or "image/jpeg"),
+            str(event.get("tool") or ""),
+            tool_use_id if isinstance(tool_use_id, str) else None,
+        )
+        if view is None:
+            return None
+        kept = {"kind": "ai_view", **view.metadata()}
+        if event.get("source"):
+            kept["source"] = event["source"]
+        return kept
 
     async def _pump_events(self, session: Any) -> None:
         cursor = 0
@@ -361,9 +415,17 @@ class HorusCommander:
                     }
                     self._append_event(mirrored)
                     if kind == "emergency" and _event_source(event) in _ECHOED_EMERGENCY_SOURCES:
-                        # An MCP-requested emergency was sent by this commander (which already
-                        # sends its own notice) or by the model itself. Waking the model again
-                        # would cost a second turn.
+                        # The model's own emergency: it knows. Waking it would cost a turn.
+                        continue
+                    data = event.get("data")
+                    action = data.get("action") if isinstance(data, Mapping) else None
+                    if (
+                        kind == "emergency"
+                        and _event_source(event) == "operator"
+                        and action in self._own_operator_emergencies
+                    ):
+                        # This commander's operator emergency: its notice tells the model.
+                        self._own_operator_emergencies.remove(action)
                         continue
                     if self._wake_policy.admit(event, loop.time()):
                         pending.append(event)
@@ -405,7 +467,13 @@ class HorusCommander:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self._append_event({"kind": "event_message_error", "error": str(exc)})
+            # Event batches folded into one failed turn all fail with the same error at once: the
+            # feed gets it once, not once per batch.
+            error, now = str(exc), asyncio.get_running_loop().time()
+            if self._last_event_error == error and now - self._last_event_error_at < 5.0:
+                return
+            self._last_event_error, self._last_event_error_at = error, now
+            self._append_event({"kind": "event_message_error", "error": error})
 
     @staticmethod
     def _track_task(task: asyncio.Task[None], tasks: set[asyncio.Task[None]]) -> None:

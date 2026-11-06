@@ -70,6 +70,8 @@ namespace HorusGta
         public double YawTorquePerThrustM = 0.016;
         /// <summary>Radius of the body's collision sphere (m).</summary>
         public double RadiusM = 0.12;
+        /// <summary>Height of the resting body centre above the ground (HORUS up 0): one radius plus 1 mm.</summary>
+        public double RestHeightM => RadiusM + 0.001;
         /// <summary>
         /// HORUS camera mount point in body axes (right, forward, up), m: Los Santos FPV's camera
         /// point on <c>ch_prop_casino_drone_02a</c>, at the nose above the body centre.
@@ -126,6 +128,11 @@ namespace HorusGta
         public Vec3 Position, Normal;
         /// <summary>Host handle of the entity hit; 0 for world collision (map, ground).</summary>
         public int Entity;
+        /// <summary>
+        /// True when the hit lies on the step's own path (the motion ray and its reach): the body
+        /// stops before it. False for a hit found by a separate ray (the ground probe).
+        /// </summary>
+        public bool OnPath;
     }
 
     /// <summary>
@@ -149,8 +156,8 @@ namespace HorusGta
         public double FloorZ;
         /// <summary>
         /// Host world test: a point on the first surface met moving from a to b (looking the given
-        /// reach past b), or under b within the reach, or null. The reach is the body radius plus
-        /// <see cref="ContactSkinM"/>. Null host: flat ground at <see cref="FloorZ"/>. See <see cref="WorldProbe"/>.
+        /// reach past b), or under b within twice the reach, or null. The reach is the body radius
+        /// plus <see cref="ContactSkinM"/>. Null host: flat ground at <see cref="FloorZ"/>. See <see cref="WorldProbe"/>.
         /// </summary>
         public Func<Vec3, Vec3, double, Contact?> Sweep;
 
@@ -244,31 +251,55 @@ namespace HorusGta
             SpecificForce = (V - v0) * (1 / h) + new Vec3(0, 0, G);
         }
 
-        /// <summary>Stop at the first surface on the way (keeping the damped sliding velocity), else move.</summary>
+        /// <summary>
+        /// Move the centre from <paramref name="from"/> towards <paramref name="to"/>, stopping where it
+        /// would come closer to the surface found than one radius plus <see cref="RestGapM"/> (or than
+        /// it already is), and constrain the velocity when touching. The centre only moves along the
+        /// step's own segment, which the world test found clear, so it never crosses a surface. Until
+        /// 2026-11-02 it was put one radius off the hit point along the surface normal instead: that
+        /// moved it sideways, a landed quad walked down slopes, and on a Vinewood hillside one walked
+        /// through a rock face into the ground and fell through the map.
+        /// </summary>
         Vec3 Collide(Vec3 from, Vec3 to)
         {
             double r = Frame.RadiusM;
             Contact? hit = Sweep != null ? Sweep(from, to, r + ContactSkinM) : FloorContact(to, r);
-            var n = hit.HasValue ? hit.Value.Normal.Normalized : default;
-            double vn = Vec3.Dot(V, n);
-            // Moving away from the surface (taking off): no constraint.
-            if (!hit.HasValue || vn > 0)
+            InContact = false;
+            LastContact = null;
+            if (!hit.HasValue) return to;
+            var c = hit.Value;
+            var n = c.Normal.Normalized;
+            // Distances from the surface's plane at the start and end of the step; along the segment they change linearly.
+            double sFrom = Vec3.Dot(from - c.Position, n), sTo = Vec3.Dot(to - c.Position, n);
+            double keep = Math.Min(sFrom, r + RestGapM);
+            double t = sTo >= keep ? 1 : Math.Max(0, (sFrom - keep) / (sFrom - sTo));
+            bool blocked = false;
+            if (c.OnPath)
             {
-                InContact = false;
-                LastContact = null;
-                return to;
+                // Never past a hit on the path, whatever its normal says: stop 1 mm before it.
+                Vec3 d = to - from;
+                double len = d.Length;
+                double before = len > 1e-12 ? (Vec3.Dot(c.Position - from, d) / len - 0.001) / len : 0;
+                if (before < t) { t = Math.Max(0, before); blocked = true; }
             }
+            Vec3 p = from + (to - from) * t;
+            double vn = Vec3.Dot(V, n);
+            bool touching = blocked || sFrom + (sTo - sFrom) * t <= r + ContactSkinM;
+            // Not touching, or moving away from the surface (taking off): no constraint.
+            if (!touching || vn >= 0) return p;
             InContact = true;
-            LastContact = hit;
-            Contacted?.Invoke(hit.Value, -vn);
+            LastContact = c;
+            Contacted?.Invoke(c, -vn);
             V = V - n * vn;                    // no bounce: the frame and props absorb the impact
             V = V * (n.Z > 0.7 ? 0.0 : 0.3);   // resting on the ground does not slide; walls keep 30 %
             W = W * 0.5;
-            return hit.Value.Position + n * (r + 0.001);
+            return p;
         }
 
-        /// <summary>Surfaces closer than this count as touching (m); larger than the 1 mm rest offset.</summary>
+        /// <summary>Surfaces closer than this count as touching (m); larger than <see cref="RestGapM"/>.</summary>
         public const double ContactSkinM = 0.002;
+        /// <summary>Gap the collision step leaves between the sphere and a surface it rests on (m).</summary>
+        public const double RestGapM = 0.001;
 
         Contact? FloorContact(Vec3 to, double r)
         {
@@ -304,11 +335,13 @@ namespace HorusGta
     /// game). So a long ray down (<see cref="GroundProbeDepthM"/>) caches the ground height under
     /// the body, refreshed every <see cref="ReprobeSteps"/> steps or <see cref="ReprobeDistanceM"/>
     /// of horizontal travel, and the short down ray runs only within <see cref="NearGroundM"/> of
-    /// that height. Grazing contacts beside the path are not seen.
+    /// that height. The short ray is <see cref="DownReachFactor"/> reaches long: on a slope the
+    /// sphere touches above the ground point straight under it, at 60° twice the reach above it.
+    /// Grazing contacts beside the path are not seen.
     /// </summary>
     public sealed class WorldProbe
     {
-        public const double GroundProbeDepthM = 50, ReprobeDistanceM = 0.5, NearGroundM = 1.0;
+        public const double GroundProbeDepthM = 50, ReprobeDistanceM = 0.5, NearGroundM = 1.0, DownReachFactor = 2;
         public const int ReprobeSteps = 100;
 
         readonly Func<Vec3, Vec3, Contact?> ray;
@@ -330,8 +363,14 @@ namespace HorusGta
             if (len > 1e-9)
             {
                 var hit = Ray(from, to + d * (reach / len));
-                if (hit.HasValue) return hit;
+                if (hit.HasValue)
+                {
+                    var onPath = hit.Value;
+                    onPath.OnPath = true;
+                    return onPath;
+                }
             }
+            double down = reach * DownReachFactor;
             double dx = to.X - probedAt.X, dy = to.Y - probedAt.Y;
             if (++stepsSinceProbe >= ReprobeSteps || dx * dx + dy * dy > ReprobeDistanceM * ReprobeDistanceM)
             {
@@ -339,10 +378,10 @@ namespace HorusGta
                 groundZ = ground.HasValue ? ground.Value.Position.Z : double.NegativeInfinity;
                 probedAt = to;
                 stepsSinceProbe = 0;
-                return ground.HasValue && to.Z - ground.Value.Position.Z <= reach ? ground : null;
+                return ground.HasValue && to.Z - ground.Value.Position.Z <= down ? ground : null;
             }
-            if (to.Z - reach > groundZ + NearGroundM) return null;
-            return Ray(to, to + new Vec3(0, 0, -reach));
+            if (to.Z - down > groundZ + NearGroundM) return null;
+            return Ray(to, to + new Vec3(0, 0, -down));
         }
     }
 }

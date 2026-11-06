@@ -15,6 +15,7 @@ them (``quote_label``). Pure, standard library only.
 
 from __future__ import annotations
 
+import gzip
 import json
 import math
 from collections.abc import Iterable, Sequence
@@ -121,8 +122,10 @@ class MapData:
 
 
 def load_map_file(path: str | Path) -> MapData:
-    """Read a common-schema JSON map (``schema`` ``horus-map/1``), as written by the map fetchers."""
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    """Read a common-schema JSON map (``schema`` ``horus-map/1``), gzipped when it ends in ``.gz``."""
+    path = Path(path)
+    raw = gzip.decompress(path.read_bytes()) if path.suffix == ".gz" else path.read_bytes()
+    data = json.loads(raw.decode("utf-8"))
     if data.get("schema") != SCHEMA:
         raise ValueError(f"{path} is not a {SCHEMA} map")
 
@@ -194,6 +197,11 @@ def simplify_loop(loop: tuple[Point, ...], tolerance: float) -> tuple[Point, ...
     return tuple(first[:-1] + second[:-1])
 
 
+def simplify_line(points: tuple[Point, ...], tolerance: float) -> tuple[Point, ...]:
+    """Douglas-Peucker on an open polyline; the end points always stay."""
+    return points if len(points) <= 2 else tuple(_douglas_peucker(points, tolerance))
+
+
 def _douglas_peucker(points: Sequence[Point], tolerance: float) -> list[Point]:
     keep = [False] * len(points)
     keep[0] = keep[-1] = True
@@ -233,7 +241,7 @@ def merge_polygons(
     merged: list[Area] = []
     for kind, outlines in by_kind.items():
         loops = [simplify_loop(loop, tolerance_m) for loop in _boundary_loops(outlines, grid_m)]
-        loops = [loop for loop in loops if len(loop) >= 3 and abs(_signed_area(loop)) >= 1.0]
+        loops = [loop for loop in loops if len(loop) >= 3 and abs(signed_area(loop)) >= 1.0]
         boxes = [_bbox(loop) for loop in loops]
         parents: list[list[int]] = []
         for i, loop in enumerate(loops):
@@ -293,7 +301,7 @@ def _boundary_loops(outlines: Iterable[Sequence[Point]], grid_m: float) -> list[
     return loops
 
 
-def _signed_area(loop: Sequence[Point]) -> float:
+def signed_area(loop: Sequence[Point]) -> float:
     return sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(loop, loop[1:] + loop[:1])) / 2.0
 
 
