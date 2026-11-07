@@ -1,5 +1,15 @@
-# Notes for the next session (written 2026-10-29, updated 2026-11-03)
+# Notes for the next session (written 2026-10-29, updated 2026-11-07)
 
+- 2026-11-07: the AI pilot reaches DeepSeek 4.1 Flash (max thinking) through omp instead of the
+  opencode HTTP API: `commander.provider: omp`, `omp_model: opencode-go/deepseek-v4.1-flash`, no
+  API key (README "Install"; design document History). Proven live on Koko (indoor Gazebo): a
+  control app mission ran take_off, wait_for_task, get_state (1.06 m), land and wait_for_event
+  through `OmpSession`. Proven against a stub drone board: no shell or file tools, and omp's
+  approval deny refused `wait_events` before it reached the board. omp cannot hide single MCP
+  tools, so the AI pilot's reserved tools stay listed to the model, only denied.
+- Koko from outside its Ethernet link: `ssh -J seref koko` works over the tailnet. `remote_up.sh`
+  then needs `HORUS_REMOTE_GZ_IP=10.0.0.2`: otherwise it picks Koko's Wi-Fi address, Gazebo
+  discovery finds no topics, and the camera enable step times out and stops the world.
 - 2026-11-03: phase 7 decided with the user and written as `LOOP_GTA_CREW_PLANNER.md` (21 items, not
   run): a GTA gimbal with pitch and pan, a whole-map GTA height survey at 5 m, a `plan_route` drone
   board tool (fixed-altitude and climb-over modes) and the crew with the planner as its first member
