@@ -14,7 +14,7 @@ same block.
 | `#63bb` | Control app | `horus/commander/web/`, `horus/repl/` | Where you give missions: a web page or the terminal; emergencies skip the AI |
 | `#61d9` | AI pilot | `horus/commander/` | One chat per mission with the AI model; HTTP API for apps; serves the web page |
 | `#5c06` | Crew | `horus/commander/crew.py` | Members the commander asks (planner first), each its own chat and drone board role token |
-| `#a581` | AI model | outside | Claude Code, Anthropic or OpenAI; picks the next single move |
+| `#a581` | AI model | outside | Reached through omp (shipped profiles), Claude Code, Anthropic or OpenAI; picks the next single move |
 | `#03a1` | Drone board | `horus/mcp_server/` | The tool server on the drone's computer; the AI's only control panel |
 | `#a3f1` | Flight moves | `horus/executor/` | take off, go to, move, turn, look, hold, land, home; one at a time |
 | `#31b9` | Camera vision | `horus/perception/` | Detects, numbers and tracks things in the camera picture |

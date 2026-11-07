@@ -51,15 +51,10 @@ commander:
   max_turns: 200
   timeout_s: 900.0
   # Branch `chinkmaxxing`: every model in the commander and its crew runs DeepSeek 4.1 Flash at max
-  # effort through the opencode gateway (OpenAI-compatible). Needs OPENCODE_API_KEY in the
-  # environment and the `commander-openai` extra.
-  provider: openai
-  base_url: https://opencode.ai/zen/go/v1
-  api_key_env: OPENCODE_API_KEY
-  model: deepseek-v4.1-flash
-  reasoning_effort: max
-  extra_headers:
-    x-opencode-session: horus-commander
+  # thinking through omp (oh-my-pi), using the user's existing omp login and no API key.
+  provider: omp
+  omp_model: opencode-go/deepseek-v4.1-flash
+  omp_thinking: max
 # The whole GTA map (Los Santos and Blaine County): road graph, districts, street furniture and
 # GTA's ped navmesh as walkable ground, for find_place/get_area_map and the control apps' map
 # tiles (horus/maps). Built once per machine into this tile directory with

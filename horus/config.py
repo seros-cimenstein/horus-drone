@@ -270,10 +270,10 @@ class ServerSettings:
 
 @dataclass(frozen=True, slots=True)
 class CommanderSettings:
-    # The keyless Claude Code CLI stays the code default; every shipped profile on branch
-    # `chinkmaxxing` pins provider `openai` with DeepSeek 4.1 Flash at max effort instead (see
-    # config/horus*.yaml). The opencode gateway refuses a request without its session header, so
-    # those profiles set `extra_headers`, and its reasoning budget comes out of `max_tokens`.
+    # The keyless Claude Code CLI stays the code default. Every shipped profile on branch
+    # `chinkmaxxing` pins provider `omp` with DeepSeek 4.1 Flash at max thinking instead: a
+    # persistent `omp --mode rpc` process uses the user's existing omp login, needs no API key,
+    # and sees only the HORUS drone board's MCP tools.
     provider: str = "claude-code"
     model: str = "claude-3-5-sonnet-latest"
     base_url: str | None = None
@@ -289,14 +289,22 @@ class CommanderSettings:
     # account) and reasoning effort (low, medium, high, xhigh, max). None keeps the CLI's own default.
     claude_model: str | None = None
     claude_effort: str | None = None
+    # omp backend: the `omp` executable, its model id/pattern (None keeps omp's default), and
+    # thinking level (None keeps omp's default). The model must resolve under the user's own
+    # omp login; no API key is read.
+    omp_command: str = "omp"
+    omp_model: str | None = None
+    omp_thinking: str | None = None
     # OpenAI-compatible backend: reasoning effort sent as `reasoning_effort`; None sends nothing.
     reasoning_effort: str | None = None
     # OpenAI-compatible backend: headers the client sends on every request.
     extra_headers: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.provider not in {"claude-code", "anthropic", "openai"}:
-            raise ValueError("commander provider must be 'claude-code', 'anthropic', or 'openai'")
+        if self.provider not in {"claude-code", "anthropic", "openai", "omp"}:
+            raise ValueError(
+                "commander provider must be 'claude-code', 'anthropic', 'openai', or 'omp'"
+            )
         if (
             isinstance(self.timeout_s, bool)
             or not isinstance(self.timeout_s, (int, float))
@@ -317,6 +325,18 @@ class CommanderSettings:
             raise ValueError("commander max_turns must be a positive integer")
         if not isinstance(self.claude_command, str) or not self.claude_command.strip():
             raise ValueError("commander claude_command must be a non-empty string")
+        if not isinstance(self.omp_command, str) or not self.omp_command.strip():
+            raise ValueError("commander omp_command must be a non-empty string")
+        if self.omp_model is not None and (
+            not isinstance(self.omp_model, str) or not self.omp_model.strip()
+        ):
+            raise ValueError("commander omp_model must be a non-empty string or null")
+        if self.omp_thinking is not None and self.omp_thinking not in {
+            "off", "minimal", "low", "medium", "high", "xhigh", "max",
+        }:
+            raise ValueError(
+                "commander omp_thinking must be off, minimal, low, medium, high, xhigh, or max"
+            )
 
 
 @dataclass(frozen=True, slots=True)
