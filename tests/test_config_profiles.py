@@ -129,31 +129,61 @@ def test_cruise_config_validation_goes_through_the_loader(tmp_path: Path) -> Non
     assert settings.cruise_min_altitude_m == 30.0
 
 
-def test_commander_model_config_goes_through_the_loader(tmp_path: Path) -> None:
+def test_commander_omp_config_goes_through_the_loader(tmp_path: Path) -> None:
+    path = tmp_path / "commander.yaml"
+    path.write_text(
+        "commander:\n"
+        "  provider: omp\n"
+        "  omp_model: opencode-go/deepseek-v4.1-flash\n"
+        "  omp_thinking: max\n",
+        encoding="utf-8",
+    )
+    commander = load_config(path).commander
+    assert (commander.provider, commander.omp_model, commander.omp_thinking) == (
+        "omp",
+        "opencode-go/deepseek-v4.1-flash",
+        "max",
+    )
+    # A level omp does not know would be passed to its CLI: refuse it here.
+    path.write_text("commander:\n  omp_thinking: maxx\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="commander omp_thinking"):
+        load_config(path)
+    path.write_text("commander:\n  omp_command: '  '\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="commander omp_command"):
+        load_config(path)
+    path.write_text("commander:\n  omp_model: ''\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="commander omp_model"):
+        load_config(path)
+    path.write_text("commander:\n  provider: omp-code\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="commander provider"):
+        load_config(path)
+
+
+def test_openai_compatible_commander_settings_still_go_through_the_loader(tmp_path: Path) -> None:
     path = tmp_path / "commander.yaml"
     path.write_text(
         "commander:\n"
         "  provider: openai\n"
-        "  base_url: https://opencode.ai/zen/go/v1\n"
-        "  api_key_env: OPENCODE_API_KEY\n"
-        "  model: deepseek-v4.1-flash\n"
+        "  base_url: https://example.invalid/v1\n"
+        "  api_key_env: EXAMPLE_API_KEY\n"
+        "  model: some-model\n"
         "  reasoning_effort: max\n"
         "  extra_headers:\n"
-        "    x-opencode-session: horus-commander\n",
+        "    x-example-session: horus-commander\n",
         encoding="utf-8",
     )
     commander = load_config(path).commander
     assert (commander.provider, commander.model, commander.reasoning_effort) == (
         "openai",
-        "deepseek-v4.1-flash",
+        "some-model",
         "max",
     )
-    assert dict(commander.extra_headers) == {"x-opencode-session": "horus-commander"}
+    assert dict(commander.extra_headers) == {"x-example-session": "horus-commander"}
     # A key that misses the effort list would be sent to the API as is: refuse it here.
     path.write_text("commander:\n  reasoning_effort: maxx\n", encoding="utf-8")
     with pytest.raises(ValueError, match="commander reasoning_effort"):
         load_config(path)
-    path.write_text("commander:\n  extra_headers:\n    x-opencode-session: 7\n", encoding="utf-8")
+    path.write_text("commander:\n  extra_headers:\n    x-example-session: 7\n", encoding="utf-8")
     with pytest.raises(ValueError, match="commander extra_headers"):
         load_config(path)
 

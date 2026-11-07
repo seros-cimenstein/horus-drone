@@ -11,7 +11,7 @@ from typing import Any, Callable, Mapping
 
 from horus.commander.ai_views import AIViewStore
 from horus.commander.backends import (
-    APICommanderBackend, ClaudeCodeSession, CommanderBackend, redact_secret,
+    APICommanderBackend, ClaudeCodeSession, CommanderBackend, OmpSession, redact_secret,
 )
 from horus.commander.intents import is_reset_command
 from horus.config import CommanderSettings
@@ -270,7 +270,21 @@ class HorusCommander:
         try:
             async with open_session(self.server_url, self.bearer_token) as session:
                 system_prompt = _mcp_prompt_text(await session.get_prompt("horus_commander"))
-                if self.settings.provider != "claude-code":
+                if self.settings.provider == "omp":
+                    self.backend = OmpSession(
+                        self.server_url,
+                        self.bearer_token,
+                        self.settings,
+                        system_prompt,
+                    )
+                elif self.settings.provider == "claude-code":
+                    self.backend = ClaudeCodeSession(
+                        self.server_url,
+                        self.bearer_token,
+                        self.settings,
+                        system_prompt,
+                    )
+                else:
                     tools_response = await session.list_tools()
                     self.backend = APICommanderBackend(
                         self.settings.provider,
@@ -278,13 +292,6 @@ class HorusCommander:
                         self.api_key or "",
                         session,
                         list(tools_response.tools),
-                        system_prompt,
-                    )
-                else:
-                    self.backend = ClaudeCodeSession(
-                        self.server_url,
-                        self.bearer_token,
-                        self.settings,
                         system_prompt,
                     )
                 self._mcp_session = session
