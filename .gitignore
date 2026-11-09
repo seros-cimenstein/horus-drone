@@ -18,3 +18,9 @@ __pycache__/
 /gta/horus_mod/.cache/
 /gta/horus_mod/*/bin/
 /gta/horus_mod/*/obj/
+# Personal build/session files; kept locally, never committed.
+/LOOP_*.md
+/NEXT_SESSION.md
+/HANDOFF.md
+/annotated.jpg
+/scripts/koko/
