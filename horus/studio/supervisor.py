@@ -287,9 +287,12 @@ class StudioSupervisor:
         gimbal_port = _allocate_udp_port()
         mcp_token = secrets.token_urlsafe(24)
 
+        from horus.bootstrap import preferred_linux_mujoco_gl
+
         world_env = dict(os.environ)
-        if sys.platform.startswith("linux"):
-            world_env.setdefault("MUJOCO_GL", "egl")
+        gl = preferred_linux_mujoco_gl()
+        if gl is not None:
+            world_env.setdefault("MUJOCO_GL", gl)
 
         world_cmd = [
             sys.executable,

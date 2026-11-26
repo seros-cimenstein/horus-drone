@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes.util
 from dataclasses import dataclass
 import hashlib
 import os
@@ -397,9 +398,21 @@ def resolve_model_paths(cache_dir: Path | None = None) -> dict[str, Path | None]
     }
 
 
+def preferred_linux_mujoco_gl() -> str | None:
+    """Return the safest offscreen MuJoCo backend present on Linux ('egl', 'osmesa', or None)."""
+    if not sys.platform.startswith("linux"):
+        return None
+    if ctypes.util.find_library("EGL") is not None:
+        return "egl"
+    if ctypes.util.find_library("OSMesa") is not None:
+        return "osmesa"
+    return None
+
+
 def _check_mujoco_gl() -> dict[str, Any]:
-    if sys.platform.startswith("linux"):
-        os.environ.setdefault("MUJOCO_GL", "egl")
+    gl = preferred_linux_mujoco_gl()
+    if gl is not None:
+        os.environ.setdefault("MUJOCO_GL", gl)
     try:
         import mujoco
     except Exception as exc:

@@ -5,8 +5,11 @@ from __future__ import annotations
 import os
 import sys
 
-if sys.platform.startswith("linux"):
-    os.environ.setdefault("MUJOCO_GL", "egl")
+from horus.bootstrap import preferred_linux_mujoco_gl
+
+_gl = preferred_linux_mujoco_gl()
+if _gl is not None:
+    os.environ.setdefault("MUJOCO_GL", _gl)
 
 from horus.world.physics import Airframe, MuJoCoQuadWorld, QuadState, decode_servo_frame, encode_sitl_state
 from horus.world.scenes import SCENE_NAMES, build_scene_bundle, generate_apriltag_36h11_id0

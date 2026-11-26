@@ -67,11 +67,11 @@ def test_take_off_waits_for_guided_mode_and_arming_before_native_takeoff():
 
 
 def test_take_off_retries_arming_after_prearm_rejection(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     flight = FakeFlight(Pose(0.0, 0.0, 0.2))
     executor = HorusExecutor(flight, _settings(), autostart=False)
     task_id = executor.submit_skill("take_off", {"altitude_m": 2.0}, ttl_s=30.0)["task_id"]
-    clock = [1000.0]
-    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
 
     flight._telemetry.mode = "GUIDED"
     executor.tick()

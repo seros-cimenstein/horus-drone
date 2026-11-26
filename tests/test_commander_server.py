@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from types import SimpleNamespace
 
 import httpx
+import pytest
 
 from horus.commander.agent import HorusCommander
 from horus.commander.intents import emergency_action
@@ -1002,6 +1004,7 @@ server.main(["--port", sys.argv[2]])
 """
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX SIGTERM/SIGKILL shutdown semantics")
 def test_sigterm_stops_the_service_through_its_cleanup_so_no_model_process_is_left(tmp_path):
     import os
     import signal

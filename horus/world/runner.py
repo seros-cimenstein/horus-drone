@@ -10,8 +10,11 @@ import signal
 import sys
 import threading
 
-if sys.platform.startswith("linux"):
-    os.environ.setdefault("MUJOCO_GL", "egl")
+from horus.bootstrap import preferred_linux_mujoco_gl
+
+_gl = preferred_linux_mujoco_gl()
+if _gl is not None:
+    os.environ.setdefault("MUJOCO_GL", _gl)
 
 from horus.maps.tiles import write_tile_directory
 from horus.world.camera_server import WorldCameraServer

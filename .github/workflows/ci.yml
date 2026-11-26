@@ -33,8 +33,16 @@ jobs:
           uv venv --python 3.12 .venv
           uv pip install --python .venv/bin/python -e ".[test]" || uv pip install --python .venv/Scripts/python.exe -e ".[test]"
 
+      - name: Install headless OpenGL / OSMesa libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libosmesa6
+
       - name: Run unit and integration tests (Linux)
         if: runner.os == 'Linux'
+        env:
+          MUJOCO_GL: osmesa
         run: |
           .venv/bin/python -m pytest -q \
             tests/test_bootstrap.py \
@@ -67,6 +75,8 @@ jobs:
 
       - name: Headless Built-in 3D world + camera + CLI doctor smoke (Linux)
         if: runner.os == 'Linux'
+        env:
+          MUJOCO_GL: osmesa
         run: |
           .venv/bin/horus doctor --json
           .venv/bin/horus --help
