@@ -33,4 +33,4 @@ else
 fi
 
 horus --help >/dev/null
-printf '\nHORUS installed successfully! Run `horus` to launch HORUS Studio.\n'
+printf '\nHORUS installed successfully! Run horus to launch HORUS Studio.\n'
