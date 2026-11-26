@@ -2,7 +2,7 @@ name: Deploy Docs & Installers to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths:
       - "site/**"
       - ".github/workflows/docs.yml"
@@ -88,13 +88,13 @@ jobs:
           PY
 
       - name: Upload GitHub Pages artifact
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v3
         with:
           path: site/dist
 
   deploy:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     environment:
