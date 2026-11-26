@@ -26,8 +26,8 @@ class DisplayReader:
 
     def __init__(
         self,
-        url: str,
-        token: str,
+        url: str | None = None,
+        token: str | None = None,
         *,
         timeout_s: float = 5.0,
         opener: Callable[[str, str], Any] = open_session,
@@ -38,14 +38,41 @@ class DisplayReader:
         self._opener = opener
         self._session: Any = None
         self._reconnect = asyncio.Event()
+        self._bound = asyncio.Event()
+        if url and token:
+            self._bound.set()
         self._last_error = "drone board not connected yet"
+
+    async def rebind(self, url: str, token: str) -> None:
+        """Switch this passive display reader to a new Drone board endpoint."""
+        self._url = url
+        self._token = token
+        self._last_error = "connecting to drone board"
+        self._bound.set()
+        self._reconnect.set()
+
+    async def unbind(self) -> None:
+        """Detach from the current Drone board and wait until rebound."""
+        self._bound.clear()
+        self._url = None
+        self._token = None
+        self._session = None
+        self._last_error = "no active drone session"
+        self._reconnect.set()
 
     async def run(self) -> None:
         """Hold the session open, reopening it after a failure, until cancelled."""
         while True:
+            await self._bound.wait()
+            url, token = self._url, self._token
+            if not url or not token:
+                await asyncio.sleep(0.1)
+                continue
             try:
-                async with self._opener(self._url, self._token) as session:
+                async with self._opener(url, token) as session:
                     self._reconnect.clear()
+                    if not self._bound.is_set() or self._url != url:
+                        continue
                     self._session = session
                     await self._reconnect.wait()
             except asyncio.CancelledError:

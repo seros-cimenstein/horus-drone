@@ -218,7 +218,7 @@ def test_the_control_app_page_loads_without_a_token_but_its_data_still_needs_one
         "text/html", "text/javascript", "text/css", "application/manifest+json", "text/javascript",
         "image/svg+xml", "image/png", "image/png", "image/png",
     ]
-    assert "<title>HORUS control app</title>" in pages[0].text
+    assert "<title>HORUS Studio</title>" in pages[0].text
     # The installed phone app starts on the phone view, at the page the token-free files serve.
     manifest = pages[3].json()
     assert manifest["start_url"] == "/?view=phone" and manifest["display"] == "standalone"

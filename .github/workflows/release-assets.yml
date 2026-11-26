@@ -1,0 +1,150 @@
+name: Build & Publish Pinned SITL and Model Assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Immutable GitHub Release tag for pinned assets
+        required: false
+        default: assets-copter-4.7.1
+  push:
+    tags:
+      - "assets-copter-*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-x86_64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch official ArduCopter 4.7.1 SITL ELF and default parms
+        run: |
+          mkdir -p staging/arducopter-linux-x86_64 out
+          curl -4 -fsSL https://firmware.ardupilot.org/Copter/stable-4.7.1/SITL_x86_64_linux_gnu/arducopter \
+            -o staging/arducopter-linux-x86_64/arducopter
+          printf '011627d41dd95640c3aca02d45283474be48721c8b1bb7a4b234d38b69063482  staging/arducopter-linux-x86_64/arducopter\n' | sha256sum --check -
+          chmod 0755 staging/arducopter-linux-x86_64/arducopter
+          curl -4 -fsSL https://raw.githubusercontent.com/ArduPilot/ardupilot/Copter-4.7.1/Tools/autotest/default_params/copter.parm \
+            -o staging/arducopter-linux-x86_64/copter-default.parm
+          tar -C staging/arducopter-linux-x86_64 -czf out/arducopter-4.7.1-linux-x86_64.tar.gz arducopter copter-default.parm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-linux-x86_64
+          path: out/arducopter-4.7.1-linux-x86_64.tar.gz
+
+  build-linux-aarch64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ArduPilot build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential python3 python3-dev python3-pip g++ pkg-config ccache git
+          python3 -m pip install --break-system-packages empy==3.3.4 pexpect future pymavlink
+      - name: Build ArduCopter Copter-4.7.1 SITL (aarch64)
+        run: |
+          git clone --depth 1 --branch Copter-4.7.1 --recurse-submodules --shallow-submodules \
+            https://github.com/ArduPilot/ardupilot.git /tmp/ardupilot
+          cd /tmp/ardupilot
+          ./waf configure --board sitl
+          ./waf copter -j"$(nproc)"
+          mkdir -p "${GITHUB_WORKSPACE}/staging/arducopter-linux-aarch64" "${GITHUB_WORKSPACE}/out"
+          cp build/sitl/bin/arducopter "${GITHUB_WORKSPACE}/staging/arducopter-linux-aarch64/arducopter"
+          cp Tools/autotest/default_params/copter.parm "${GITHUB_WORKSPACE}/staging/arducopter-linux-aarch64/copter-default.parm"
+          chmod 0755 "${GITHUB_WORKSPACE}/staging/arducopter-linux-aarch64/arducopter"
+          tar -C "${GITHUB_WORKSPACE}/staging/arducopter-linux-aarch64" \
+            -czf "${GITHUB_WORKSPACE}/out/arducopter-4.7.1-linux-aarch64.tar.gz" arducopter copter-default.parm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-linux-aarch64
+          path: out/arducopter-4.7.1-linux-aarch64.tar.gz
+
+  build-windows-x86_64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Cygwin toolchain for ArduPilot SITL
+        uses: cygwin/cygwin-install-action@v4
+        with:
+          packages: gcc-g++,make,python3,python3-pip,git,pkg-config,zlib-devel,libxml2-devel
+      - name: Build ArduCopter.exe (Copter-4.7.1) via Cygwin
+        shell: C:\cygwin\bin\bash.exe --login -eo pipefail '{0}'
+        run: |
+          python3 -m pip install empy==3.3.4 pexpect future pymavlink
+          git clone --depth 1 --branch Copter-4.7.1 --recurse-submodules --shallow-submodules \
+            https://github.com/ArduPilot/ardupilot.git /tmp/ardupilot
+          cd /tmp/ardupilot
+          ./waf configure --board sitl
+          ./waf copter -j4
+          mkdir -p /tmp/win-pkg
+          cp build/sitl/bin/arducopter.exe /tmp/win-pkg/ArduCopter.exe
+          cp Tools/autotest/default_params/copter.parm /tmp/win-pkg/copter-default.parm
+          cp /usr/bin/cygwin1.dll /usr/bin/cyggcc_s-seh-1.dll /usr/bin/cygstdc++-6.dll /tmp/win-pkg/
+      - name: Smoke-test standalone ArduCopter.exe and create zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          $help = & C:\cygwin\tmp\win-pkg\ArduCopter.exe --help 2>&1
+          if ($LASTEXITCODE -ne 0) { throw "ArduCopter.exe --help failed" }
+          Compress-Archive -Path C:\cygwin\tmp\win-pkg\* -DestinationPath out\arducopter-4.7.1-windows-x86_64.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-windows-x86_64
+          path: out/arducopter-4.7.1-windows-x86_64.zip
+
+  bundle-onnx-models:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Export yolov8n.onnx and dynamic-batch osnet_x0_25_msmt17.onnx
+        run: |
+          mkdir -p out
+          python3 -m pip install --break-system-packages ultralytics onnx onnxruntime torch torchvision gdown
+          python3 - <<'PY'
+          import onnx
+          from ultralytics import YOLO
+          model = YOLO("yolov8n.pt")
+          exported = model.export(format="onnx", imgsz=640, opset=17, simplify=True)
+          import shutil
+          shutil.copy2(exported, "out/yolov8n.onnx")
+          PY
+          if [ -x scripts/setup_models.sh ]; then
+            bash scripts/setup_models.sh || true
+          fi
+          if [ -f models/osnet_x0_25_msmt17.onnx ]; then
+            cp models/osnet_x0_25_msmt17.onnx out/osnet_x0_25_msmt17.onnx
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-onnx-models
+          path: out/*.onnx
+
+  publish-release:
+    needs:
+      - build-linux-x86_64
+      - build-linux-aarch64
+      - build-windows-x86_64
+      - bundle-onnx-models
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Generate SHA256SUMS.txt
+        working-directory: artifacts
+        run: |
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          gh release create "$TAG" artifacts/* \
+            --title "HORUS Pinned Assets ($TAG)" \
+            --notes "Pinned ArduCopter 4.7.1 SITL binaries and ONNX perception models for HORUS Studio." \
+            --clobber

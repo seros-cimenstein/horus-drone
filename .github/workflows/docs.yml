@@ -1,0 +1,126 @@
+name: Deploy Docs & Installers to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "site/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install and build Astro Starlight site
+        working-directory: site
+        run: |
+          npm ci
+          npm run build
+
+      - name: Verify installers and base-path links
+        run: |
+          test -f site/dist/install.sh
+          test -f site/dist/install.ps1
+          bash -n site/dist/install.sh
+          python3 - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          import sys
+
+          dist = Path("site/dist").resolve()
+          base = "/horus-drone"
+          broken = []
+
+          class LinkExtractor(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.links = []
+              def handle_starttag(self, tag, attrs):
+                  for k, v in attrs:
+                      if k in ("href", "src") and v:
+                          self.links.append(v)
+
+          for html_file in dist.rglob("*.html"):
+              parser = LinkExtractor()
+              parser.feed(html_file.read_text(encoding="utf-8", errors="replace"))
+              for raw in parser.links:
+                  url = raw.split("#", 1)[0].split("?", 1)[0]
+                  if not url or url.startswith(("http://", "https://", "mailto:", "data:")):
+                      continue
+                  if url.startswith(base + "/"):
+                      rel = url[len(base) + 1 :]
+                  elif url == base:
+                      rel = ""
+                  elif url.startswith("/"):
+                      broken.append((str(html_file.relative_to(dist)), raw, "missing /horus-drone base prefix"))
+                      continue
+                  else:
+                      rel = str((html_file.parent / url).resolve().relative_to(dist))
+                  target = dist / rel
+                  if not (target.is_file() or (target / "index.html").is_file()):
+                      broken.append((str(html_file.relative_to(dist)), raw, "target not found"))
+
+          if broken:
+              for src, link, reason in broken[:25]:
+                  print(f"BROKEN: {src} -> {link} ({reason})", file=sys.stderr)
+              sys.exit(1)
+          print(f"Verified internal links across {len(list(dist.rglob('*.html')))} HTML pages.")
+          PY
+
+      - name: Upload GitHub Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  test-installers:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax-check install.sh
+        if: runner.os == 'Linux'
+        run: |
+          bash -n site/public/install.sh
+          if command -v shellcheck >/dev/null 2>&1; then shellcheck site/public/install.sh; fi
+      - name: Parse-check install.ps1
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD/site/public/install.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) { $errors | Format-Table; exit 1 }

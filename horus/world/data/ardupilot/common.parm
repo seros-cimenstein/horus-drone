@@ -1,0 +1,30 @@
+# Shared by every HORUS SITL profile (see sim/scripts/world_profiles.py for the compositions).
+# No fragment sets a key another fragment of the same load order sets; only the alternatives for
+# one slot (indoor|outdoor) set the same keys, to different values.
+
+# MAVLink-backed horizontal proximity sectors: the ToF bridge sends DISTANCE_SENSOR, and
+# ArduPilot's simple avoidance brakes before obstacles instead of flying through them.
+PRX1_TYPE 2
+AVOID_ENABLE 3
+# Stop 1 m from proximity obstacles (default 2 m), so the vehicle can still pass doorways and fly
+# along the indoor room's walls; avoidance, not HORUS, keeps every world's obstacles away.
+AVOID_MARGIN 1.0
+
+# Downward ToF (payload range_down, 4 m range) from DISTANCE_SENSOR orientation PITCH_270 as a
+# short-range landing/altitude input.
+RNGFND1_TYPE 10
+RNGFND1_ORIENT 25
+# Copter 4.7 MIN/MAX are in metres; the old centimetre-named parameters no longer exist.
+RNGFND1_MIN 0.05
+RNGFND1_MAX 4.0
+
+# The gazebo-iris SITL defaults enable ArduPilot precision landing (PLND_ENABLED 1, PLND_TYPE 3,
+# a Gazebo IR-lock beacon) that nothing here feeds. With no target ever seen, every LAND and RTL
+# touchdown starts with "PrecLand: Failsafe Measures" and hovers 7 s before descending. HORUS
+# runs its own AprilTag precision landing in GUIDED and hands touchdown to plain LAND.
+PLND_ENABLED 0
+
+# Simulated battery that never runs out (decided 2026-11-02): SITL's default 3.3 Ah pack drains
+# to 0 % in a few hours of hovering. 100,000 Ah lasts thousands of hours; the percentage stays
+# near 100 and no battery failsafe is configured.
+BATT_CAPACITY 100000000

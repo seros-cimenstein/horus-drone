@@ -1,0 +1,26 @@
+---
+title: Companion Setup
+description: Run the Drone board (horus mcp) on a real flight controller and companion computer.
+---
+
+On physical hardware, the **Drone board** (`horus mcp`) runs on the companion computer (or directly on your laptop over USB/telemetry radio via HORUS Studio).
+
+## Option A: Direct USB / Telemetry Radio in HORUS Studio
+
+1. Open **HORUS Studio → Settings → Hardware & External Sim → Direct USB / Radio**.
+2. Pick your detected serial port (e.g. `/dev/ttyACM0`, `COM4`) and baud rate (`115200` for USB, `57600` for telemetry radio), or enter `udpin:0.0.0.0:14550`.
+3. Optionally enter a camera index (`0`) or RTSP URL; leave blank to run `--no-perception`.
+4. Click **Connect Session**.
+
+## Option B: Remote Companion Computer (`horus mcp`)
+
+Install the lean board package on the companion computer:
+
+```sh
+pip install "horus-drone[board] @ git+https://github.com/seros-cimenstein/horus-drone.git"
+HORUS_MCP_TOKEN="your-secret-token" horus mcp --config /path/to/horus.yaml
+```
+
+If you cloned the repository onto the companion computer, install from the local checkout with `pip install -e ".[board]"`.
+
+Then forward the loopback port over SSH or Tailscale and connect via **Remote Companion** in HORUS Studio.

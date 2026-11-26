@@ -1,0 +1,11 @@
+---
+title: Vision & Latency
+description: Set-of-mark numbered tracker IDs, OSNet ReID, CSRT ring-buffer compensation, and open-vocabulary grounding.
+---
+
+**Camera vision** (`horus/perception/`) bridges slow cloud reasoning and fast physical motion:
+
+- **Set-of-mark numbered targets:** Every frame sent to the **AI model** draws crisp bounding boxes with persistent numeric IDs (`#1`, `#2`, …) from YOLOv8n + OSNet ReID (`osnet_x0_25_msmt17.onnx`).
+- **Ring-buffer CSRT fast-forward (`point()`):** Because an LLM round-trip can take 1–4 seconds over a cellular/radio link, `point(target_id)` locates the historical frame the AI saw in the 5-second ring buffer and fast-forwards CSRT forward to the live frame before computing 3D bearing/distance.
+- **Open-vocabulary grounding:** `set_vocabulary` queries an optional local Grounding DINO / OWLv2 **Grounder** service (`horus-grounder`) without blocking the main detection loop.
+- **Passive UI reads:** The **Control app** reads annotated frames via `DisplayReader` (`passive=True`) so viewing the camera never alters the AI's last seen view or contact watchdog.

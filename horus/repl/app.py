@@ -185,11 +185,11 @@ async def _run(args: argparse.Namespace, config: HorusConfig) -> None:
     await interactive(server_url, token, config)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="HORUS terminal REPL")
     parser.add_argument("--server-url", help=f"MCP streamable HTTP URL (default: {DEFAULT_MCP_URL})")
     parser.add_argument("--config", help="HORUS YAML config file")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         asyncio.run(_run(args, load_config(args.config)))
     except (RuntimeError, ValueError, OSError, TimeoutError) as exc:

@@ -31,20 +31,21 @@ The priority order is Safety > Failsafe/RTH > Local executor > Cloud brain, and 
 
 ```mermaid
 flowchart TD
-  Y["You"] --> R["Control app<br/>web page (horus/commander/web) or horus terminal"]
-  R --> C["AI pilot<br/>horus/commander, the commander"]
+  Y["You"] --> R["Control app (HORUS Studio)<br/>web app (horus/commander/web) or horus tui"]
+  R --> C["AI pilot + Studio supervisor<br/>horus/commander, horus/studio"]
   C -->|ask_planner| K["Crew<br/>planner (pilot, spotter, safety officer planned), one chat each"]
   R -.hold / land / home skip the AI.-> M
-  C <-->|asks / next move| LLM["AI model<br/>through omp, Claude Code, Anthropic or OpenAI"]
+  R -.operator session setup (start/stop world or drone link).-> W
+  C <-->|asks / next move| LLM["AI model<br/>through API (OpenAI, Anthropic, Gemini, local), Claude Code or omp"]
   K <-->|asks| LLM
-  C -->|MCP over tunnel| M["Drone board<br/>horus/mcp_server, computer on the drone"]
+  C -->|MCP over tunnel / loopback| M["Drone board<br/>horus/mcp_server, computer on the drone"]
   K -->|MCP, own role token| M
   M --> E["Flight moves<br/>horus/executor, one move at a time"]
   M --> P["Camera vision<br/>horus/perception, numbered objects"]
   P -.fallback.-> G["Grounding model<br/>loopback grounder"]
   E --> L["Autopilot link<br/>horus/flight"]
   L --> A["ArduPilot<br/>limits, avoidance, failsafes"]
-  A --> W["Test world<br/>Gazebo (sim/) OR GTA V (gta/)"]
+  A --> W["Test world (one per run)<br/>Built-in 3D (horus/world) OR Gazebo (sim/) OR GTA V (gta/)"]
   W -.camera frames.-> P
 ```
 
@@ -65,8 +66,9 @@ The diagram above is the target architecture. For three of its parts the table s
 
 | Part | Built | Planned |
 | --- | --- | --- |
-| Control app (`horus/commander/web/`, `horus/repl/`) | The HORUS control app, built 2026-10-31: a web page on the laptop, served by the AI pilot service (see "Control app design" below), with mission box, news feed, live camera, drone state, map and HOLD / LAND / HOME buttons that skip the AI. Since 2026-11-01 the same page is also the phone app, installed from the user's tailnet (see "Phone app design" below). Since 2026-11-02 both show the pictures the AI received in the feed, and the phone has a Camera tab with them and an optional live view. The `horus` terminal remains a second control app: free text goes to the AI pilot, emergency words skip the AI. Any MCP client, such as Claude Code or Codex, can also connect to the drone board directly. | Decide the laptop's live camera cost on a real drone link (open question in "Phone app design"). |
-| Drone board (`horus/mcp_server/`) | Runs in the simulation container, on the laptop or on Koko. | Runs on the AM67A-class companion computer on the drone (see Flight controller and Hardware). |
+| Control app (`horus/commander/web/`, `horus/repl/`, `ui/`) | **HORUS Studio** (built 2026-11-26, phase 8C): Preact + TypeScript + Vite web app compiled into `horus/commander/web/` and started by `horus`, with Launchpad, Flight Deck (annotated camera, 3D spectator view, AI views, gimbal pad, offline-capable Tactical 2D Map with ToF ring, Mission Composer, Timeline), Fault Lab (AI link-cut/latency + Manual Flight Pad + Pre-Flight Checklist), Settings & Connections modal, and `?view=phone` PWA parity. `horus tui` remains as a terminal control app; MCP clients (Claude Code / Codex) can also connect directly. | Decide the laptop's live camera bandwidth cap on a real drone link. |
+| Test world (`horus/world/`, `sim/`, `gta/`) | **Built-in 3D test world** (`horus/world/`, built 2026-11-26, phase 8A): cross-platform Python/MuJoCo 3D world running real `arducopter` SITL (`--model JSON`), F450 dynamics, 7-beam ToF `DISTANCE_SENSOR` at 20 Hz, 2-axis MAVLink gimbal, textured SAR scenes (`indoor_sar`, `forest_sar`, `urban_plaza`, `procedural`) with AprilTag ID 0 pad, `sim://` pull-TCP camera, and 3D spectator view; alongside Gazebo Harmonic (`sim/`) and GTA V (`gta/`). | Publish immutable `assets-copter-4.7.1` GitHub release artifacts via `.github/workflows/release-assets.yml`. |
+| Drone board (`horus/mcp_server/`) | Runs natively on host via HORUS Studio (`horus`), via `horus mcp`, or in the simulation container / on Koko. | Runs on the AM67A-class companion computer on the drone (phase 4), with `horus-drone[board]`. |
 | Drone board link | Bearer token on every request, loopback-only listener; between machines an SSH tunnel carries and encrypts it. | Encryption built into the drone board's link, for the radio link to a real drone. |
 
 #### Control app design (decided and built 2026-10-31)
@@ -113,6 +115,15 @@ Decided with the user on 2026-11-03; ledger `LOOP_GTA_CREW_PLANNER.md`, `PLAN.md
 - **GTA gimbal.** A gimbal device for GTA, `horus/gimbal/gta.py`, on the same MAVLink gimbal-device protocol as Gazebo's (`horus/gimbal/device.py`), talks to `HorusGta.dll` over two small UDP datagrams (setpoint in, measured camera attitude out). The mod points the camera with HORUS's setpoint instead of ArduPilot's placeholder servo mount, which goes. `look` gains pan: `look(pitch_deg, yaw_deg)` with yaw relative to the nose, in every world with a gimbal.
 - **GTA height map.** No GTA data on disk has obstacle heights (the navmesh has holes where buildings stand). The mod surveys the whole map once at 5 m cells by casting rays straight down after loading collision at each spot; the result is the top surface (roofs, trees, terrain) per 250 m tile. Rays from above miss what is under an overhang, so routes only ever go over obstacles, never under them.
 - **Route tool and planner.** A drone board tool `plan_route` (planner role only) runs A* on the height map and returns waypoints that the commander flies one `goto` at a time, so the AI still chooses each move. Two modes, both decided: one altitude for the whole route (around everything taller), or climbing over obstacles leg by leg. Every returned leg is checked along its whole length against the height map plus the margins before it is returned.
+
+#### Standalone HORUS Studio, built-in 3D test world, and documentation site (decided 2026-11-26, phases 8–9)
+
+Decided with the user on 2026-11-26 (`PLAN.md` phases 8 and 9). Not built yet.
+
+- **One-line install and single `horus` command.** Normal users on Windows and Linux (and macOS) install HORUS with a single command (`install.sh` / `install.ps1` bootstrapping an isolated `uv` environment, or `uv tool install horus-drone` / `pip install horus-drone`) without Docker, Gazebo or GStreamer. Running `horus` starts the loopback **HORUS Studio** server, generates session tokens automatically, and opens the control app in the user's browser; `horus tui` opens the terminal control app and `horus mcp` runs the headless drone board.
+- **Operator Studio supervisor (`horus/studio/`).** Lives strictly on the operator side of the host service (`127.0.0.1`, authenticated by `HORUS_COMMANDER_TOKEN`, never exposed as an MCP tool to the AI model). It downloads and SHA-256-verifies missing ONNX models and the real `arducopter` SITL binary on demand (`horus/bootstrap.py`), starts and stops one session at a time (Built-in 3D world, Real Drone over serial/UDP/remote MCP, Gazebo or GTA V) inside OS-managed process groups / Windows Job Objects, stores AI provider credentials locally (`0600`, write-only to the UI), runs hardware pre-flight checks, and shapes/cuts the host AI-to-drone MCP link for cross-platform latency and `auto_rth` testing without touching MAVLink.
+- **Built-in 3D test world (`horus/world/`).** A cross-platform Python/MuJoCo 3D test world that runs real `arducopter` SITL (`--model JSON`) directly without `sim_vehicle.py`, feeds 7-beam ToF + downward rangefinder `DISTANCE_SENSOR` messages, drives a 2-axis MAVLink gimbal (`GimbalDeviceEndpoint`), renders textured indoor/forest/urban scenes with human meshes and an AprilTag landing pad over the pull-frame TCP camera protocol (`sim://`, bypassing GStreamer), and provides a second offscreen 3D follow/orbit spectator camera directly inside the web UI.
+- **Documentation site (`site/`).** An Astro Starlight documentation site published to `https://seros-cimenstein.github.io/horus-drone/` (also serving `install.sh` and `install.ps1`), paired with a concise, modern root `README.md`. Lecture deliverables under `docs/` stay untouched.
 
 ## Scope tiers
 
@@ -401,6 +412,7 @@ Techniques HORUS builds on: dual-system control (Figure's Helix, NVIDIA GR00T N1
 
 ## History
 
+- **2026-11-26 — standalone HORUS Studio, built-in 3D test world, and Starlight docs decided** (phases 8–9): `horus` becomes a single cross-platform command (installed via `install.sh` / `install.ps1` or `uv`/`pip`) serving HORUS Studio (`ui/` -> `horus/commander/web/`, `horus/studio/`), with a built-in MuJoCo 3D test world (`horus/world/`) running real `arducopter` SITL (`--model JSON`) on Windows and Linux without Docker or GStreamer, zero-YAML API/hardware setup, a cross-platform fault/preflight lab, and an Astro Starlight documentation site in `site/` published at `https://seros-cimenstein.github.io/horus-drone/`. Diagram: updated Test world options and operator session setup arrow; core safety and flight paths unchanged.
 - **2026-11-07 — commander reaches its model through omp** (branch `deepseek-omp`), replacing the 2026-11-06 opencode gateway API: the profiles set `commander.provider: omp` with `omp_model: opencode-go/deepseek-v4.1-flash` and `omp_thinking: max`. The same model and effort are now reached through the user's omp login, with no API key. The AI pilot runs one `omp --mode rpc` process per mission (`OmpSession` in `horus/commander/backends.py`), in a temporary directory with the drone board as its only MCP server. omp's built-in tools, extensions, skills, rules, context files, other agents' MCP configs and xd:// tool mounting are off, and the session refuses to start if omp loads any tool besides the drone board's. omp cannot hide single MCP tools, so the AI pilot's own tools (`wait_events`, the operator emergency lock, the map display reads) stay listed to the model but are denied by omp's approval policy; checked live: a model call to `wait_events` was refused and never reached the drone board. DeepSeek at max thinking takes about 40-55 s per model step.
 - **2026-11-06 — commander and crew on DeepSeek 4.1 Flash at max effort** (branch `deepseek-omp`): every model in the AI pilot and, once it exists, its crew runs `deepseek-v4.1-flash` with `reasoning_effort: max` through the opencode gateway (`https://opencode.ai/zen/go/v1`, OpenAI-compatible), so the profiles read `OPENCODE_API_KEY` and need the `commander-openai` extra instead of the Claude Code login. Two consequences are in the config: the gateway refuses a request without its `x-opencode-session` header (`commander.extra_headers`), and its reasoning tokens are charged to `max_tokens`, which the profiles raise from 800 to 8000 because a model that runs out mid-thought answers with no text and no tool call. The keyless `claude-code` provider stays the code default and remains selectable per profile.
 - **2026-11-03 — crew, GTA gimbal and GTA route planner decided** (phase 7, `LOOP_GTA_CREW_PLANNER.md`): the AI pilot gains a crew of members with their own chats and drone board role tokens, starting with the planner; GTA gains a gimbal with pitch and pan, a whole-map height survey at 5 m and a `plan_route` tool with a fixed-altitude and a climb-over mode. Diagram: the Crew block and its arrows.

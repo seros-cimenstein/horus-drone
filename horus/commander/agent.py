@@ -112,10 +112,12 @@ class HorusCommander:
         event_log: JsonlEventLog | None = None,
         event_callback: Callable[[Mapping[str, Any]], None] | None = None,
         ai_views: AIViewStore | None = None,
+        link_shaper: Any = None,
     ) -> None:
         self.server_url = server_url.rstrip("/")
         self.bearer_token = bearer_token
         self.settings = settings
+        self.link_shaper = link_shaper
         self.api_key = (
             (api_key or os.environ.get(settings.api_key_env))
             if settings.provider in {"anthropic", "openai"}
@@ -146,6 +148,11 @@ class HorusCommander:
         self._own_operator_emergencies: list[str] = []
         self._last_event_error = ""
         self._last_event_error_at = 0.0
+        self._bound_event = asyncio.Event()
+        if self.server_url and self.bearer_token:
+            self._bound_event.set()
+        self._rebind_event = asyncio.Event()
+        self._session_task: asyncio.Task[None] | None = None
 
     async def submit_task(self, text: str) -> str:
         """Queue a free-text operator request for the current mission."""
@@ -263,74 +270,140 @@ class HorusCommander:
 
     async def stop(self) -> None:
         self._stopped.set()
+        self._bound_event.set()
+        self._rebind_event.set()
         await self._events.put(None)
 
+    async def rebind(
+        self,
+        server_url: str,
+        bearer_token: str,
+        settings: CommanderSettings,
+        *,
+        api_key: str | None = None,
+    ) -> None:
+        """Hot-rebind the commander to a newly started Drone board session."""
+        await self.reset()
+        self.server_url = server_url.rstrip("/")
+        self.bearer_token = bearer_token
+        self.settings = settings
+        self.api_key = api_key
+        self._failure = None
+        self._bound_event.set()
+        self._rebind_event.set()
+
+    async def unbind(self) -> None:
+        """Detach from the current Drone board session while keeping Studio alive."""
+        await self.reset()
+        self._bound_event.clear()
+        self.server_url = ""
+        self.bearer_token = ""
+        self._rebind_event.set()
+
     async def run(self) -> None:
-        """Serve one MCP connection and mission backend until stopped."""
-        try:
-            async with open_session(self.server_url, self.bearer_token) as session:
-                system_prompt = _mcp_prompt_text(await session.get_prompt("horus_commander"))
-                if self.settings.provider == "omp":
-                    self.backend = OmpSession(
-                        self.server_url,
-                        self.bearer_token,
-                        self.settings,
-                        system_prompt,
+        """Serve one MCP connection (or rebindable Studio sessions) until stopped."""
+        while not self._stopped.is_set():
+            await self._bound_event.wait()
+            if self._stopped.is_set():
+                return
+            self._rebind_event.clear()
+            url, token = self.server_url, self.bearer_token
+            if not url or not token:
+                await asyncio.sleep(0.05)
+                continue
+            try:
+                await self._run_session(url, token)
+            except Exception as exc:
+                if self._rebind_event.is_set():
+                    continue
+                self._failure = exc
+                while True:
+                    try:
+                        pending = self._events.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if pending is not None and not pending.response.done():
+                        pending.response.set_exception(
+                            RuntimeError("commander MCP session failed before processing the request")
+                        )
+                raise
+            if not self._rebind_event.is_set():
+                return
+
+    async def _run_session(self, server_url: str, bearer_token: str) -> None:
+        """Serve one MCP connection and mission backend until stopped or rebound."""
+        async with open_session(server_url, bearer_token) as raw_session:
+            session: Any = raw_session
+            if self.link_shaper is not None:
+                from horus.studio.link_shaper import ShapedMCPSession
+
+                session = ShapedMCPSession(raw_session, self.link_shaper)
+            system_prompt = _mcp_prompt_text(await raw_session.get_prompt("horus_commander"))
+            if self.settings.provider == "omp":
+                self.backend = OmpSession(
+                    server_url,
+                    bearer_token,
+                    self.settings,
+                    system_prompt,
+                )
+            elif self.settings.provider == "claude-code":
+                self.backend = ClaudeCodeSession(
+                    server_url,
+                    bearer_token,
+                    self.settings,
+                    system_prompt,
+                )
+            else:
+                tools_response = await raw_session.list_tools()
+                self.backend = APICommanderBackend(
+                    self.settings.provider,
+                    self.settings,
+                    self.api_key or "",
+                    session,
+                    list(tools_response.tools),
+                    system_prompt,
+                )
+            self._mcp_session = session
+            record_task = asyncio.create_task(self._forward_backend_records(self.backend))
+            event_task = asyncio.create_task(self._pump_events(session))
+            rebind_wait = asyncio.create_task(self._rebind_event.wait())
+            try:
+                while not self._stopped.is_set() and not self._rebind_event.is_set():
+                    get_event = asyncio.create_task(self._events.get())
+                    done, _ = await asyncio.wait(
+                        {get_event, rebind_wait}, return_when=asyncio.FIRST_COMPLETED
                     )
-                elif self.settings.provider == "claude-code":
-                    self.backend = ClaudeCodeSession(
-                        self.server_url,
-                        self.bearer_token,
-                        self.settings,
-                        system_prompt,
-                    )
-                else:
-                    tools_response = await session.list_tools()
-                    self.backend = APICommanderBackend(
-                        self.settings.provider,
-                        self.settings,
-                        self.api_key or "",
-                        session,
-                        list(tools_response.tools),
-                        system_prompt,
-                    )
-                self._mcp_session = session
-                record_task = asyncio.create_task(self._forward_backend_records(self.backend))
-                event_task = asyncio.create_task(self._pump_events(session))
-                try:
-                    while not self._stopped.is_set():
-                        event = await self._events.get()
-                        if event is None or self._stopped.is_set():
-                            break
-                        task = asyncio.create_task(self._process_message(event))
-                        self._track_task(task, self._message_tasks)
-                finally:
-                    event_task.cancel()
-                    for task in tuple(self._message_tasks | self._event_message_tasks):
-                        task.cancel()
-                    await asyncio.gather(
-                        event_task,
-                        *self._message_tasks,
-                        *self._event_message_tasks,
-                        return_exceptions=True,
-                    )
-                    record_task.cancel()
-                    await asyncio.gather(record_task, return_exceptions=True)
-                    await self.backend.close()
-                    self.backend = None
-                    self._mcp_session = None
-        except Exception as exc:
-            self._failure = exc
-            while True:
-                try:
-                    pending = self._events.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                if pending is not None and not pending.response.done():
-                    pending.response.set_exception(
-                        RuntimeError("commander MCP session failed before processing the request")
-                    )
-            raise
+                    if rebind_wait in done:
+                        if not get_event.done():
+                            get_event.cancel()
+                            await asyncio.gather(get_event, return_exceptions=True)
+                        else:
+                            ev = get_event.result()
+                            if ev is not None and not ev.response.done():
+                                ev.response.set_exception(RuntimeError("commander session switched"))
+                        break
+                    event = get_event.result()
+                    if event is None or self._stopped.is_set():
+                        break
+                    task = asyncio.create_task(self._process_message(event))
+                    self._track_task(task, self._message_tasks)
+            finally:
+                rebind_wait.cancel()
+                event_task.cancel()
+                for task in tuple(self._message_tasks | self._event_message_tasks):
+                    task.cancel()
+                await asyncio.gather(
+                    rebind_wait,
+                    event_task,
+                    *self._message_tasks,
+                    *self._event_message_tasks,
+                    return_exceptions=True,
+                )
+                record_task.cancel()
+                await asyncio.gather(record_task, return_exceptions=True)
+                await self.backend.close()
+                self.backend = None
+                self._mcp_session = None
 
     async def _process_message(self, event: CommanderEvent) -> None:
         try:

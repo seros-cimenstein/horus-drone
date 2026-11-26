@@ -1,0 +1,15 @@
+---
+title: Safety Model
+description: Deterministic ArduPilot safety, operator emergency lock, and AI link-loss failsafe.
+---
+
+Safety in HORUS never relies on LLM prompt compliance. Every critical boundary is enforced deterministically in **Flight moves**, **Autopilot link**, and **ArduPilot**.
+
+## Core invariants
+
+- **One base move at a time:** The **AI model** can only select one base move (`take_off`, `goto`, `move`, `turn`, `look`, `hold`, `land`, `rth`). No autonomous search or chase loop runs behind the AI's back.
+- **Velocity setpoints only:** **Autopilot link** sends `GUIDED` velocity setpoints (`SET_POSITION_TARGET_LOCAL_NED`), never bypassing **ArduPilot**'s internal `AVOID_ENABLE` proximity braking.
+- **No geofence:** HORUS enforces no artificial altitude ceiling, floor, or fence in any world or hardware profile; physical obstacles are handled by the 7-beam ToF ring + `AVOID_MARGIN`.
+- **Instant operator emergencies:** **Control app** `HOLD`, `LAND`, and `HOME` calls hit `/emergency` → `operator_emergency`, interrupting any active model turn and engaging `operator_lock`. AI flight tools stay refused until the operator sends a new mission or explicit release.
+- **RC hardware priority (`PILOT`):** Flipping the RC transmitter out of `GUIDED` immediately hands control to the human pilot (`pilot_override: true`).
+- **AI link-loss failsafe:** Passive UI display reads (`passive=True`) never reset the supervisory contact timer. If the **AI pilot** goes silent for `link_loss_rth_delay_s` (default 30 s), **Flight moves** automatically enters `HOLDING` and then triggers `auto_rth`.

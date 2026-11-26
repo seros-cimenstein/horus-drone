@@ -1,0 +1,11 @@
+---
+title: Pre-flight & Testing
+description: Props-off bench verification, tethered hover, GPS-free optical flow, and the Studio Pre-Flight Checklist.
+---
+
+Always validate hardware changes in progressive gates before untethered flight:
+
+1. **Props-off bench test:** Connect via **HORUS Studio**, open **Fault Lab → Pre-Flight Checklist**, and verify **Telemetry freshness**, **EKF3 local position**, **ToF proximity ring**, **Downward rangefinder**, **Camera vision**, and **RC pilot override** (`PILOT` switch test).
+2. **Manual Flight Pad:** Verify `operator_emergency` (`HOLD` / `LAND` / `HOME`) and manual `Look` gimbal checks before arming with props.
+3. **GPS-free indoor hover:** Use the packaged `nogps.parm` optical-flow + barometer EKF3 profile when flying indoors without GPS.
+4. **AprilTag landing pad:** Place a `tag36h11` ID 0 marker at home; `rth` and `land` descend to the pad and hand touchdown to **ArduPilot** `LAND`.

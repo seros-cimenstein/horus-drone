@@ -1,0 +1,68 @@
+---
+title: HORUS
+description: Safety-first, latency-tolerant autonomous drone supervision with ArduPilot and HORUS Studio.
+template: splash
+hero:
+  tagline: Natural-language autonomous drone supervision over unreliable radio links—with deterministic ArduPilot safety, onboard vision tracking, and a built-in 3D simulator.
+  image:
+    file: ../../assets/logo.svg
+  actions:
+    - text: Get Started in 60 Seconds
+      link: /horus-drone/getting-started/quickstart/
+      icon: right-arrow
+    - text: Architecture & Safety
+      link: /horus-drone/concepts/architecture/
+      variant: minimal
+---
+
+import { Card, CardGrid, Tabs, TabItem } from '@astrojs/starlight/components';
+
+## One-line install
+
+<Tabs>
+  <TabItem label="Linux / macOS">
+    ```sh
+    curl -LsSf https://seros-cimenstein.github.io/horus-drone/install.sh | sh
+    ```
+  </TabItem>
+  <TabItem label="Windows (PowerShell)">
+    ```powershell
+    irm https://seros-cimenstein.github.io/horus-drone/install.ps1 | iex
+    ```
+  </TabItem>
+  <TabItem label="uv / pip">
+    From GitHub:
+    ```sh
+    uv tool install --python 3.12 git+https://github.com/seros-cimenstein/horus-drone.git
+    horus setup
+    ```
+    Or from a local clone:
+    ```sh
+    uv tool install --python 3.12 -e .
+    horus setup
+    ```
+  </TabItem>
+</Tabs>
+
+Then launch **HORUS Studio**:
+
+```sh
+horus
+```
+
+## Why HORUS?
+
+<CardGrid stagger>
+  <Card title="Deterministic Safety" icon="approve-check-circle">
+    ArduPilot owns flight stability, 7-beam ToF proximity avoidance, and hardware RC takeover (`PILOT`). Operator **HOLD / LAND / HOME** interrupts the AI immediately and locks out AI flight tools.
+  </Card>
+  <Card title="Latency-Tolerant Supervision" icon="rocket">
+    The cloud **AI model** picks one base move at a time while onboard **Camera vision** tracks numbered targets and compensates for radio RTT. If the AI goes quiet, the drone holds and returns home.
+  </Card>
+  <Card title="Zero-Setup 3D World" icon="laptop">
+    Built-in Python/MuJoCo **Test world** runs real ArduCopter 4.7.1 SITL (`--model JSON`) natively on Linux and Windows—no Docker, Gazebo, or GStreamer required.
+  </Card>
+  <Card title="Bench to Field" icon="setting">
+    Connect USB/telemetry radios, companion computers (`horus mcp`), Gazebo Harmonic, GTA V, or the installable phone **Control app** over Tailscale.
+  </Card>
+</CardGrid>

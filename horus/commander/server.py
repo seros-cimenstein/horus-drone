@@ -45,6 +45,15 @@ _STATIC_FILES = {
     "/icon-192.png": ("icon-192.png", b"image/png"),
     "/icon-512.png": ("icon-512.png", b"image/png"),
     "/icon-maskable-512.png": ("icon-maskable-512.png", b"image/png"),
+    "/scenes/indoor_sar.jpg": ("scenes/indoor_sar.jpg", b"image/jpeg"),
+    "/scenes/forest_sar.jpg": ("scenes/forest_sar.jpg", b"image/jpeg"),
+    "/scenes/urban_plaza.jpg": ("scenes/urban_plaza.jpg", b"image/jpeg"),
+    "/scenes/procedural.jpg": ("scenes/procedural.jpg", b"image/jpeg"),
+    "/scenes/gazebo.jpg": ("scenes/gazebo.jpg", b"image/jpeg"),
+    "/scenes/gta.jpg": ("scenes/gta.jpg", b"image/jpeg"),
+    "/scenes/direct_usb.jpg": ("scenes/direct_usb.jpg", b"image/jpeg"),
+    "/scenes/companion_board.jpg": ("scenes/companion_board.jpg", b"image/jpeg"),
+    "/scenes/grounder.jpg": ("scenes/grounder.jpg", b"image/jpeg"),
 }
 # Answers this large or larger are gzipped for clients that accept it (the phone's map).
 _GZIP_MIN_BYTES = 1024
@@ -108,10 +117,16 @@ class CommanderASGI:
     def __init__(
         self, commander: Any, token: str, history_size: int, display: Any = None,
         phone_token: str | None = None,
+        studio: Any = None,
     ):
         self.commander = commander
         self.display = display
+        self.studio = studio
         self._token = token
+        self._laptop_authorization = f"Bearer {token}".encode("utf-8")
+        self._phone_authorization = (
+            f"Bearer {phone_token}".encode("utf-8") if phone_token else None
+        )
         # The phone app's own token is accepted next to the laptop's; restarting the service
         # without it revokes the phone.
         self._expected_authorizations = tuple(
@@ -123,7 +138,7 @@ class CommanderASGI:
         # (version, JSON body, gzipped body). Tiles are not cached here: each is one passive call.
         self._map_index: tuple[str, bytes, bytes] | None = None
         self._map_index_lock = asyncio.Lock()
-        self._routes = {
+        self._routes: dict[str, tuple[str, Any]] = {
             "/task": ("POST", self._submit_task),
             "/emergency": ("POST", self._submit_emergency),
             "/reset": ("POST", self._reset_mission),
@@ -134,6 +149,47 @@ class CommanderASGI:
             "/api/map/tile": ("GET", self._display_map_tile),
             "/api/map/live": ("GET", self._display_live_map),
         }
+        self._laptop_only_paths: frozenset[str] = frozenset({
+            "/api/studio/bootstrap",
+            "/api/studio/session/start",
+            "/api/studio/session/stop",
+            "/api/studio/session/restart",
+            "/api/studio/settings",
+            "/api/studio/ai/test",
+            "/api/studio/link-shaper",
+            "/api/studio/manual-move",
+            "/api/studio/hardware/ports",
+            "/api/studio/runs",
+            "/api/studio/mcp-configs",
+            "/api/studio/grounder",
+            "/api/studio/grounder/start",
+            "/api/studio/grounder/stop",
+            "/api/studio/phone",
+            "/api/studio/phone/serve",
+        })
+        if studio is not None:
+            self._routes.update({
+                "/api/studio/status": ("GET", self._studio_status),
+                "/api/studio/capabilities": ("GET", self._studio_capabilities),
+                "/api/studio/bootstrap": ("POST", self._studio_bootstrap),
+                "/api/studio/session/start": ("POST", self._studio_session_start),
+                "/api/studio/session/stop": ("POST", self._studio_session_stop),
+                "/api/studio/session/restart": ("POST", self._studio_session_restart),
+                "/api/studio/spectator-frame": ("GET", self._studio_spectator_frame),
+                "/api/studio/settings": ("GET|PUT", self._studio_settings),
+                "/api/studio/ai/test": ("POST", self._studio_ai_test),
+                "/api/studio/link-shaper": ("POST", self._studio_link_shaper),
+                "/api/studio/manual-move": ("POST", self._studio_manual_move),
+                "/api/studio/preflight": ("GET", self._studio_preflight),
+                "/api/studio/hardware/ports": ("GET", self._studio_hardware_ports),
+                "/api/studio/runs": ("GET", self._studio_runs),
+                "/api/studio/mcp-configs": ("GET", self._studio_mcp_configs),
+                "/api/studio/grounder": ("GET", self._studio_grounder),
+                "/api/studio/grounder/start": ("POST", self._studio_grounder_start),
+                "/api/studio/grounder/stop": ("POST", self._studio_grounder_stop),
+                "/api/studio/phone": ("GET", self._studio_phone),
+                "/api/studio/phone/serve": ("POST", self._studio_phone_serve),
+            })
 
         previous_callback = commander.event_callback
 
@@ -143,6 +199,9 @@ class CommanderASGI:
                 previous_callback(event)
 
         commander.event_callback = publish_commander_event
+        if studio is not None and hasattr(studio, "publish_event"):
+            if studio.publish_event is None:
+                studio.publish_event = self.event_hub.publish
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] == "lifespan":
@@ -161,10 +220,12 @@ class CommanderASGI:
 
         headers = _headers(scope)
         supplied = headers.get(b"authorization", b"")
-        authorized = False
-        for expected in self._expected_authorizations:  # compare against every token, always
-            authorized |= hmac.compare_digest(supplied, expected)
-        if not authorized:
+        is_laptop = hmac.compare_digest(supplied, self._laptop_authorization)
+        is_phone = (
+            self._phone_authorization is not None
+            and hmac.compare_digest(supplied, self._phone_authorization)
+        )
+        if not (is_laptop or is_phone):
             await _send_json(
                 send,
                 401,
@@ -180,10 +241,18 @@ class CommanderASGI:
             await _send_json(send, 404, {"error": "not found"})
             return
         allowed, handler = route
-        if scope.get("method", "GET").upper() != allowed:
+        method = scope.get("method", "GET").upper()
+        allowed_methods = allowed.split("|")
+        if method not in allowed_methods:
             await _send_json(
-                send, 405, {"error": "method not allowed"}, [(b"allow", allowed.encode("ascii"))]
+                send,
+                405,
+                {"error": "method not allowed"},
+                [(b"allow", ", ".join(allowed_methods).encode("ascii"))],
             )
+            return
+        if path in self._laptop_only_paths and not is_laptop:
+            await _send_json(send, 403, {"error": "operator laptop token required"})
             return
         await handler(scope, receive, send)
 
@@ -463,6 +532,198 @@ class CommanderASGI:
             return
         await _send_json(send, 200, payload, gzip_ok=gzip_ok)
 
+    # Operator-only HORUS Studio runtime management routes (never exposed as MCP tools).
+    async def _read_json_object(self, receive: Any, send: Any, *, allow_empty: bool = False) -> dict[str, Any] | None:
+        try:
+            body = await _read_body(receive)
+        except _ClientDisconnected:
+            return None
+        if not body.strip() and allow_empty:
+            return {}
+        try:
+            payload = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            await _send_json(send, 400, {"error": "request body must be valid JSON"})
+            return None
+        if not isinstance(payload, dict):
+            await _send_json(send, 400, {"error": "request body must be a JSON object"})
+            return None
+        return payload
+
+    async def _studio_status(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        await _send_json(send, 200, self.studio.status())
+
+    async def _studio_bootstrap(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        payload = await self._read_json_object(receive, send, allow_empty=True)
+        if payload is None:
+            return
+        try:
+            result = await self.studio.bootstrap_assets(
+                include_models=bool(payload.get("include_models", True)),
+                include_sitl=bool(payload.get("include_sitl", True)),
+            )
+        except Exception as exc:
+            await _send_json(send, 500, {"error": redact_secret(str(exc), self._token)})
+            return
+        await _send_json(send, 200, result)
+
+    async def _studio_session_start(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        payload = await self._read_json_object(receive, send, allow_empty=True)
+        if payload is None:
+            return
+        try:
+            result = await self.studio.start_session(payload)
+        except ValueError as exc:
+            await _send_json(send, 400, {"error": str(exc)})
+            return
+        except Exception as exc:
+            await _send_json(send, 503, {"error": redact_secret(str(_unwrap_error(exc)), self._token)})
+            return
+        await _send_json(send, 200, result)
+
+    async def _studio_session_stop(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        await _send_json(send, 200, await self.studio.stop_session())
+
+    async def _studio_session_restart(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        try:
+            result = await self.studio.restart_session()
+        except Exception as exc:
+            await _send_json(send, 503, {"error": redact_secret(str(_unwrap_error(exc)), self._token)})
+            return
+        await _send_json(send, 200, result)
+
+    async def _studio_spectator_frame(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        query = parse_qs(scope.get("query_string", b"").decode("ascii", errors="replace"))
+        preset = (query.get("preset") or ["follow"])[0]
+        show_tof = (query.get("tof") or ["1"])[0] not in {"0", "false", "no"}
+        try:
+            jpeg = await self.studio.spectator_frame(preset=preset, show_tof=show_tof)
+        except Exception as exc:
+            await _send_json(send, 503, {"error": str(exc)})
+            return
+        await send({
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                (b"content-type", b"image/jpeg"),
+                (b"content-length", str(len(jpeg)).encode("ascii")),
+                (b"cache-control", b"no-store"),
+                (b"x-content-type-options", b"nosniff"),
+            ],
+        })
+        await send({"type": "http.response.body", "body": jpeg})
+
+    async def _studio_settings(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("method", "GET").upper() == "GET":
+            await _send_json(send, 200, self.studio.settings_store.public_view())
+            return
+        payload = await self._read_json_object(receive, send)
+        if payload is None:
+            return
+        try:
+            view = self.studio.update_settings(payload)
+        except ValueError as exc:
+            await _send_json(send, 400, {"error": str(exc)})
+            return
+        await _send_json(send, 200, view)
+
+    async def _studio_ai_test(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        await _send_json(send, 200, await self.studio.test_ai())
+
+    async def _studio_link_shaper(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        payload = await self._read_json_object(receive, send)
+        if payload is None:
+            return
+        try:
+            updated = self.studio.link_shaper.configure(
+                delay_ms=payload.get("delay_ms"),
+                jitter_ms=payload.get("jitter_ms"),
+                link_cut=payload.get("link_cut"),
+            )
+        except (TypeError, ValueError) as exc:
+            await _send_json(send, 400, {"error": str(exc)})
+            return
+        state = {"delay_ms": updated.delay_ms, "jitter_ms": updated.jitter_ms, "link_cut": updated.link_cut}
+        self.event_hub.publish({"kind": "link_shaper_updated", **state})
+        await _send_json(send, 200, state)
+
+    async def _studio_manual_move(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        payload = await self._read_json_object(receive, send)
+        if payload is None:
+            return
+        action = payload.get("action")
+        params = payload.get("params") if isinstance(payload.get("params"), Mapping) else {}
+        if not isinstance(action, str) or not action.strip():
+            await _send_json(send, 400, {"error": "action must be a non-empty string"})
+            return
+        try:
+            result = await self.studio.manual_move(action.strip(), params)
+        except ValueError as exc:
+            await _send_json(send, 400, {"error": str(exc)})
+            return
+        except Exception as exc:
+            await _send_json(send, 503, {"error": redact_secret(str(_unwrap_error(exc)), self._token)})
+            return
+        await _send_json(send, 200, result)
+
+    async def _studio_preflight(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        await _send_json(send, 200, {"items": await self.studio.preflight()})
+
+    async def _studio_hardware_ports(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        await _send_json(send, 200, {"ports": self.studio.hardware_ports()})
+
+    async def _studio_runs(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        await _send_json(send, 200, {"runs": self.studio.list_runs()})
+
+    async def _studio_capabilities(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        query = parse_qs(scope.get("query_string", b"").decode("ascii", errors="replace"))
+        probe = (query.get("probe") or ["1"])[0] not in {"0", "false", "no"}
+        caps = await asyncio.to_thread(self.studio.capabilities, probe_external_tools=probe)
+        await _send_json(send, 200, {"capabilities": caps})
+
+    async def _studio_mcp_configs(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        query = parse_qs(scope.get("query_string", b"").decode("ascii", errors="replace"))
+        include_token = (query.get("include_token") or ["0"])[0] in {"1", "true", "yes"}
+        await _send_json(send, 200, self.studio.mcp_configs(include_token=include_token))
+
+    async def _studio_grounder(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        await _send_json(send, 200, self.studio.grounder_status())
+
+    async def _studio_grounder_start(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        payload = await self._read_json_object(receive, send, allow_empty=True)
+        if payload is None:
+            return
+        backend = str(payload.get("backend") or "grounding-dino")
+        port = int(payload.get("port") or 8100)
+        try:
+            res = self.studio.start_grounder(backend=backend, port=port)
+        except Exception as exc:
+            await _send_json(send, 503, {"error": redact_secret(str(_unwrap_error(exc)), self._token)})
+            return
+        await _send_json(send, 200, res)
+
+    async def _studio_grounder_stop(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        await _send_json(send, 200, self.studio.stop_grounder())
+
+    async def _studio_phone(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        status = await asyncio.to_thread(self.studio.phone_status)
+        await _send_json(send, 200, status)
+
+    async def _studio_phone_serve(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        payload = await self._read_json_object(receive, send)
+        if payload is None:
+            return
+        action = str(payload.get("action") or "status").strip().lower()
+        try:
+            res = await asyncio.to_thread(self.studio.phone_serve_action, action)
+        except ValueError as exc:
+            await _send_json(send, 400, {"error": str(exc)})
+            return
+        except Exception as exc:
+            await _send_json(send, 503, {"error": redact_secret(str(_unwrap_error(exc)), self._token)})
+            return
+        await _send_json(send, 200, res)
+
     async def _lifespan(self, receive: Any, send: Any) -> None:
         while True:
             message = await receive()
@@ -480,12 +741,14 @@ def create_app(
     history_size: int = _DEFAULT_HISTORY_SIZE,
     display: Any = None,
     phone_token: str | None = None,
+    studio: Any = None,
 ) -> CommanderASGI:
     """Create the HTTP/SSE app; a non-empty token is always required.
 
     ``display`` (a :class:`DisplayReader`) answers the control app's ``/api/*`` reads; without
     one they return 503. ``phone_token``, when given, is accepted as a second bearer token for
-    the phone app.
+    the phone app. ``studio`` attaches operator-only runtime management routes under
+    ``/api/studio/*``.
     """
     if token is None:
         token = os.environ.get("HORUS_COMMANDER_TOKEN")
@@ -493,7 +756,7 @@ def create_app(
         raise ValueError("HORUS_COMMANDER_TOKEN must be set to a non-empty value")
     if phone_token is not None and not phone_token.strip():
         phone_token = None
-    return CommanderASGI(commander, token, history_size, display, phone_token)
+    return CommanderASGI(commander, token, history_size, display, phone_token, studio=studio)
 
 
 def _accepts_gzip(scope: Mapping[str, Any]) -> bool:
@@ -561,6 +824,14 @@ async def _wait_for_disconnect(receive: Any) -> None:
 
 class _ClientDisconnected(Exception):
     pass
+
+
+def _unwrap_error(exc: BaseException) -> BaseException:
+    sub = getattr(exc, "exceptions", None)
+    while isinstance(sub, (list, tuple)) and sub and isinstance(sub[0], BaseException):
+        exc = sub[0]
+        sub = getattr(exc, "exceptions", None)
+    return exc
 
 
 def _event_cursor(scope: Mapping[str, Any], headers: Mapping[bytes, bytes]) -> int | None:

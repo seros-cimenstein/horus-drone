@@ -1,0 +1,18 @@
+---
+title: Architecture
+description: HORUS v2 block architecture, responsibilities, and design boundary.
+---
+
+HORUS splits semantic reasoning (in the cloud or workstation) from deterministic flight safety and short-horizon tracking (onboard the drone).
+
+## System blocks
+
+1. **Control app** (`horus/commander/web/`, `ui/`, `horus/repl/`): HORUS Studio web app (laptop + phone PWA) or `horus tui` terminal. Emergency controls (`HOLD`, `LAND`, `HOME`) skip the AI.
+2. **AI pilot** (`horus/commander/`, `horus/studio/`): One mission-scoped conversation with the **AI model**, loopback HTTP/SSE API, and operator Studio session supervisor (`/api/studio/*`—never exposed to the AI).
+3. **AI model** (outside): Reached via OpenAI/compatible APIs, Anthropic, Claude Code, or OMP; picks one base move at a time.
+4. **Drone board** (`horus/mcp_server/`): The authenticated MCP server on the drone's computer—the AI's only control panel.
+5. **Flight moves** (`horus/executor/`): `take_off`, `goto`, `move`, `turn`, `look`, `hold`, `land`, `rth`; executes one move at a time and runs precision AprilTag landing.
+6. **Camera vision** (`horus/perception/`): Detects, numbers, and tracks objects in camera frames (YOLOv8n + OSNet ReID + CSRT + ring-buffer latency compensation).
+7. **Autopilot link** (`horus/flight/`): MAVLink bridge to **ArduPilot** sending **velocity setpoints only**.
+8. **ArduPilot** (outside): Attitude stabilization, 7-beam ToF proximity avoidance (`AVOID_ENABLE`), failsafes, and hardware RC `PILOT` override. No geofence.
+9. **Test world** (`horus/world/`, `sim/`, `gta/`): Built-in 3D Python/MuJoCo world (`#4e2c`), Gazebo Harmonic (`#71dd`), or GTA V (`#85c8`)—one world at a time.

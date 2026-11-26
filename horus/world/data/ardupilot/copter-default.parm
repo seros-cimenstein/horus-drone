@@ -1,0 +1,10 @@
+# Minimal Copter 4.7 default parameter baseline for standalone SITL runs
+# (used only when an extracted SITL bundle does not ship its own copter-default.parm).
+SYSID_THISMAV 1
+FRAME_CLASS 1
+FRAME_TYPE 1
+ARMING_CHECK 1
+FS_THR_ENABLE 0
+FS_GCS_ENABLE 0
+LOG_DISARMED 0
+SIM_RATE_HZ 800

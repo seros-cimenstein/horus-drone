@@ -24,3 +24,7 @@ __pycache__/
 /HANDOFF.md
 /annotated.jpg
 /scripts/koko/
+ui/node_modules/
+site/node_modules/
+site/dist/
+site/.astro/

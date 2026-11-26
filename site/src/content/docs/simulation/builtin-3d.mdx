@@ -1,0 +1,19 @@
+---
+title: Built-in 3D World
+description: Cross-platform Python/MuJoCo 3D Test world with ArduCopter SITL, 7-beam ToF, gimbal, and Fault Lab.
+---
+
+The built-in 3D **Test world** (`horus/world/`) runs natively on Windows and Linux with zero Docker, Gazebo, or GStreamer dependencies.
+
+## Included scenes
+
+- **`indoor_sar` (default):** Enclosed SAR room with partition wall, doorway, north corridor, furniture, AprilTag ID 0 landing pad at home, and people in distinct shirt colors (including standing, sitting, lying, and walking).
+- **`forest_sar`:** Outdoor woodland clearing, collision tree trunks and canopies, forest trail, hikers, and vector map data.
+- **`urban_plaza`:** City blocks, Central Plaza, fountain, parked vehicle, pedestrians, and tiled street/place map (`find_place` and `get_area_map` enabled).
+- **`procedural`:** Seeded outdoor world generating trees, landmarks, hikers, and map data from a chosen seed.
+
+## Physics, sensors, and Fault Lab
+
+- **Lockstep physics:** Implements **ArduPilot**'s UDP `9002` binary servo-frame decoder and JSON state encoder over MuJoCo rigid-body & contact physics with an F450 thrust/drag model.
+- **7-beam ToF & gimbal:** Sends 6 horizontal sector beams + downward `range_down` (`DISTANCE_SENSOR`) at 20 Hz and drives a 2-axis stabilized MAVLink gimbal (`pitch_deg`, `yaw_deg`).
+- **3D Spectator View & Fault Lab:** Watch live follow/overhead/orbit 3D camera views inside HORUS Studio and test `0 ms`–`5000 ms` AI link latency or **Cut AI Link** to observe `HOLDING → auto_rth`.

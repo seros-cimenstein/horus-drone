@@ -1,0 +1,12 @@
+---
+title: Gazebo Harmonic
+description: Advanced Gazebo Harmonic simulation, Docker environment, procedural worldgen, and remote Koko compute.
+---
+
+Gazebo Harmonic (`sim/`) remains fully supported as an advanced **Test world** and can be attached directly inside HORUS Studio (**Settings → Hardware & External Sim → GAZEBO**).
+
+## Running Gazebo simulation
+
+- **Local container:** `scripts/demo.sh` or `sim/run.sh start` launches Gazebo Harmonic, ArduCopter SITL, GStreamer video, and the **Drone board**.
+- **Remote compute (`Koko`):** Heavy Gazebo episodes and seed sweeps run on a remote host via `scripts/koko/remote_up.sh`, forwarding only the **Drone board** port over SSH while **HORUS Studio** runs locally.
+- **Procedural worlds:** `sim/worldgen` builds seeded outdoor forest and urban worlds with civilian traffic and matching vector maps.

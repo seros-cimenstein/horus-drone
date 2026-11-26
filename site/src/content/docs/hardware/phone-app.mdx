@@ -1,0 +1,18 @@
+---
+title: Phone Companion App
+description: Install the HORUS Control app on your phone over Tailscale HTTPS with offline map tiles.
+---
+
+The HORUS **Control app** adapts automatically at `/?view=phone` as an installable Progressive Web App (PWA).
+
+## Publishing over Tailscale
+
+1. Enable HTTPS certificates in your Tailscale admin console.
+2. Start HORUS Studio with phone token support (`horus studio --phone`) or set `HORUS_COMMANDER_PHONE_TOKEN`.
+3. Publish the loopback server over your tailnet with `scripts/phone_serve.sh start` (uses `tailscale serve`, never public `tailscale funnel`).
+4. Open the printed `https://.../?view=phone#token=...` URL on your phone and tap **Add to Home Screen**.
+
+## Phone-specific protections
+
+- **Token scoping:** Phone tokens can view telemetry/status and send missions or **HOLD / LAND / HOME**, while host configuration routes (`/api/studio/settings`, `/api/studio/session/*`, `/api/studio/link-shaper`) require the laptop token (`403` for phone tokens).
+- **Low bandwidth:** Shows **What the AI saw** frames on demand (plus an optional `Live` toggle) and caches map tiles in IndexedDB for offline use.

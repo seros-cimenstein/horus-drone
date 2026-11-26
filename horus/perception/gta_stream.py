@@ -52,12 +52,17 @@ class GtaFrameHeader:
     game_frame: int | None
 
 
-def parse_gta_uri(source: str) -> tuple[str, int]:
-    """``gta://host:port`` -> (host, port); host defaults to 127.0.0.1, port to 5610."""
+def parse_frame_stream_uri(source: str) -> tuple[str, int]:
+    """``gta://host:port`` or ``sim://host:port`` -> (host, port); defaults 127.0.0.1:5610."""
     endpoint = urlsplit(source)
-    if endpoint.scheme.lower() != "gta":
-        raise ValueError(f"not a gta:// source: {source!r}")
+    if endpoint.scheme.lower() not in {"gta", "sim"}:
+        raise ValueError(f"not a gta:// or sim:// source: {source!r}")
     return endpoint.hostname or "127.0.0.1", endpoint.port or DEFAULT_PORT
+
+
+def parse_gta_uri(source: str) -> tuple[str, int]:
+    """``gta://host:port`` or ``sim://host:port`` -> (host, port); host defaults to 127.0.0.1, port to 5610."""
+    return parse_frame_stream_uri(source)
 
 
 class GtaFrameStream:

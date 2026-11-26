@@ -1,0 +1,71 @@
+---
+title: Installation
+description: Install HORUS on Linux, Windows, or macOS with one command or uv/pip.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+HORUS runs natively on **Linux** (`x86_64` / `aarch64`), **Windows 10/11** (`x86_64`), and **macOS** on Python **3.10–3.13** (Python 3.12 recommended).
+
+## One-line installers
+
+<Tabs>
+  <TabItem label="Linux / macOS">
+    ```sh
+    curl -LsSf https://seros-cimenstein.github.io/horus-drone/install.sh | sh
+    ```
+    Set `HORUS_SKIP_SETUP=1` to install the CLI without downloading SITL/ONNX assets yet.
+  </TabItem>
+  <TabItem label="Windows (PowerShell)">
+    ```powershell
+    irm https://seros-cimenstein.github.io/horus-drone/install.ps1 | iex
+    ```
+    Set `$env:HORUS_SKIP_SETUP = "1"` before running to skip asset downloads.
+  </TabItem>
+  <TabItem label="uv / pip">
+    Install directly from GitHub with `uv`:
+    ```sh
+    uv tool install --python 3.12 git+https://github.com/seros-cimenstein/horus-drone.git
+    horus setup
+    ```
+    Or install from a local clone in editable mode:
+    ```sh
+    uv tool install --python 3.12 -e .
+    horus setup
+    ```
+    Or with `pip`:
+    ```sh
+    pip install git+https://github.com/seros-cimenstein/horus-drone.git
+    horus setup
+    ```
+  </TabItem>
+</Tabs>
+
+## Companion board install (Phase 4)
+
+On an onboard companion computer (e.g., BeagleY-AI / AM67A) that only runs the **Drone board** (`horus mcp`) without MuJoCo or cloud LLM SDKs, install the lean `board` extra:
+
+```sh
+pip install "horus-drone[board] @ git+https://github.com/seros-cimenstein/horus-drone.git"
+```
+
+Or from a local clone on the board:
+
+```sh
+pip install -e ".[board]"
+```
+
+## Verify your environment
+
+```sh
+horus doctor
+```
+
+`horus doctor` checks Python runtime, MuJoCo offscreen OpenGL, ArduCopter SITL binary, SHA-256-verified ONNX models (`yolov8n.onnx` and `osnet_x0_25_msmt17.onnx`), serial ports, Tailscale, and configured AI credentials.
+
+## Updating & uninstalling
+
+```sh
+uv tool upgrade horus-drone
+uv tool uninstall horus-drone
+```

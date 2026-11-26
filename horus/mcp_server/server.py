@@ -161,11 +161,11 @@ def main(argv: list[str] | None = None) -> None:
     unavailable_reason: str | None = None
     image_publisher = None
     live_publisher = None
-    # GTA V draws the camera view itself and no Gazebo GUI watches a GTA run: rendering and
-    # converting every frame for a gz topic there would only cost CPU.
-    gazebo_images = not config.perception.source.startswith("gta://")
+    # GTA V and Built-in 3D draw the camera view themselves and no Gazebo GUI watches them:
+    # rendering and converting every frame for a gz topic there would only cost CPU.
+    gazebo_images = not config.perception.source.startswith(("gta://", "sim://"))
     if not gazebo_images:
-        logging.getLogger(__name__).info("GTA frame source: Gazebo image publishers are off")
+        logging.getLogger(__name__).info("External/3D frame source: Gazebo image publishers are off")
     try:
         flight.connect()
         if gimbal is not None:

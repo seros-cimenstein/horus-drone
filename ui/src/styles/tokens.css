@@ -1,0 +1,108 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --ch-canvas: 255 255 255;
+  --ch-surface: 247 247 248;
+  --ch-raised: 255 255 255;
+  --ch-hover: 236 236 239;
+  --ch-border: 228 228 231;
+  --ch-border-strong: 200 200 206;
+  --ch-text-primary: 9 9 11;
+  --ch-text-secondary: 82 82 91;
+  --ch-text-muted: 113 113 122;
+  --ch-accent: 9 9 11;
+  --ch-on-accent: 255 255 255;
+  --ch-success: 21 128 61;
+  --ch-warning: 161 98 7;
+  --ch-danger: 185 28 28;
+  color-scheme: light;
+}
+
+.dark {
+  --ch-canvas: 9 9 11;
+  --ch-surface: 17 17 19;
+  --ch-raised: 24 24 27;
+  --ch-hover: 34 34 38;
+  --ch-border: 36 36 40;
+  --ch-border-strong: 56 56 64;
+  --ch-text-primary: 250 250 250;
+  --ch-text-secondary: 161 161 170;
+  --ch-text-muted: 120 120 130;
+  --ch-accent: 250 250 250;
+  --ch-on-accent: 9 9 11;
+  --ch-success: 34 197 94;
+  --ch-warning: 245 158 11;
+  --ch-danger: 220 38 38;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --color-canvas: rgb(var(--ch-canvas));
+  --color-surface: rgb(var(--ch-surface));
+  --color-raised: rgb(var(--ch-raised));
+  --color-hover: rgb(var(--ch-hover));
+  --color-border: rgb(var(--ch-border));
+  --color-border-strong: rgb(var(--ch-border-strong));
+  --color-primary: rgb(var(--ch-text-primary));
+  --color-secondary: rgb(var(--ch-text-secondary));
+  --color-muted: rgb(var(--ch-text-muted));
+  --color-accent: rgb(var(--ch-accent));
+  --color-on-accent: rgb(var(--ch-on-accent));
+  --color-success: rgb(var(--ch-success));
+  --color-warning: rgb(var(--ch-warning));
+  --color-danger: rgb(var(--ch-danger));
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    background-color: rgb(var(--ch-canvas));
+    color: rgb(var(--ch-text-primary));
+    scrollbar-color: rgb(var(--ch-border-strong)) transparent;
+    scrollbar-width: thin;
+  }
+
+  * {
+    scrollbar-color: rgb(var(--ch-border-strong)) transparent;
+    scrollbar-width: thin;
+  }
+
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: rgb(var(--ch-border-strong));
+    border-radius: 9999px;
+  }
+
+  body {
+    margin: 0;
+    overflow-x: clip;
+  }
+
+  input[type="range"] {
+    accent-color: rgb(var(--ch-accent));
+    cursor: pointer;
+  }
+
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 2px solid rgb(var(--ch-accent));
+    outline-offset: 2px;
+  }
+
+  dialog.horus-sheet::backdrop {
+    display: none;
+  }
+}

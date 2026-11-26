@@ -1,0 +1,28 @@
+---
+title: MCP Drone Board Tools
+description: Complete reference of Drone board tools exposed to the AI model and direct MCP clients.
+---
+
+The **Drone board** (`horus mcp`) exposes authenticated streamable-HTTP MCP tools at `http://127.0.0.1:8000/mcp`. Studio management routes (`/api/studio/*`) are never exposed as MCP tools.
+
+## Flight & gimbal moves
+
+- `take_off(altitude_m, ttl_s)` — Arm in `GUIDED` and climb to `altitude_m`.
+- `goto(pose, ttl_s)` — Fly in local NED (`north_m`, `east_m`, `up_m`) using velocity setpoints.
+- `move(forward_m, right_m, up_m, ttl_s)` — Body-relative displacement.
+- `turn(yaw_deg, rate_deg_s, ttl_s)` — Turn in place relative to current heading.
+- `look(pitch_deg, yaw_deg)` — Point the stabilized gimbal.
+- `hold()` / `land()` / `rth()` — AI-initiated hold, landing, or return-to-home.
+
+## Vision, maps & state
+
+- `get_state(passive=False)` — Vehicle pose, velocity, mode, battery, proximity, perception status.
+- `get_frame()` / `get_raw_frame()` / `list_candidates(passive=False)` — Annotated set-of-mark frames and tracked objects.
+- `set_vocabulary(terms)` / `point(target_id)` — Open-vocabulary detection and latency-compensated 3D localization.
+- `find_place(query, limit)` / `mark_place(name, north_m, east_m, note)` / `get_area_map(north_m, east_m, radius_m)` — Map search and operator marks.
+
+## Connecting Claude Code or Codex directly
+
+```sh
+codex mcp add horus --bearer-token-env-var HORUS_MCP_TOKEN http://127.0.0.1:8000/mcp
+```

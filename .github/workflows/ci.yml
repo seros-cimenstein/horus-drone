@@ -1,0 +1,78 @@
+name: HORUS CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  test-and-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build HORUS Studio UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Create Python 3.12 test environment
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv/bin/python -e ".[test]" || uv pip install --python .venv/Scripts/python.exe -e ".[test]"
+
+      - name: Run unit and integration tests (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          .venv/bin/python -m pytest -q \
+            tests/test_bootstrap.py \
+            tests/test_world_physics.py \
+            tests/test_world_scenes_and_stream.py \
+            tests/test_studio_settings.py \
+            tests/test_studio_link_shaper.py \
+            tests/test_studio_api.py \
+            tests/test_cli.py \
+            tests/test_commander_server.py \
+            tests/test_executor.py \
+            tests/test_flight_link.py \
+            tests/test_mcp_startup.py
+
+      - name: Run unit and integration tests (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          .venv\Scripts\python.exe -m pytest -q `
+            tests/test_bootstrap.py `
+            tests/test_world_physics.py `
+            tests/test_world_scenes_and_stream.py `
+            tests/test_studio_settings.py `
+            tests/test_studio_link_shaper.py `
+            tests/test_studio_api.py `
+            tests/test_cli.py `
+            tests/test_commander_server.py `
+            tests/test_executor.py `
+            tests/test_flight_link.py `
+            tests/test_mcp_startup.py
+
+      - name: Headless Built-in 3D world + camera + CLI doctor smoke (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          .venv/bin/horus doctor --json
+          .venv/bin/horus --help
+
+      - name: Headless Built-in 3D world + camera + CLI doctor smoke (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          .venv\Scripts\horus.exe doctor --json
+          .venv\Scripts\horus.exe --help

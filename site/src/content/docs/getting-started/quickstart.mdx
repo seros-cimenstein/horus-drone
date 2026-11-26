@@ -1,0 +1,27 @@
+---
+title: Quickstart
+description: Launch HORUS Studio, start the built-in 3D Test world, and fly your first mission.
+---
+
+## 1. Launch HORUS Studio
+
+```sh
+horus
+```
+
+HORUS Studio starts on `127.0.0.1:8765`, prints its token-protected URL (`http://127.0.0.1:8765/#token=...`), and opens your default browser.
+
+## 2. Launch a Built-in 3D World
+
+On the **Launchpad**, if SITL or ONNX models are not cached yet, click **Download SITL & Vision Models**. Then click **Launch Indoor SAR Room** (or **Outdoor Forest**, **Urban Plaza**, **Procedural World**).
+
+HORUS Studio automatically:
+1. Starts the MuJoCo **Test world** with 7-beam ToF sensors, 2-axis gimbal, and `sim://` camera stream.
+2. Starts **ArduPilot** (`arducopter --model JSON`) in an isolated run directory.
+3. Starts the **Drone board** (`horus mcp`) and binds both the **AI pilot** and passive **Control app** display reader.
+
+## 3. Fly manually or with AI
+
+- **Without an AI key:** Open **Fault Lab → Manual Flight & Vision** to test `Take Off 2m`, directional nudges, gimbal `Look`, and open-vocabulary terms immediately.
+- **With an AI model:** Click **Settings → AI Pilot & Crew** to pick OpenAI, Anthropic, Google Gemini, OpenRouter, Ollama, Claude Code, or OMP, then click any curated mission chip in **Mission Composer**.
+- **Emergencies:** The pinned **`HOLD` / `LAND` / `HOME`** buttons always bypass the **AI pilot** and lock out AI flight tools until your next mission.

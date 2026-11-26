@@ -103,8 +103,12 @@ RUN output="$(gz sim -s -r --headless-rendering -v4 --iterations 50 shapes.sdf 2
     && ! printf '%s\n' "$output" | grep -E 'Failed to (load|find plugin)'
 COPY pyproject.toml README.md /tmp/horus-source/
 COPY horus /tmp/horus-source/horus
-RUN /opt/horus-venv/bin/pip install --no-cache-dir --no-build-isolation \
-        '/tmp/horus-source[server,perception,test]' \
+RUN /opt/horus-venv/bin/pip install --no-cache-dir --no-build-isolation --no-deps \
+        '/tmp/horus-source' \
+    && /opt/horus-venv/bin/pip install --no-cache-dir \
+        'PyYAML>=6.0,<7' 'mcp>=1.30.0,<2' 'httpx>=0.27,<1' 'uvicorn>=0.29,<1' \
+        'pymavlink>=2.4.41,<3' 'numpy>=1.24,<2' 'onnxruntime>=1.17,<2' \
+        'platformdirs>=4.2,<5' 'pyserial>=3.5,<4' 'pytest>=8,<9' \
     && rm -rf /tmp/horus-source
 
 

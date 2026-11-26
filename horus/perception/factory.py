@@ -24,6 +24,16 @@ from .tracks import TrackerConfig
 _MAX_LOST_TRACK_S = 10.0
 
 
+class _NullDetector:
+    """No-op detector used when YOLO ONNX weights are not installed."""
+
+    model_id = "none"
+
+    def detect(self, image: Any) -> tuple[Any, ...]:
+        del image
+        return ()
+
+
 def create_perception_system(
     settings: PerceptionSettings,
     flight: MavlinkFlightLink,
@@ -45,13 +55,17 @@ def create_perception_system(
         CameraConfig(source=settings.source, fps_cap=settings.max_fps),
         pose_provider=current_pose,
     )
-    detector = YOLODetector(
-        DetectorConfig(
-            model_name=settings.detector_model,
-            onnx_intra_op_num_threads=settings.onnx_intra_op_num_threads,
-            onnx_inter_op_num_threads=settings.onnx_inter_op_num_threads,
+    detector: Any
+    if settings.detector_model.strip().lower() == "none":
+        detector = _NullDetector()
+    else:
+        detector = YOLODetector(
+            DetectorConfig(
+                model_name=settings.detector_model,
+                onnx_intra_op_num_threads=settings.onnx_intra_op_num_threads,
+                onnx_inter_op_num_threads=settings.onnx_inter_op_num_threads,
+            )
         )
-    )
     embedder = _create_embedder(
         settings.embedding_model,
         onnx_intra_op_num_threads=settings.onnx_intra_op_num_threads,

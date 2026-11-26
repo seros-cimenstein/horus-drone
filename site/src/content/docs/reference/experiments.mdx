@@ -1,0 +1,15 @@
+---
+title: Experiments & Logs
+description: Reproducing latency sweeps, safety trials, and inspecting JSONL event logs.
+---
+
+Every **Drone board**, **AI pilot**, and **HORUS Studio** session writes structured JSONL event logs under `runs/` (secrets automatically redacted).
+
+## Reproducing link-loss & latency trials
+
+1. Launch `indoor_sar` in **HORUS Studio**.
+2. Send a mission (or use **Manual Flight** to hover).
+3. Open **Fault Lab → Link-Loss & Latency**:
+   - Select `500 ms`, `1500 ms`, or `3000 ms` to inject artificial MCP round-trip latency on the **AI pilot** link only.
+   - Click **Cut AI Link** to simulate complete radio loss while passive telemetry continues updating the UI, and observe the transition from `EXECUTING → HOLDING → RTH` after `link_loss_rth_delay_s`.
+4. Browse recorded JSONL files under **Settings → Run Logs & Cache**.

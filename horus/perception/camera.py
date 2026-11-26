@@ -89,10 +89,10 @@ class OpenCVCameraReader:
             raise RuntimeError("OpenCV is required to open a camera or video source") from exc
 
         source = self.config.source
-        if isinstance(source, str) and source.lower().startswith("gta://"):
-            from .gta_stream import GtaFrameStream, parse_gta_uri
+        if isinstance(source, str) and source.lower().startswith(("gta://", "sim://")):
+            from .gta_stream import GtaFrameStream, parse_frame_stream_uri
 
-            host, port = parse_gta_uri(source)
+            host, port = parse_frame_stream_uri(source)
             self._capture = GtaFrameStream(host, port, timeout_s=self.config.read_timeout_s)
             self._next_read_at = time.monotonic()
             return self
