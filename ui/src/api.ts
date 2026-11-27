@@ -149,7 +149,7 @@ export const horusApi = {
   getMcpConfigs: (token: string, includeToken = false) =>
     apiJson<McpConfigsResponse>(`/api/studio/mcp-configs?include_token=${includeToken ? 1 : 0}`, token),
   getGrounder: (token: string) => apiJson<GrounderStatus>("/api/studio/grounder", token),
-  startGrounder: (token: string, backend = "grounding-dino", port = 8100) =>
+  startGrounder: (token: string, backend = "auto", port = 8100) =>
     apiJson<GrounderStatus>("/api/studio/grounder/start", token, {
       method: "POST",
       body: JSON.stringify({ backend, port }),

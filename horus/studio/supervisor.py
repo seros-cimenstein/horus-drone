@@ -133,6 +133,7 @@ class StudioSupervisor:
         self._procs = ProcessGroup()
         self._grounder_procs = ProcessGroup()
         self._grounder_url: str | None = None
+        self._grounder_backend: str | None = None
         self._external_sim_stop_cmd: list[str] | None = None
         self._state = StudioState()
         self._active_mcp_token: str | None = None
@@ -686,25 +687,66 @@ class StudioSupervisor:
             "running": running,
             "url": self._grounder_url or st.grounder_url,
             "pid": procs[0].pid if running and procs else None,
+            "backend": self._grounder_backend if running else None,
         }
 
-    def start_grounder(self, *, backend: str = "grounding-dino", port: int = 8100) -> dict[str, Any]:
+    def start_grounder(self, *, backend: str = "auto", port: int = 8100) -> dict[str, Any]:
+        import importlib.util
+
+        from horus.grounder.backends import resolve_cloud_vlm_config
+
         self.stop_grounder()
-        venv_py = Path.cwd() / "models" / "grounder-venv" / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
-        py = str(venv_py) if venv_py.is_file() else sys.executable
+        venv_py = (
+            Path.cwd()
+            / "models"
+            / "grounder-venv"
+            / ("Scripts" if os.name == "nt" else "bin")
+            / ("python.exe" if os.name == "nt" else "python")
+        )
+        local_torch = (
+            importlib.util.find_spec("torch") is not None
+            and importlib.util.find_spec("transformers") is not None
+        )
+        cloud_cfg = resolve_cloud_vlm_config(self.settings_store)
+
+        chosen = (backend or "auto").strip().lower()
+        if chosen == "auto":
+            chosen = "cloud-vlm" if (cloud_cfg is not None and not venv_py.is_file() and not local_torch) else "grounding-dino-tiny"
+
+        env = _child_log_env(os.environ)
+        if chosen == "cloud-vlm":
+            if cloud_cfg is None:
+                raise RuntimeError(
+                    "Cloud VLM grounder requires GEMINI_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY in AI & MCP."
+                )
+            api_key, base_url, model_name = cloud_cfg
+            env["HORUS_GROUNDER_API_KEY"] = api_key
+            env["HORUS_GROUNDER_BASE_URL"] = base_url
+            env["HORUS_GROUNDER_MODEL"] = model_name
+            py = sys.executable
+        else:
+            if not venv_py.is_file() and not local_torch:
+                raise RuntimeError(
+                    "Local PyTorch grounder requires `horus-drone[grounder]` or `models/grounder-venv` (or choose Cloud VLM)."
+                )
+            py = str(venv_py) if venv_py.is_file() else sys.executable
+
         log_path = self.runs_root / "studio" / "grounder.log"
         self._grounder_procs.spawn(
             "grounder",
-            [py, "-m", "horus.grounder.server", "--backend", backend, "--port", str(int(port))],
+            [py, "-m", "horus.grounder.server", "--model", chosen, "--port", str(int(port))],
             cwd=str(Path.cwd()),
+            env=env,
             log_path=str(log_path),
         )
         self._grounder_url = f"http://127.0.0.1:{int(port)}"
+        self._grounder_backend = chosen
         return self.grounder_status()
 
     def stop_grounder(self) -> dict[str, Any]:
         self._grounder_procs.stop_all()
         self._grounder_url = None
+        self._grounder_backend = None
         return self.grounder_status()
 
     def phone_status(self) -> dict[str, Any]:

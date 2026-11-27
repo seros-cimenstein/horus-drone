@@ -11,6 +11,7 @@ import subprocess
 from typing import Any
 
 from horus.bootstrap import _check_mujoco_gl, check_assets
+from horus.grounder.backends import resolve_cloud_vlm_config
 from horus.studio.preflight import list_serial_ports
 from horus.studio.settings import StudioSettingsStore
 
@@ -148,16 +149,35 @@ def check_capabilities(
     # 5. Open-Vocab Grounder
     grounder_venv = (repo_root / "models" / "grounder-venv").exists()
     torch_ok = _has_module("torch") and _has_module("transformers")
+    cloud_vlm = resolve_cloud_vlm_config(settings_store)
     grounder_checks = [
-        {"name": "Grounder runtime (venv or torch)", "ok": grounder_venv or torch_ok, "optional": True, "detail": "models/grounder-venv present" if grounder_venv else ("torch + transformers installed" if torch_ok else "Optional Grounder dependencies not installed"), "fix_hint": "Install `horus-drone[grounder]` or set up `models/grounder-venv`."},
+        {
+            "name": "Cloud VLM Grounding (zero install)",
+            "ok": cloud_vlm is not None,
+            "optional": True,
+            "detail": f"Ready via {cloud_vlm[2]}" if cloud_vlm else "No GEMINI_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY set",
+            "fix_hint": "Optional: add a Gemini/OpenAI/OpenRouter key in AI & MCP for zero-install open-vocab grounding.",
+        },
+        {
+            "name": "Local PyTorch runtime (venv or torch)",
+            "ok": grounder_venv or torch_ok,
+            "optional": True,
+            "detail": "models/grounder-venv present" if grounder_venv else ("torch + transformers installed" if torch_ok else "Optional local PyTorch dependencies not installed"),
+            "fix_hint": "Optional offline local backend: install `horus-drone[grounder]` or set up `models/grounder-venv`.",
+        },
         {"name": "Configured Grounder URL", "ok": bool(settings.grounder_url), "optional": True, "detail": settings.grounder_url or "Disabled", "fix_hint": "Set Grounder URL under Flight & Vision settings."},
     ]
+    grounder_summary = (
+        "Local PyTorch ready"
+        if (grounder_venv or torch_ok)
+        else (f"Cloud VLM ready ({cloud_vlm[2]})" if cloud_vlm else "Optional (Cloud VLM key or horus-drone[grounder])")
+    )
     grounder_cap = {
         "id": "grounder",
         "title": "Open-Vocab Grounder",
         "tier": "optional",
-        "ready": grounder_venv or torch_ok,
-        "summary": "Installed" if (grounder_venv or torch_ok) else "Optional (install horus-drone[grounder])",
+        "ready": grounder_venv or torch_ok or (cloud_vlm is not None),
+        "summary": grounder_summary,
         "checks": grounder_checks,
     }
 

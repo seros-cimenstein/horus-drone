@@ -160,6 +160,7 @@ export interface GrounderStatus {
   running: boolean;
   url: string;
   pid: number | null;
+  backend?: string | null;
 }
 
 export interface PhoneStatus {

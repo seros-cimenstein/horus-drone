@@ -182,7 +182,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8100)
-    parser.add_argument("--model", choices=tuple(MODEL_IDS), default="grounding-dino-tiny")
+    parser.add_argument(
+        "--model",
+        "--backend",
+        dest="model",
+        choices=(*MODEL_IDS, "grounding-dino", "owlv2"),
+        default="grounding-dino-tiny",
+    )
     parser.add_argument("--threads", type=int, default=6)
     args = parser.parse_args(argv)
     if args.threads < 1:

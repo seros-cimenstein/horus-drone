@@ -723,7 +723,7 @@ class CommanderASGI:
         payload = await self._read_json_object(receive, send, allow_empty=True)
         if payload is None:
             return
-        backend = str(payload.get("backend") or "grounding-dino")
+        backend = str(payload.get("backend") or "auto")
         port = int(payload.get("port") or 8100)
         try:
             res = self.studio.start_grounder(backend=backend, port=port)

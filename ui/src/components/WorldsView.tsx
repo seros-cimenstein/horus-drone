@@ -47,6 +47,7 @@ export function WorldsView({
   const [remoteToken, setRemoteToken] = useState("");
   const [ports, setPorts] = useState<SerialPortInfo[]>([]);
   const [grounder, setGrounder] = useState<GrounderStatus | null>(null);
+  const [grounderBackend, setGrounderBackend] = useState("auto");
   const [launchingKey, setLaunchingKey] = useState<string | null>(null);
   const [grounderBusy, setGrounderBusy] = useState<"start" | "stop" | null>(null);
   const toast = useToast();
@@ -78,7 +79,7 @@ export function WorldsView({
     setGrounderBusy(action);
     try {
       const next =
-        action === "start" ? await horusApi.startGrounder(token) : await horusApi.stopGrounder(token);
+        action === "start" ? await horusApi.startGrounder(token, grounderBackend) : await horusApi.stopGrounder(token);
       setGrounder(next);
       toast.success(action === "start" ? "Grounder service started" : "Grounder service stopped");
     } catch (e: unknown) {
@@ -400,15 +401,26 @@ export function WorldsView({
                 <div className="flex items-center gap-2.5">
                   <h3 className="text-[16px] font-semibold tracking-tight text-primary">Visual Grounder (`horus-grounder`)</h3>
                   <StatusBadge tone={grounder?.running ? "ok" : "neutral"}>
-                    {grounder?.running ? `Running (PID ${grounder.pid})` : "Stopped"}
+                    {grounder?.running ? `Running (PID ${grounder.pid}${grounder.backend ? ` · ${grounder.backend}` : ""})` : "Stopped"}
                   </StatusBadge>
                 </div>
                 <p className="mt-1 text-[13.5px] text-secondary">
-                  Runs Moondream / Qwen-VL / Gemini grounding on{" "}
+                  Runs zero-install Cloud VLM or optional local PyTorch grounding on{" "}
                   <span className="font-mono text-primary">{grounder?.url || "http://127.0.0.1:8100"}</span> for arbitrary text targets.
                 </p>
               </div>
-              <div className="flex shrink-0 gap-2">
+              <div className="flex shrink-0 flex-wrap items-center gap-2">
+                <Select
+                  aria-label="Grounder backend"
+                  value={grounderBackend}
+                  onChange={(e) => setGrounderBackend(e.target.value)}
+                  className="!h-9 !w-auto !text-[13px]"
+                >
+                  <option value="auto">Auto (Cloud VLM or Local)</option>
+                  <option value="cloud-vlm">Cloud VLM (Zero Install)</option>
+                  <option value="grounding-dino-tiny">Grounding DINO (Local PyTorch)</option>
+                  <option value="owlv2-base-patch16-ensemble">OWLv2 (Local PyTorch)</option>
+                </Select>
                 <Button
                   size="sm"
                   variant="primary"

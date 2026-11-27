@@ -7,9 +7,11 @@ import threading
 import time
 from urllib.request import Request, urlopen
 
+import httpx
 import numpy as np
 import pytest
 
+from horus.grounder.backends import CloudVLMGrounder, create_backend
 from horus.grounder.client import GrounderClient, GrounderUnavailable
 from horus.grounder.server import make_server
 from horus.perception.types import GroundingBox
@@ -120,3 +122,67 @@ def test_client_raises_when_request_times_out() -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_cloud_vlm_grounder_parses_clamps_and_filters_boxes() -> None:
+    response_body = {
+        "choices": [
+            {
+                "message": {
+                    "content": (
+                        '```json\n{"detections": ['
+                        '{"label": "red backpack", "score": 0.91, "box_2d": [200, 100, 800, 600]},'
+                        '{"label": "noise", "score": 0.15, "box_2d": [0, 0, 100, 100]},'
+                        '{"label": "clamped", "score": 0.75, "box_2d": [-50, 500, 1200, 1100]}'
+                        "]}\n```"
+                    )
+                }
+            }
+        ]
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/chat/completions")
+        assert request.headers["authorization"] == "Bearer test-key"
+        return httpx.Response(200, json=response_body)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        backend = CloudVLMGrounder(
+            api_key="test-key",
+            base_url="https://vlm.example.test/v1/",
+            model="gemini-2.5-flash",
+            client=client,
+        )
+        backend.load()
+        boxes = backend.detect(
+            np.zeros((100, 200, 3), dtype=np.uint8),
+            ["red backpack", "clamped"],
+            box_threshold=0.35,
+            text_threshold=0.25,
+        )
+
+    assert len(boxes) == 2
+    assert boxes[0] == GroundingBox((20.0, 20.0, 120.0, 80.0), 0.91, "red backpack")
+    assert boxes[1] == GroundingBox((100.0, 0.0, 200.0, 100.0), 0.75, "clamped")
+
+
+def test_cloud_vlm_grounder_requires_api_key(monkeypatch) -> None:
+    for var in (
+        "HORUS_GROUNDER_API_KEY",
+        "HORUS_GROUNDER_BASE_URL",
+        "HORUS_GROUNDER_MODEL",
+        "GEMINI_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HORUS_CONFIG_DIR", "/tmp/horus-nonexistent-cfg-test")
+    backend = create_backend("cloud-vlm")
+    assert isinstance(backend, CloudVLMGrounder)
+    with pytest.raises(RuntimeError, match="requires GEMINI_API_KEY"):
+        backend.load()
+
+
+def test_create_backend_supports_aliases() -> None:
+    assert create_backend("grounding-dino").model == "grounding-dino-tiny"
+    assert create_backend("owlv2").model == "owlv2-base-patch16-ensemble"
