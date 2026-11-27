@@ -119,7 +119,7 @@ export function SystemPhoneView({
     }
   };
 
-  const phoneUrl = phone?.tailnet_url || phone?.local_url || "";
+  const phoneUrl = phone?.tailnet_url || phone?.lan_url || phone?.local_url || "";
   const qrRows = phoneUrl ? buildQrMatrix(phoneUrl) : [];
 
   if (section === "tuning") {
@@ -205,10 +205,10 @@ export function SystemPhoneView({
       <div className="mx-auto flex w-full max-w-4xl flex-col gap-8 px-6 py-8">
         <PageHeader
           title="Phone App"
-          description="Open HORUS on your phone over local Wi-Fi or encrypted Tailscale HTTPS (`/?view=phone`)."
+          description="Open HORUS on your phone over local Wi-Fi (`horus studio --phone --lan`) or optional Tailscale HTTPS (`/?view=phone`)."
           action={
-            <StatusBadge tone={phone?.serve_active ? "ok" : "neutral"}>
-              {phone?.serve_active ? "Tailnet active" : "Local only"}
+            <StatusBadge tone={phone?.serve_active || phone?.tls_enabled ? "ok" : "neutral"}>
+              {phone?.serve_active ? "Tailnet HTTPS" : phone?.tls_enabled ? "LAN HTTPS" : "Local only"}
             </StatusBadge>
           }
         />
@@ -234,8 +234,17 @@ export function SystemPhoneView({
           )}
           <div className="flex min-w-0 flex-1 flex-col gap-3">
             <div className="text-[13.5px] text-secondary">
-              Tailscale CLI: <strong className="text-primary">{phone?.tailscale_installed ? "installed" : "not installed"}</strong>
-              {" · "}HTTPS certs: <strong className="text-primary">{phone?.tailscale_certs ? "enabled" : "disabled"}</strong>
+              LAN HTTPS:{" "}
+              <strong className="text-primary">
+                {phone?.tls_enabled ? `active (${phone.lan_ip || "0.0.0.0"})` : "off (run `horus studio --phone --lan`)"}
+              </strong>
+              {" · "}Tailscale (optional):{" "}
+              <strong className="text-primary">{phone?.tailscale_installed ? "installed" : "not installed"}</strong>
+              {phone?.tailscale_installed && (
+                <>
+                  {" · "}HTTPS certs: <strong className="text-primary">{phone.tailscale_certs ? "enabled" : "disabled"}</strong>
+                </>
+              )}
             </div>
             <pre className="overflow-x-auto rounded-[8px] border border-border bg-canvas p-3 font-mono text-[12.5px] text-primary">
               {phoneUrl || "Start Studio with `horus studio --phone` for a dedicated phone link."}

@@ -63,3 +63,11 @@ def test_cli_logs_help_exits_cleanly(capsys) -> None:
     out = capsys.readouterr().out
     assert "--service" in out
     assert "--follow" in out
+
+
+def test_cli_studio_accepts_lan_flag() -> None:
+    args = cli._build_parser().parse_args(["studio", "--phone", "--lan", "--no-browser"])
+    assert args.command == "studio"
+    assert args.phone is True
+    assert args.lan is True
+    assert args.no_browser is True

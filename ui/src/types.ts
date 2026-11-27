@@ -165,6 +165,9 @@ export interface GrounderStatus {
 
 export interface PhoneStatus {
   local_url: string;
+  lan_url?: string | null;
+  lan_ip?: string | null;
+  tls_enabled?: boolean;
   tailnet_url: string | null;
   phone_token_active: boolean;
   tailscale_installed: boolean;

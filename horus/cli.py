@@ -88,13 +88,15 @@ def _run_studio(args: argparse.Namespace) -> int:
 
     from horus.commander.agent import HorusCommander
     from horus.commander.display import DisplayReader
+    from horus.studio.lan_tls import detect_lan_ip, ensure_lan_tls_cert
     from horus.studio.link_shaper import LinkShaper
     from horus.studio.settings import StudioSettingsStore
     from horus.studio.supervisor import StudioSupervisor
 
+    lan_mode = bool(getattr(args, "lan", False))
     token = os.environ.get("HORUS_COMMANDER_TOKEN") or secrets.token_urlsafe(24)
     phone_token = os.environ.get("HORUS_COMMANDER_PHONE_TOKEN") or (
-        secrets.token_urlsafe(24) if args.phone else None
+        secrets.token_urlsafe(24) if (args.phone or lan_mode) else None
     )
     default_log = Path("runs/studio/studio.log")
     chosen_log = args.log_file if args.log_file is not None else default_log
@@ -130,21 +132,37 @@ def _run_studio(args: argparse.Namespace) -> int:
         commander=commander,
         display=display,
     )
-    supervisor.set_control_endpoint(args.port, phone_token)
+    lan_ip = detect_lan_ip() if lan_mode else None
+    ssl_certfile: str | None = None
+    ssl_keyfile: str | None = None
+    bind_host = DEFAULT_HOST
+    if lan_mode:
+        cert_path, key_path = ensure_lan_tls_cert(store.config_dir, lan_ip)
+        ssl_certfile = str(cert_path)
+        ssl_keyfile = str(key_path)
+        bind_host = "0.0.0.0"
+
+    supervisor.set_control_endpoint(
+        args.port,
+        phone_token,
+        lan_ip=lan_ip,
+        tls_enabled=lan_mode,
+    )
     app = create_app(commander, token, display=display, phone_token=phone_token, studio=supervisor)
 
     async def serve() -> None:
-        server = uvicorn.Server(
-            uvicorn.Config(
-                app,
-                host=DEFAULT_HOST,
-                port=args.port,
-                log_level="info",
-                log_config=None,
-                access_log=False,
-                timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN_S,
-            )
-        )
+        config_kwargs: dict[str, object] = {
+            "host": bind_host,
+            "port": args.port,
+            "log_level": "info",
+            "log_config": None,
+            "access_log": False,
+            "timeout_graceful_shutdown": _GRACEFUL_SHUTDOWN_S,
+        }
+        if ssl_certfile and ssl_keyfile:
+            config_kwargs["ssl_certfile"] = ssl_certfile
+            config_kwargs["ssl_keyfile"] = ssl_keyfile
+        server = uvicorn.Server(uvicorn.Config(app, **config_kwargs))
         loop = asyncio.get_running_loop()
         orig_handle_exit = server.handle_exit
 
@@ -172,7 +190,13 @@ def _run_studio(args: argparse.Namespace) -> int:
         async def announce() -> None:
             while not server.started:
                 await asyncio.sleep(0.05)
-            url = control_app_url(args.port, token)
+            scheme = "https" if lan_mode else "http"
+            url = f"{scheme}://{DEFAULT_HOST}:{args.port}/#token={token}" if lan_mode else control_app_url(args.port, token)
+            lan_phone_url = (
+                f"https://{lan_ip}:{args.port}/?view=phone#token={phone_token}"
+                if (lan_mode and lan_ip and phone_token)
+                else None
+            )
             out_console = get_console(stderr=False) if (_RICH_AVAILABLE and _is_interactive_tty(sys.stdout)) else None
             if out_console is not None:
                 from rich.text import Text
@@ -181,14 +205,21 @@ def _run_studio(args: argparse.Namespace) -> int:
                     Text.assemble(("HORUS Studio: ", "horus.brand"), (url, "horus.url")),
                     soft_wrap=True,
                 )
-                if phone_token:
+                if lan_phone_url:
+                    out_console.print(
+                        Text.assemble(("LAN Phone PWA: ", "horus.ok"), (lan_phone_url, "horus.url")),
+                        soft_wrap=True,
+                    )
+                elif phone_token:
                     out_console.print(
                         Text.assemble(("Phone token active ", "horus.ok"), (f"(#token={phone_token})", "horus.muted")),
                         soft_wrap=True,
                     )
             else:
                 print(f"HORUS Studio: {url}", flush=True)
-                if phone_token:
+                if lan_phone_url:
+                    print(f"LAN Phone PWA: {lan_phone_url}", flush=True)
+                elif phone_token:
                     print(f"Phone token active (#token={phone_token})", flush=True)
             if _RICH_AVAILABLE and _is_interactive_tty(sys.stderr):
                 from rich.panel import Panel
@@ -199,7 +230,7 @@ def _run_studio(args: argparse.Namespace) -> int:
                     grid = Table.grid(padding=(0, 2))
                     grid.add_column(style="horus.key")
                     grid.add_column()
-                    grid.add_row("Endpoint", f"http://{DEFAULT_HOST}:{args.port}")
+                    grid.add_row("Endpoint", f"{scheme}://{bind_host}:{args.port}")
                     grid.add_row("Log file", str(active_log_path) if active_log_path else "console only")
                     grid.add_row("Logs CLI", "horus logs --follow")
                     grid.add_row("Shutdown", "Press Ctrl+C for clean teardown")
@@ -212,7 +243,7 @@ def _run_studio(args: argparse.Namespace) -> int:
                         )
                     )
             if not args.no_browser:
-                logger.info("Launching browser at http://%s:%d ...", DEFAULT_HOST, args.port)
+                logger.info("Launching browser at %s://%s:%d ...", scheme, DEFAULT_HOST, args.port)
                 _open_browser(url)
 
         announce_task = asyncio.create_task(announce())
@@ -636,6 +667,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_studio.add_argument("--port", type=int, default=DEFAULT_PORT)
     p_studio.add_argument("--no-browser", action="store_true")
     p_studio.add_argument("--phone", action="store_true")
+    p_studio.add_argument(
+        "--lan",
+        action="store_true",
+        help="Bind on LAN (0.0.0.0) with a local self-signed HTTPS cert for Wi-Fi Phone PWA",
+    )
     add_logging_arguments(p_studio)
 
     sub.add_parser("tui", help="Start HORUS terminal control loop (REPL)", add_help=False)

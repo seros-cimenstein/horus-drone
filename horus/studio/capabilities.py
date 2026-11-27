@@ -219,6 +219,7 @@ def check_capabilities(
             except json.JSONDecodeError:
                 pass
     phone_checks = [
+        {"name": "Local LAN HTTPS (--lan)", "ok": True, "optional": True, "detail": "Built-in self-signed TLS via `horus studio --phone --lan` (no Tailscale required)", "fix_hint": "Run `horus studio --phone --lan` for Wi-Fi PWA access without Tailscale."},
         {"name": "Tailscale CLI", "ok": tailscale_bin is not None, "optional": True, "detail": tailscale_bin or "tailscale not installed", "fix_hint": "Install Tailscale for HTTPS phone access over your tailnet."},
         {"name": "Tailscale HTTPS Certs", "ok": ts_certs, "optional": True, "detail": f"Tailnet DNS: {ts_dns}" if ts_dns else "Tailnet HTTPS certificates not active", "fix_hint": "Enable MagicDNS + HTTPS Certificates in Tailscale admin console."},
         {"name": "phone_serve.sh helper", "ok": phone_script, "optional": True, "detail": "Found scripts/phone_serve.sh" if phone_script else "Local ?view=phone URL still works directly", "fix_hint": "Run from repo checkout to use tailscale serve wrapper."},
@@ -228,7 +229,7 @@ def check_capabilities(
         "title": "Phone Companion PWA",
         "tier": "optional",
         "ready": bool(tailscale_bin and ts_certs),
-        "summary": f"HTTPS ready ({ts_dns})" if (tailscale_bin and ts_certs and ts_dns) else "Optional — Local QR ready; Tailscale HTTPS optional",
+        "summary": f"HTTPS ready ({ts_dns})" if (tailscale_bin and ts_certs and ts_dns) else "Optional — Local QR & `--lan` HTTPS ready; Tailscale optional",
         "checks": phone_checks,
     }
 

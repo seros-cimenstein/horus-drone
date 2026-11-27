@@ -142,10 +142,21 @@ class StudioSupervisor:
         self._http_client = httpx.AsyncClient(timeout=3.0)
         self._studio_port: int = 8765
         self._phone_token: str | None = None
+        self._lan_ip: str | None = None
+        self._tls_enabled: bool = False
 
-    def set_control_endpoint(self, port: int, phone_token: str | None) -> None:
+    def set_control_endpoint(
+        self,
+        port: int,
+        phone_token: str | None,
+        *,
+        lan_ip: str | None = None,
+        tls_enabled: bool = False,
+    ) -> None:
         self._studio_port = int(port)
         self._phone_token = phone_token
+        self._lan_ip = lan_ip
+        self._tls_enabled = bool(tls_enabled)
 
     def bind_commander_and_display(self, commander: Any, display: Any) -> None:
         self.commander = commander
@@ -755,7 +766,13 @@ class StudioSupervisor:
 
         local_tok = self._phone_token or ""
         frag = f"#token={local_tok}" if local_tok else ""
-        local_url = f"http://127.0.0.1:{self._studio_port}/?view=phone{frag}"
+        scheme = "https" if self._tls_enabled else "http"
+        local_url = f"{scheme}://127.0.0.1:{self._studio_port}/?view=phone{frag}"
+        lan_url = (
+            f"{scheme}://{self._lan_ip}:{self._studio_port}/?view=phone{frag}"
+            if (self._tls_enabled and self._lan_ip)
+            else None
+        )
         ts_bin = shutil.which("tailscale")
         dns_name = ""
         certs = False
@@ -776,6 +793,9 @@ class StudioSupervisor:
         tailnet_url = f"https://{dns_name}/?view=phone{frag}" if (dns_name and serve_active) else None
         return {
             "local_url": local_url,
+            "lan_url": lan_url,
+            "lan_ip": self._lan_ip,
+            "tls_enabled": self._tls_enabled,
             "tailnet_url": tailnet_url,
             "phone_token_active": bool(local_tok),
             "tailscale_installed": ts_bin is not None,

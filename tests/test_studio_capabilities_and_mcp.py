@@ -114,3 +114,30 @@ def test_capabilities_mcp_grounder_and_phone_api_routes_and_token_scoping(tmp_pa
         await supervisor.close()
 
     asyncio.run(run())
+
+
+def test_lan_tls_cert_generation_and_phone_status_url(tmp_path: Path) -> None:
+    import stat
+
+    from horus.studio.lan_tls import ensure_lan_tls_cert
+
+    cfg_dir = tmp_path / "cfg"
+    cert1, key1 = ensure_lan_tls_cert(cfg_dir, lan_ip="192.168.1.42")
+    assert cert1.is_file() and key1.is_file()
+    assert "BEGIN CERTIFICATE" in cert1.read_text(encoding="utf-8")
+    assert (key1.stat().st_mode & 0o777) == (stat.S_IRUSR | stat.S_IWUSR)
+
+    # Reuses existing certificate when LAN IP matches.
+    mtime_before = cert1.stat().st_mtime_ns
+    cert2, key2 = ensure_lan_tls_cert(cfg_dir, lan_ip="192.168.1.42")
+    assert (cert2, key2) == (cert1, key1)
+    assert cert2.stat().st_mtime_ns == mtime_before
+
+    store = StudioSettingsStore(cfg_dir)
+    supervisor = StudioSupervisor(settings_store=store, runs_root=tmp_path / "runs")
+    supervisor.set_control_endpoint(8765, "phone-tok", lan_ip="192.168.1.42", tls_enabled=True)
+    status = supervisor.phone_status()
+    assert status["tls_enabled"] is True
+    assert status["lan_ip"] == "192.168.1.42"
+    assert status["local_url"] == "https://127.0.0.1:8765/?view=phone#token=phone-tok"
+    assert status["lan_url"] == "https://192.168.1.42:8765/?view=phone#token=phone-tok"
