@@ -12,7 +12,7 @@ Every frame delivered by `get_frame` or `list_candidates` is downscaled to ≤64
 - **Detector + ReID:** Default CPU pipeline runs **YOLOv8n** (80 COCO classes) paired with **OSNet x0.25** appearance embeddings (`models/osnet_x0_25_msmt17.onnx`), embedded lazily at most once per track per frame.
 - **Yaw-compensated association:** Tracks associate across frames using box overlap after compensating for measured camera yaw.
 - **Appearance revalidation:** If vehicle pitch or translation breaks box overlap, a detection can still reclaim a nearby missed track of the same class only if its center is within one box diagonal, height is within 2×, its crop meets minimum size (`12×30` px default), and its embedding passes `revalidation_similarity_threshold` against the track's stored `reference_views` (the original creation view is never evicted).
-- **No silent re-ID after exit:** Once a track leaves the field of view and expires, it is gone—the **AI model** uses `point()` or `set_vocabulary()` to seed a fresh tracker ID when it sees the object again.
+- **No silent re-ID after exit:** Once a track leaves the field of view and expires, it is gone; the **AI model** uses `point()` or `set_vocabulary()` to seed a fresh tracker ID when it sees the object again.
 
 ## Latency-compensated `point()`
 

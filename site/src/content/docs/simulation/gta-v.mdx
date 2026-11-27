@@ -30,7 +30,7 @@ python -m venv /tmp/navmesh-venv
 ```
 
 - Takes ~2 minutes and ~0.6 GB RAM (pass `--no-walkable` to omit the ped navmesh and run inside HORUS's own environment).
-- Downloads pinned DurtyFree data dumps (SHA-256 verified), converts road graphs, crossings, districts, landmarks, and walkable polygons to NED meters, and cuts 3 zoom levels: **250 m** (full detail), **1000 m** (simplified ways), and **4000 m** (freeways and districts)—keeping the **Drone board**'s tile cache under 40 MB of RAM.
+- Downloads pinned DurtyFree data dumps (SHA-256 verified), converts road graphs, crossings, districts, landmarks, and walkable polygons to NED meters, and cuts 3 zoom levels: **250 m** (full detail), **1000 m** (simplified ways), and **4000 m** (freeways and districts), keeping the **Drone board**'s tile cache under 40 MB of RAM.
 - Derived GTA map dumps carry no license and are strictly for **local research only**; never commit `data/maps/` to Git. See [Credits & Licenses](/horus-drone/reference/credits-and-licenses/).
 
 ### OpenStreetMap alternative (`provider: osm`)

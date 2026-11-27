@@ -3,15 +3,29 @@ title: CLI & Configuration
 description: Reference for horus subcommands, auxiliary binaries, YAML profiles, Studio HTTP/SSE APIs, and environment variables.
 ---
 
-## `horus` subcommands
+Reference for the unified `horus` CLI, standalone service entrypoints, YAML configuration profiles, HTTP/SSE endpoints, and environment variables.
 
-| Command | Description |
-| --- | --- |
-| `horus` / `horus studio` | Start **HORUS Studio** (`--port`, `--no-browser`, `--phone`) |
-| `horus tui` | Start the terminal **Control app** (`--server-url`, `--config`) |
-| `horus mcp` | Start the standalone **Drone board** MCP server (`--config`, `--no-perception`) |
-| `horus setup` | Download and SHA-256-verify ArduCopter SITL + ONNX models (`--check`, `--with-grounder`) |
-| `horus doctor` | Inspect Python, MuJoCo GL, SITL, ONNX models, serial ports, Tailscale, and AI creds (`--json`) |
+## CLI commands
+
+Running `horus` with no arguments starts **HORUS Studio**:
+
+```sh
+# Web dashboard (default when running `horus` alone)
+horus                             # Start HORUS Studio and open it in your browser
+horus studio --port 8765          # Choose a custom port (optional: --no-browser, --phone)
+
+# Terminal client & standalone Drone board
+horus tui                         # Interactive terminal control app (--server-url, --config)
+horus mcp                         # Run the Drone board MCP server (--no-perception for flight-only)
+
+# Setup & diagnostics
+horus setup                       # Download and verify SITL and vision models (--check, --with-grounder)
+horus doctor                      # Check Python, MuJoCo, SITL, models, serial ports, and AI keys (--json)
+
+# Help
+horus --help                      # List all commands (short form: horus -h)
+horus <command> --help            # Show options for a specific command (e.g. horus studio --help)
+```
 
 ### Standalone service entrypoints
 
@@ -19,29 +33,31 @@ description: Reference for horus subcommands, auxiliary binaries, YAML profiles,
 | --- | --- |
 | `horus-mcp` | Direct entrypoint for the **Drone board** MCP server |
 | `horus-mcp-call` | CLI MCP test client (`list-tools`, `get-prompt`, `get_state`, `get_frame`, `get_raw_frame`, `list_candidates`) |
-| `horus-commander-serve` | Standalone **AI pilot** + Studio HTTP/SSE server (`--port`) |
+| `horus-commander-serve` | Standalone **AI pilot** and Studio HTTP/SSE server (`--port`) |
 | `horus-grounder` | Optional open-vocabulary grounding server (`/detect`, `/health` on `127.0.0.1:8100`, `--model`) |
 | `horus-gz-gimbal` / `horus-gta-gimbal` | MAVLink Gimbal Protocol v2 device relays for Gazebo and GTA V |
 | `horus-tof-bridge` | 7-beam ToF `DISTANCE_SENSOR` bridge for Gazebo |
 
 ## Configuration (`config/horus.yaml`)
 
-YAML configs are parsed **strictly**—unknown keys are rejected at startup so typos never fail silently. Defaults live in `horus/config.py`, organized into six sections:
+YAML configs are parsed **strictly**: unknown keys are rejected at startup so typos never fail silently. Defaults live in `horus/config.py`, organized into six sections:
 
 - **`flight`:** MAVLink endpoint (`tcp:127.0.0.1:5760` default), `gps_free_mode`, and `global_origin_*` coordinates.
 - **`executor`:** Controller speeds (`speed_m_s`, `vertical_speed_m_s`, `cruise_speed_m_s`, `cruise_min_altitude_m`), `turn_rate_deg_s`, `telemetry_max_age_s` (`1.5` s), `link_loss_rth_delay_s` (`30` s), and precision landing thresholds.
 - **`gimbal`:** `connection` (`udpin:127.0.0.1:14600`), pitch/yaw travel limits (`-90..45°`, `±160°`). Omit for fixed cameras.
-- **`perception`:** `enabled`, camera `source`, `ring_buffer_s`, `ignore_regions` (normalized `[x1, y1, x2, y2]` mask boxes discarding proposals ≥50% covered—useful for fixed props/landing gear), ReID `reference_views` thresholds, and `grounder_url` / `vocabulary`.
+- **`perception`:** `enabled`, camera `source`, `ring_buffer_s`, `ignore_regions` (normalized `[x1, y1, x2, y2]` mask boxes discarding proposals ≥50% covered, useful for fixed props or landing gear), ReID `reference_views` thresholds, and `grounder_url` / `vocabulary`.
 - **`map`:** `provider` (`none`, `gta`, or `osm`), `data_path`, and optional `origin_latitude_deg` / `origin_longitude_deg`.
 - **`commander`:** Backend `provider` (`omp`, `claude-code`, `anthropic`, `openai`, etc.), `model`, `max_turns`, `max_tokens`, and `timeout_s`.
 
 ### Shipped profiles
 
-- `config/horus.yaml` — Default indoor room-and-corridor profile.
-- `config/horus_nogps.yaml` — GPS-free indoor profile (pair with `config/ardupilot/nogps.parm`).
-- `config/horus_forest.yaml` / `config/horus_urban.yaml` — Canonical Gazebo outdoor profiles.
-- `config/horus_procedural_forest.yaml` / `config/horus_procedural_urban.yaml` — Long-range procedural profiles with altitude-gated `8 m/s` cruise and `360 s` TTL.
-- `config/horus_gta.yaml` — GTA V physical quadrotor with whole-map tiles (`provider: gta`) and `max_turns: 200`.
+| Profile | Description |
+| --- | --- |
+| `config/horus.yaml` | Default indoor room-and-corridor profile |
+| `config/horus_nogps.yaml` | GPS-free indoor profile (pair with `config/ardupilot/nogps.parm`) |
+| `config/horus_forest.yaml`, `config/horus_urban.yaml` | Canonical Gazebo outdoor profiles |
+| `config/horus_procedural_forest.yaml`, `config/horus_procedural_urban.yaml` | Long-range procedural profiles with altitude-gated `8 m/s` cruise and `360 s` TTL |
+| `config/horus_gta.yaml` | GTA V physical quadrotor with whole-map tiles (`provider: gta`) and `max_turns: 200` |
 
 ## AI pilot HTTP & SSE API
 
@@ -61,9 +77,11 @@ YAML configs are parsed **strictly**—unknown keys are rejected at startup so t
 
 ## Key environment variables
 
-- `HORUS_CONFIG` — Path to YAML config (`config/horus.yaml` default).
-- `HORUS_MCP_TOKEN` / `HORUS_COMMANDER_TOKEN` / `HORUS_COMMANDER_PHONE_TOKEN` — Bearer tokens (auto-generated by `horus studio` when unset).
-- `HORUS_EVENT_LOG` / `HORUS_RUN_DIR` — Override JSONL event log file and run output directory.
-- `HORUS_ASSETS_DIR` / `HORUS_CONFIG_DIR` — Override asset cache and Studio config directories.
-- `HORUS_SITL_BIN` / `HORUS_YOLO_MODEL` / `HORUS_REID_MODEL` — Explicit binary/model overrides.
-- `HORUS_GROUNDER_HF_CACHE` — Offline Hugging Face cache directory (`HF_HUB_OFFLINE=1`).
+| Variable | Purpose |
+| --- | --- |
+| `HORUS_CONFIG` | Path to YAML config (`config/horus.yaml` default) |
+| `HORUS_MCP_TOKEN`, `HORUS_COMMANDER_TOKEN`, `HORUS_COMMANDER_PHONE_TOKEN` | Bearer tokens (auto-generated by `horus studio` when unset) |
+| `HORUS_EVENT_LOG`, `HORUS_RUN_DIR` | Override JSONL event log file and run output directory |
+| `HORUS_ASSETS_DIR`, `HORUS_CONFIG_DIR` | Override asset cache and Studio config directories |
+| `HORUS_SITL_BIN`, `HORUS_YOLO_MODEL`, `HORUS_REID_MODEL` | Explicit binary/model overrides |
+| `HORUS_GROUNDER_HF_CACHE` | Offline Hugging Face cache directory (`HF_HUB_OFFLINE=1`) |

@@ -18,7 +18,7 @@ HORUS intentionally **omits** the rest of ArduPilot's Guided and safety-bypass c
 HORUS imposes no artificial boundary, altitude ceiling, or floor in any world or hardware profile (`FENCE_ENABLE 0`). Input validation checks only that numbers are finite, `take_off` `altitude_m > 0`, and `goto` / `move` targets stay above home altitude (`up_m > 0`).
 
 - **Horizontal obstacles:** The 7-beam ToF ring + `AVOID_MARGIN 1.0` m (`common.parm`) stops horizontal motion short of walls and obstacles seen by the range sensors.
-- **Vertical clearance:** Horizontal ToF beams do not detect ceilings or overhangs—do not command climbs above an indoor ceiling or under low structures.
+- **Vertical clearance:** Horizontal ToF beams do not detect ceilings or overhangs; do not command climbs above an indoor ceiling or under low structures.
 
 ## Task lifecycle & telemetry guards
 
@@ -36,7 +36,7 @@ Click **`HOLD`**, **`LAND`**, or **`HOME`** in **HORUS Studio** (or use `/hold`,
 3. While `operator_lock` is active, AI flight tools (`take_off`, `goto`, `move`, `turn`, `hold`, `rth`, `land`) are refused so the **AI model** cannot undo your command.
 4. Sending a new mission, pressing **New mission**, or executing a manual `/take_off` or `/goto` sends `operator_release` and unlocks flight tools.
 
-Short exact imperatives typed into the mission box or `horus tui`—`stop`, `halt`, `abort`, `hold`, `freeze`, `land`, `rth`, `return home`, `home`, `go home` (optionally followed by `now` or `immediately` and punctuation)—also trigger the direct emergency path. Longer sentences (e.g., `"land next to the hiker"`) are routed to the **AI pilot**.
+Short exact imperatives typed into the mission box or `horus tui` (`stop`, `halt`, `abort`, `hold`, `freeze`, `land`, `rth`, `return home`, `home`, `go home`, optionally followed by `now` or `immediately` and punctuation) also trigger the direct emergency path. Longer sentences (e.g., `"land next to the hiker"`) are routed to the **AI pilot**.
 
 ## AI link-loss failsafe & hardware RC override
 

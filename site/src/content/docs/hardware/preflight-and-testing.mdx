@@ -3,7 +3,7 @@ title: Pre-flight & Testing
 description: Props-off bench verification, core ArduPilot parameters, GPS-free optical flow, and AprilTag precision landing.
 ---
 
-Always validate hardware, telemetry, and **ArduPilot** parameters in progressive gates—props off first—before untethered flight.
+Always validate hardware, telemetry, and **ArduPilot** parameters in progressive gates, props off first, before untethered flight.
 
 ## 1. Progressive hardware checks
 
@@ -42,5 +42,5 @@ Place a `tag36h11` ID `0` marker at home for repeatable `rth` and `land` touchdo
 
 1. **Acquisition (`≤3 m` from home):** **Flight moves** points the gimbal straight down (`-90°`) and waits for a fresh `tag36h11` ID `0` detection before switching to `GUIDED` precision centering.
 2. **Centering & descent:** Horizontal velocity is proportional to tag image offset (`0.35 m/s` max, zero inside a 5% deadband) while descending at `0.15 m/s` inside a 15% cone. Below `0.6 m`, control hands off to vertical `LAND`.
-3. **Grace & safe fallback:** Brief detection misses hold the last validated setpoint for `executor.precision_landing_target_grace_s` (default `1` s) before pausing descent. If descent stalls (`precision_landing_min_descent_m_s` over `precision_landing_stall_s`), pose/heading goes stale, or perception errors after acquisition, HORUS hands off cleanly to `LAND` (`precision_landing_stalled`)—an armed `GUIDED` hover above the pad is never left as a terminal state.
+3. **Grace & safe fallback:** Brief detection misses hold the last validated setpoint for `executor.precision_landing_target_grace_s` (default `1` s) before pausing descent. If descent stalls (`precision_landing_min_descent_m_s` over `precision_landing_stall_s`), pose/heading goes stale, or perception errors after acquisition, HORUS hands off cleanly to `LAND` (`precision_landing_stalled`) so an armed `GUIDED` hover above the pad is never left as a terminal state.
 4. **Post-landing:** The gimbal re-levels after landing and on every subsequent `take_off`. `get_state` exposes `precision_landing` counters (`detections`, `acquisitions`, `completed landings`, `last_fallback`).

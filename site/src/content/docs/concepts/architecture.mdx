@@ -12,12 +12,12 @@ HORUS separates high-level semantic reasoning (which runs in the cloud or on you
 | **Control app** | `horus/commander/web/`, `ui/`, `horus/repl/` | HORUS Studio web dashboard (laptop + phone PWA) and `horus tui` terminal. Emergency controls (`HOLD`, `LAND`, `HOME`) skip the AI. |
 | **AI pilot** | `horus/commander/`, `horus/studio/` | Maintains one mission-scoped conversation with the **AI model**, streams executor/perception events, and runs the Studio process supervisor (`/api/studio/*`, never exposed to the AI). |
 | **AI model** | *(external)* | Reached via OpenAI/compatible APIs, Anthropic, Claude Code, or OMP; picks one base move at a time from what the camera shows. |
-| **Drone board** | `horus/mcp_server/` | Authenticated streamable-HTTP MCP server on the drone's companion computer—the AI's only control panel. |
+| **Drone board** | `horus/mcp_server/` | Authenticated streamable-HTTP MCP server on the drone's companion computer (the AI's only control panel). |
 | **Flight moves** | `horus/executor/` | Executes one base move at a time (`take_off`, `goto`, `move`, `turn`, `look`, `hold`, `land`, `rth`) plus AprilTag precision landing. |
 | **Camera vision** | `horus/perception/`, `horus/grounder/` | Detects, numbers, and tracks objects (YOLOv8n + OSNet ReID + CSRT + ring-buffer latency compensation + scene watches). |
 | **Autopilot link** | `horus/flight/` | Threaded `pymavlink` bridge to **ArduPilot**, sending `GUIDED` **velocity setpoints only** and caching timestamped telemetry. |
 | **ArduPilot** | *(external)* | Flight controller or SITL owning attitude stabilization, 7-beam ToF proximity avoidance (`AVOID_ENABLE`), failsafes, and hardware RC `PILOT` override. No geofence. |
-| **Test world** | `horus/world/`, `sim/`, `gta/` | Built-in 3D Python/MuJoCo world, Gazebo Harmonic, or GTA V—strictly one active world at a time. |
+| **Test world** | `horus/world/`, `sim/`, `gta/` | Built-in 3D Python/MuJoCo world, Gazebo Harmonic, or GTA V (strictly one active world at a time). |
 
 ## Key architectural boundaries
 
@@ -40,4 +40,4 @@ To defend the **AI model** against prompt injection from labels, map names, or t
 
 ### Built vs. planned
 
-Remote links between a workstation and a companion **Drone board** are currently encrypted via SSH tunnels (`scripts/koko/remote_up.sh`) or Tailscale (`scripts/phone_serve.sh`). Native link encryption built directly into the **Drone board** radio transport for field companion computers is tracked as planned work in `HORUS — Design Document v2.md`.
+Remote links between a workstation and a companion **Drone board** are currently encrypted via SSH tunnels (`scripts/koko/remote_up.sh`) or Tailscale (`scripts/phone_serve.sh`). Native link encryption built directly into the **Drone board** radio transport for field companion computers is tracked as planned work in the HORUS v2 design document.

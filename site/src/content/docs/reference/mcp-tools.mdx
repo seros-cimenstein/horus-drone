@@ -33,7 +33,7 @@ One base flight move executes at a time; `hold`, `land`, and `rth` preempt activ
 | Tool | Signature | Description |
 | --- | --- | --- |
 | `get_frame` | `get_frame(frame_id=None)` | Return a `≤640 px` set-of-mark JPEG and candidate table (`frame_id` selects a retained ring-buffer frame; expired IDs error). |
-| `get_raw_frame` | `get_raw_frame(frame_id=None)` | Return the source-resolution JPEG with no boxes or labels—matching the pixel coordinates `point(frame_id, box)` expects. |
+| `get_raw_frame` | `get_raw_frame(frame_id=None)` | Return the source-resolution JPEG with no boxes or labels, matching the pixel coordinates `point(frame_id, box)` expects. |
 | `list_candidates` | `list_candidates(passive=False)` | Return the latest `≤640 px` set-of-mark JPEG and current tracker candidate table. |
 | `point` | `point(frame_id, description=None, box=None, compensate=None)` | Resolve a free-text description or source-image `[x1, y1, x2, y2]` box on `frame_id` to a live tracker ID via appearance re-ID and CSRT fast-forward. |
 | `set_vocabulary` | `set_vocabulary(terms)` | Continuously query up to 16 free-text terms via `horus-grounder`, emitting `open_vocab` candidates and `object_detected` events. |
@@ -67,16 +67,16 @@ One base flight move executes at a time; `hold`, `land`, and `rth` preempt activ
 
 ## Reserved operator & display tools
 
-The **Drone board** also serves the following tools strictly for **Control app** / **AI pilot** infrastructure—they are never offered to the **AI model**:
+The **Drone board** also serves the following tools strictly for **Control app** / **AI pilot** infrastructure (they are never offered to the **AI model**):
 
-- `operator_emergency(action)` (`hold`, `rth`, `land`) & `operator_release()` — Manage `operator_lock`.
-- `wait_events(after_id=0, timeout_s=25.0)` — Raw event stream owned by the **AI pilot** event pump.
-- `get_map_index(known_version="", passive=False)`, `get_map_tile(level, x, y, known_version="", passive=False)`, `get_live_map(passive=False)` — Versioned tile and live-overlay reads for the **Control app** map.
+- `operator_emergency(action)` (`hold`, `rth`, `land`) & `operator_release()`: Manage `operator_lock`.
+- `wait_events(after_id=0, timeout_s=25.0)`: Raw event stream owned by the **AI pilot** event pump.
+- `get_map_index(known_version="", passive=False)`, `get_map_tile(level, x, y, known_version="", passive=False)`, `get_live_map(passive=False)`: Versioned tile and live-overlay reads for the **Control app** map.
 
 ## Prompts & resources
 
-- **`horus_commander`** (MCP prompt) — System safety and mission supervision guidance for MCP clients.
-- **`horus://mission/brief`** (MCP resource) — Current mission brief metadata.
+- **`horus_commander`** (MCP prompt): System safety and mission supervision guidance for MCP clients.
+- **`horus://mission/brief`** (MCP resource): Current mission brief metadata.
 
 ## Connecting external MCP clients
 
