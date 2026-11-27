@@ -1,0 +1,76 @@
+---
+title: Credits & Licenses
+description: Third-party AI vision checkpoints, map data attributions, Gazebo Fuel 3D model credits, and open-source ecosystem licenses.
+---
+
+HORUS itself is licensed under the **MIT License**. This page documents the licenses and upstream attributions for the vision models, map datasets, 3D simulation assets, and core open-source projects used alongside HORUS.
+
+## AI & vision models
+
+Model checkpoints are fetched separately by `horus setup` (or `scripts/fetch_models.sh` and `scripts/setup_grounder.sh`) and verified against pinned SHA-256 checksums.
+
+| Component | Source | License | Notes |
+| --- | --- | --- | --- |
+| **YOLOv8n (ONNX)** | [Kalray/yolov8](https://huggingface.co/Kalray/yolov8) on Hugging Face | **AGPL-3.0** | Default 80-class COCO detector (`models/yolov8n.onnx`). |
+| **OSNet x0.25 ReID (ONNX)** | [anriha/osnet_x0_25_msmt17](https://huggingface.co/anriha/osnet_x0_25_msmt17) on Hugging Face | **MIT** | Appearance embedding model (`models/osnet_x0_25_msmt17.onnx`). |
+| **Grounding DINO tiny** *(optional)* | `IDEA-Research/grounding-dino-tiny` | **Apache-2.0** | Default open-vocabulary **Grounder** model (`horus-grounder`). |
+| **OWLv2 base** *(optional)* | `google/owlv2-base-patch16-ensemble` | **Apache-2.0** | Alternate open-vocabulary **Grounder** model (`horus-grounder --model owlv2-base-patch16-ensemble`). |
+
+:::caution[YOLOv8n AGPL-3.0 Notice]
+The fetched `Kalray/yolov8` ONNX checkpoint declares **AGPL-3.0** on its Hugging Face model card. Assess those license terms before closed-product use or redistribution, or swap `HORUS_YOLO_MODEL` / `perception.yolo_model` for a differently licensed ONNX detector.
+:::
+
+## Map data
+
+| Provider | Source | License / Terms |
+| --- | --- | --- |
+| **OpenStreetMap (`provider: osm`)** | Cached Overpass API extracts fetched by `scripts/maps/fetch_osm.py` | **© OpenStreetMap contributors**, licensed under **ODbL**. |
+| **GTA V (`provider: gta`)** | DurtyFree `gta-v-data-dumps` & ped navmesh dumps built by `scripts/maps/build_gta_tiles.py` | **No license** (derived from Rockstar Games' GTA V). For **local research only**; never committed to Git. |
+
+## Gazebo simulation model attributions
+
+When running the optional Gazebo Harmonic simulation (`sim/`), HORUS adapts several 3D models from **Gazebo Fuel**.
+
+### Human models
+
+- **`person_standing` and variants (`person_red`, `person_blue`, `person_green`):** Adapts OpenRobotics' [Standing person](https://fuel.gazebosim.org/1.0/OpenRobotics/models/Standing%20person) from Gazebo Fuel (**CC0 1.0**). All four share a single `standing.dae` mesh (in `person_blue/meshes`, pointing textures to `person_standing`), while each variant's `model.sdf` overrides the shirt material using a unique texture filename so Gazebo's Ogre2 renderer does not cache and reuse the first loaded color.
+- **`person_laying`:** Adapts OpenRobotics' [ElderMalePatient](https://fuel.gazebosim.org/1.0/OpenRobotics/models/ElderMalePatient), authored by **Roselle Carmen** and licensed under [**CC BY 4.0**](https://creativecommons.org/licenses/by/4.0/). The upstream Fuel description also credits Autodesk Character Generator and Mixamo. The local copy localizes the SDF model name and mesh URI and marks the model static.
+
+### Procedural scenery assets
+
+The following assets in `sim/models/` are imported from Gazebo Fuel via `sim/scripts/import_licensed_assets.py`. Each directory stores its pinned Fuel owner/name/version and archive SHA-256 in `PROVENANCE.txt`, preserves the upstream author line, and lists HORUS adaptations (mesh/texture subset, textures downscaled to 1024 px, COLLADA/OBJ texture paths rewritten to `meshes/` and `materials/textures/`):
+
+| Local model | Fuel model | Author | License | Source |
+| --- | --- | --- | --- | --- |
+| `horus_tree_pine` | `OpenRobotics/Pine Tree` | Louise Poubel | CC0 1.0 | [Fuel](https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine%20Tree/6) |
+| `horus_tree_oak` | `OpenRobotics/Oak tree` | Louise Poubel | CC0 1.0 | [Fuel](https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree/7) |
+| `horus_rock_a` | `OpenRobotics/Falling Rock 1` | Addisu Taddese, Cole Biesemeyer | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | [Fuel](https://fuel.gazebosim.org/1.0/OpenRobotics/models/Falling%20Rock%201/6) |
+| `horus_lamp_post` | `OpenRobotics/Lamp Post` | Cole Biesemeyer, Nate Koenig | CC0 1.0 | [Fuel](https://fuel.gazebosim.org/1.0/OpenRobotics/models/Lamp%20Post/3) |
+| `horus_vehicle_bus` | `OpenRobotics/Bus` | Nate Koenig | CC0 1.0 | [Fuel](https://fuel.gazebosim.org/1.0/OpenRobotics/models/Bus/3) |
+| `horus_vehicle_hatchback` | `OpenRobotics/Hatchback` | Nate Koenig | CC0 1.0 | [Fuel](https://fuel.gazebosim.org/1.0/OpenRobotics/models/Hatchback/3) |
+| `horus_vehicle_hatchback_red` | `OpenRobotics/Hatchback red` | Nate Koenig | CC0 1.0 | [Fuel](https://fuel.gazebosim.org/1.0/OpenRobotics/models/Hatchback%20red/4) |
+| `horus_vehicle_hatchback_blue` | `OpenRobotics/Hatchback blue` | Nate Koenig | CC0 1.0 | [Fuel](https://fuel.gazebosim.org/1.0/OpenRobotics/models/Hatchback%20blue/5) |
+| `horus_vehicle_sedan` | `OpenRobotics/Prius Hybrid` | Ian Chen | CC0 1.0 | [Fuel](https://fuel.gazebosim.org/1.0/OpenRobotics/models/Prius%20Hybrid/3) |
+| `horus_vehicle_suv` | `OpenRobotics/SUV` | Nate Koenig | CC0 1.0 | [Fuel](https://fuel.gazebosim.org/1.0/OpenRobotics/models/SUV/4) |
+| `horus_vehicle_pickup` | `OpenRobotics/Pickup` | Nate Koenig | CC0 1.0 | [Fuel](https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pickup/4) |
+| `horus_vehicle_box_truck` | `OpenRobotics/TruckBox` | Roselle Carmen | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | [Fuel](https://fuel.gazebosim.org/1.0/OpenRobotics/models/TruckBox/2) |
+| `horus_vehicle_delivery_truck` | `OpenRobotics/TruckDelivery` | Roselle Carmen | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | [Fuel](https://fuel.gazebosim.org/1.0/OpenRobotics/models/TruckDelivery/2) |
+| `horus_person_sitting_a` | `OpenRobotics/Rescue Randy Sitting` | Ian Chen, Cole Biesemeyer | CC0 1.0 | [Fuel](https://fuel.gazebosim.org/1.0/OpenRobotics/models/Rescue%20Randy%20Sitting/8) |
+| `horus_bench_a` | `OpenRobotics/FoodCourtBenchShort` | Wan Yi Seow | CC0 1.0 | [Fuel](https://fuel.gazebosim.org/1.0/OpenRobotics/models/FoodCourtBenchShort/2) |
+
+:::note[Local asset adaptations]
+- **`horus_rock_a` ("Falling Rock 1", CC BY 4.0):** Retains the albedo and normal-map textures (roughness map omitted) and upstream decimated collider hull; `model.sdf` adds a standalone box proxy.
+- **`horus_vehicle_bus`:** Reuses the SUV's wheel texture from `horus_vehicle_suv` (same author and license) because the Bus material library references it.
+:::
+
+## Core open-source ecosystem
+
+HORUS builds directly on the work of the following projects:
+
+- **[ArduPilot](https://ardupilot.org/)** (GPL-3.0) — Flight control firmware and Copter 4.7.1 SITL (`--model JSON`).
+- **[MuJoCo](https://mujoco.org/)** (Apache-2.0) — Cross-platform rigid-body physics and offscreen rendering for the built-in 3D **Test world**.
+- **[Gazebo Harmonic](https://gazebosim.org/)** (Apache-2.0) — Optional advanced 3D simulation environment.
+- **[Model Context Protocol (MCP)](https://modelcontextprotocol.io/)** (MIT) — Streamable HTTP tool transport connecting the **AI pilot** and external clients to the **Drone board**.
+- **[ONNX Runtime](https://onnxruntime.ai/)** (MIT) & **[OpenCV](https://opencv.org/)** (Apache-2.0) — CPU inference, image processing, and CSRT visual tracking.
+- **[Tailscale](https://tailscale.com/)** — WireGuard-based private tailnet HTTPS proxy (`tailscale serve`) for the Phone Companion App.
+- **[Astro Starlight](https://starlight.astro.build/)** (MIT) — Documentation framework powering this site.

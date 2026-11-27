@@ -1,11 +1,44 @@
 ---
 title: Vision & Latency
-description: Set-of-mark numbered tracker IDs, OSNet ReID, CSRT ring-buffer compensation, and open-vocabulary grounding.
+description: Set-of-mark numbered tracker IDs, OSNet ReID, CSRT ring-buffer compensation, scene watches, and AI view history.
 ---
 
-**Camera vision** (`horus/perception/`) bridges slow cloud reasoning and fast physical motion:
+**Camera vision** (`horus/perception/`) bridges slow cloud reasoning and fast physical motion so an **AI model** operating over a high-latency link can still target moving objects accurately.
 
-- **Set-of-mark numbered targets:** Every frame sent to the **AI model** draws crisp bounding boxes with persistent numeric IDs (`#1`, `#2`, …) from YOLOv8n + OSNet ReID (`osnet_x0_25_msmt17.onnx`).
-- **Ring-buffer CSRT fast-forward (`point()`):** Because an LLM round-trip can take 1–4 seconds over a cellular/radio link, `point(target_id)` locates the historical frame the AI saw in the 5-second ring buffer and fast-forwards CSRT forward to the live frame before computing 3D bearing/distance.
-- **Open-vocabulary grounding:** `set_vocabulary` queries an optional local Grounding DINO / OWLv2 **Grounder** service (`horus-grounder`) without blocking the main detection loop.
-- **Passive UI reads:** The **Control app** reads annotated frames via `DisplayReader` (`passive=True`) so viewing the camera never alters the AI's last seen view or contact watchdog.
+## Set-of-mark tracking & revalidation
+
+Every frame delivered by `get_frame` or `list_candidates` is downscaled to ≤640 px and annotated with crisp bounding boxes and persistent numeric tracker IDs (`#1`, `#2`, …):
+
+- **Detector + ReID:** Default CPU pipeline runs **YOLOv8n** (80 COCO classes) paired with **OSNet x0.25** appearance embeddings (`models/osnet_x0_25_msmt17.onnx`), embedded lazily at most once per track per frame.
+- **Yaw-compensated association:** Tracks associate across frames using box overlap after compensating for measured camera yaw.
+- **Appearance revalidation:** If vehicle pitch or translation breaks box overlap, a detection can still reclaim a nearby missed track of the same class only if its center is within one box diagonal, height is within 2×, its crop meets minimum size (`12×30` px default), and its embedding passes `revalidation_similarity_threshold` against the track's stored `reference_views` (the original creation view is never evicted).
+- **No silent re-ID after exit:** Once a track leaves the field of view and expires, it is gone—the **AI model** uses `point()` or `set_vocabulary()` to seed a fresh tracker ID when it sees the object again.
+
+## Latency-compensated `point()`
+
+When a radio or cloud round-trip takes 1–4 seconds, an object seen in `frame_id` has often moved in the live camera feed by the time the **AI model** calls `point(frame_id, description|box)`:
+
+1. `point()` looks up the exact historical frame `frame_id` in the timestamped frame/pose ring buffer (expired frames raise an error rather than silently falling back).
+2. For `box` queries (source-image `[x1, y1, x2, y2]` pixels matching `get_raw_frame`), it re-identifies the historical region against current candidates by appearance before falling back to box geometry, preventing a crossing look-alike from stealing the ID.
+3. If no current track matches, it fast-forwards a **CSRT** tracker across intermediate frames up to the live frame and seeds a new tracker ID.
+
+## Open-vocabulary grounding (`horus-grounder`)
+
+To detect targets outside the 80 COCO classes (for example `"person lying on the ground"` or `"red backpack"`):
+
+- `set_vocabulary(terms)` configures up to 16 free-text terms queried asynchronously by the local **Grounder** service (`horus-grounder` on `127.0.0.1:8100`, running **Grounding DINO tiny** at 320 px shortest edge by default, or **OWLv2 base**).
+- Matches become `open_vocab` candidates named after the matched term (with the raw span in `attributes.grounder_span`) and emit an `object_detected` event.
+- If the grounder service is not running, the main detection loop continues undisturbed in detector-only mode.
+
+## Scene tools: image motion & region watches
+
+`horus/perception/scene.py` runs continuously on every processed frame using normalized coordinates (`0..1`, `x` right, `y` down) and monotonic capture timestamps paired with vehicle/gimbal telemetry:
+
+- **`get_candidate_motion(id)`:** Fits the last ≤2 s of a track's image boxes to report center and size rates (in frame fractions per second, **never** metric ground speed) plus `camera_motion.status` (`moving`, `within_tolerance`, or `unknown` if telemetry is >1.5 s old). Missing estimates report a concrete `reason` (`no_frames`, `unknown_track`, `stale_frames`, `not_visible`, `insufficient_samples`) and must never be read as zero motion.
+- **`watch_region(name, box, class_name=None, dwell_s=None, absence_s=1.0, ttl_s=None)`:** Watches a normalized image rectangle anchored to the current camera pose and emits `region_enter`, `region_exit`, and `region_dwell` events (up to 16 watches; exact case-insensitive label match).
+  - If measured vehicle or gimbal motion exceeds tolerance (`0.5` m horizontal, `0.3` m vertical, `3°` heading/roll/pitch, `2°` gimbal), or if camera state goes stale, the watch emits `region_watch_paused` and suspends transitions until steady for 1 s (`region_watch_resumed`).
+  - Unmeasured components such as zoom changes are explicitly flagged in `unmeasured_camera_components`. Watches never command flight.
+
+## What the AI saw
+
+**HORUS Studio** keeps the newest 30 camera images (up to 8 MB total) that were actually returned to the **AI model** via `get_frame`, `list_candidates`, or `point`. Each entry appears as a lazy-loaded **"AI saw"** thumbnail in the feed and in the phone **Camera** tab via `/api/ai-view/<view_id>`, so operators always know exactly what visual evidence the model acted on.

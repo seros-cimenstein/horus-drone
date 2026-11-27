@@ -3,25 +3,67 @@ title: Quickstart
 description: Launch HORUS Studio, start the built-in 3D Test world, and fly your first mission.
 ---
 
-## 1. Launch HORUS Studio
+import { Steps } from '@astrojs/starlight/components';
+
+Go from a fresh install to a flying autonomous drone in under a minute using **HORUS Studio** and the built-in 3D **Test world**.
+
+## First flight in 3 steps
+
+<Steps>
+1. **Launch HORUS Studio**
+
+   ```sh
+   horus
+   ```
+
+   HORUS Studio listens on `127.0.0.1:8765`, prints its token-protected URL (`http://127.0.0.1:8765/#token=...`), and opens your default browser.
+
+2. **Launch a Built-in 3D World**
+
+   On the **Launchpad**, if SITL or ONNX models are not cached yet, click **Download SITL & Vision Models**. Then click **Launch Indoor SAR Room** (or **Outdoor Forest**, **Urban Plaza**, or **Procedural World**).
+
+   HORUS Studio automatically:
+   - Starts the MuJoCo **Test world** with 7-beam ToF sensors, 2-axis gimbal, and `sim://` camera stream.
+   - Starts **ArduPilot** (`arducopter --model JSON`) in an isolated run directory.
+   - Starts the **Drone board** (`horus mcp`) and connects both the **AI pilot** and passive **Control app** display reader.
+
+3. **Fly manually or with AI**
+
+   - **Without an AI key:** Open **Fault Lab → Manual Flight & Vision** to test `Take Off 2m`, directional nudges, gimbal `Look`, and open-vocabulary detection immediately.
+   - **With an AI model:** Open **Settings → AI Pilot & Crew** to pick a provider, then send a prompt or click any curated mission chip in **Mission Composer**.
+   - **Emergencies:** The pinned **`HOLD` / `LAND` / `HOME`** buttons always bypass the **AI pilot** and lock out AI flight tools until your next mission.
+</Steps>
+
+## Inside HORUS Studio
+
+HORUS Studio is a single-page **Control app** (`ui/` compiled into `horus/commander/web/`) with zero external CDN dependencies:
+
+- **Header:** Live news-feed connection indicator and always-enabled **`HOLD`**, **`LAND`**, and **`HOME`** emergency buttons.
+- **Mission Composer & News Feed:** Type missions (`Enter` sends, `Shift+Enter` adds a newline) or press **New mission** to reset the conversation. The feed streams operator missions, AI reasoning, tool calls, emergencies, and clickable **"AI saw"** image thumbnails (each picture the AI actually received).
+- **Camera & Candidates:** Displays the live numbered set-of-mark camera feed alongside the tracked candidate table (tracker ID, quoted untrusted label, and confidence).
+- **Drone Telemetry:** Shows height above home, downward rangefinder distance, battery, flight mode and armed state, active executor move, autopilot link age, and clear warning banners during **`PILOT` override** or **`operator_lock`**.
+- **Interactive 2D Map & Selections:** North-up tactical map in local meters showing the vehicle heading, flight trail, home, operator marks, tracked candidates, and street/building layers (when available).
+  - Drop **Points** (`P1`, `P2`, …) via click/right-click, or draw **Polygons / Rectangles** (`A1`, `A2`, …) to mark search zones.
+  - Tap a selection for two-tap **Fly here** / **Search area** actions, or click **Use in mission** to inject its local NED coordinates directly into your prompt (e.g. `"search A1 for a red car"`).
+  - Click **Offline map** to cache all map tiles in IndexedDB for disconnected field use.
+- **3D Spectator View & Fault Lab:** Switch between Follow, Overhead, and Orbit 3D cameras, run the Pre-Flight Checklist, or inject AI-link latency and link cuts.
+
+## Terminal Control App (`horus tui`)
+
+If you prefer a keyboard-only workflow in a terminal, connect `horus tui` to a running **Drone board**:
 
 ```sh
-horus
+horus tui --server-url http://127.0.0.1:8000/mcp
 ```
 
-HORUS Studio starts on `127.0.0.1:8765`, prints its token-protected URL (`http://127.0.0.1:8765/#token=...`), and opens your default browser.
+The terminal runs free-text missions in the background while keeping the prompt responsive, and supports built-in slash commands:
 
-## 2. Launch a Built-in 3D World
+| Command | Action |
+| --- | --- |
+| `/state` | Print current vehicle pose, mode, battery, and executor state |
+| `/take_off [ALTITUDE_M]` | Direct hand-flown take-off (releases `operator_lock`) |
+| `/goto NORTH_M EAST_M ALTITUDE_M` | Direct hand-flown NED move (releases `operator_lock`) |
+| `/hold`, `/land`, `/rth`, `/home` | Immediate operator emergency (bypasses AI and sets `operator_lock`) |
+| `/quit` | Cancel active work and exit |
 
-On the **Launchpad**, if SITL or ONNX models are not cached yet, click **Download SITL & Vision Models**. Then click **Launch Indoor SAR Room** (or **Outdoor Forest**, **Urban Plaza**, **Procedural World**).
-
-HORUS Studio automatically:
-1. Starts the MuJoCo **Test world** with 7-beam ToF sensors, 2-axis gimbal, and `sim://` camera stream.
-2. Starts **ArduPilot** (`arducopter --model JSON`) in an isolated run directory.
-3. Starts the **Drone board** (`horus mcp`) and binds both the **AI pilot** and passive **Control app** display reader.
-
-## 3. Fly manually or with AI
-
-- **Without an AI key:** Open **Fault Lab → Manual Flight & Vision** to test `Take Off 2m`, directional nudges, gimbal `Look`, and open-vocabulary terms immediately.
-- **With an AI model:** Click **Settings → AI Pilot & Crew** to pick OpenAI, Anthropic, Google Gemini, OpenRouter, Ollama, Claude Code, or OMP, then click any curated mission chip in **Mission Composer**.
-- **Emergencies:** The pinned **`HOLD` / `LAND` / `HOME`** buttons always bypass the **AI pilot** and lock out AI flight tools until your next mission.
+Short plain-text imperatives such as `stop`, `halt`, `hold`, `land`, `rth`, or `go home` also trigger the direct emergency path without waking the **AI model**.

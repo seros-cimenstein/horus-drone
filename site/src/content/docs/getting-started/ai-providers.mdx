@@ -3,7 +3,7 @@ title: AI Providers & Crew
 description: Connect OpenAI, Anthropic, Gemini, OpenRouter, local Ollama/vLLM, Claude Code CLI, or OMP.
 ---
 
-HORUS separates the **AI pilot** (`horus/commander/`) from the **AI model** so you can swap providers directly inside **HORUS Studio → Settings → AI Pilot & Crew** without editing YAML files.
+HORUS separates the **AI pilot** (`horus/commander/`) from the **AI model** so you can switch cloud APIs, local models, or CLI agents directly inside **HORUS Studio → Settings → AI Pilot & Crew** without editing YAML files.
 
 ## Supported providers
 
@@ -14,12 +14,26 @@ HORUS separates the **AI pilot** (`horus/commander/`) from the **AI model** so y
 | **Anthropic** | Official Anthropic Python SDK | `ANTHROPIC_API_KEY` |
 | **Google Gemini** | Gemini OpenAI-compatible endpoint | `GEMINI_API_KEY` |
 | **OpenRouter** | OpenRouter OpenAI-compatible endpoint | `OPENROUTER_API_KEY` |
-| **Ollama / Custom** | Any OpenAI-compatible base URL (default `http://127.0.0.1:11434/v1`) | Optional `CUSTOM_API_KEY` |
-| **Claude Code CLI** | Persistent `claude` stream-json subprocess | Local `claude` login |
+| **Ollama / Custom** | Any OpenAI-compatible `base_url` (default `http://127.0.0.1:11434/v1`) | Optional `CUSTOM_API_KEY` |
+| **Claude Code CLI** | Persistent `claude` `stream-json` subprocess | Local `claude` login |
 | **OMP CLI** | Persistent `omp --mode rpc` subprocess | Local `omp` login |
 
-Secrets entered in HORUS Studio are written to `secrets.json` with `0600` permissions on POSIX and never returned in API responses (only masked hints are shown).
+Secrets entered in HORUS Studio are saved to `secrets.json` with `0600` permissions on POSIX and are never returned in API responses (only masked hints are displayed).
+
+## Reasoning models & token budgets
+
+When configuring reasoning models (such as DeepSeek thinking models, Claude extended thinking, or OpenAI `o`-series models), keep `commander.max_tokens` comfortably above the model's thinking budget. If a reasoning model exhausts `max_tokens` mid-thought, it returns an empty response with no tool call or message.
+
+- For long multi-kilometer outdoor flights (such as GTA V or procedural worlds), increase `commander.max_turns` (default `40`; the GTA profile uses `200`) so complex search patterns do not hit the per-message turn cap.
+- If an API-provider turn is interrupted by an operator emergency or fails mid-tool-call, the **AI pilot** drops that incomplete turn cleanly from conversation history so the next turn never carries an unanswered tool call.
+
+## Using CLI providers (`claude-code` & `omp`)
+
+Both CLI backends reuse your local CLI authentication without needing a separate API key:
+
+- **Claude Code (`commander.provider: claude-code`):** Check your login with `claude auth status`. The **AI pilot** spawns `claude` in `stream-json` mode with strict MCP config allowing only `mcp__horus__*` tools and disabling built-in shell, file, and web tools.
+- **OMP (`commander.provider: omp`):** Check available models with `omp models`. The **AI pilot** launches `omp --mode rpc` in strict isolation (extensions, skills, rules, and context files disabled; refuses to start if non-HORUS tools load). Reserved operator and display-only MCP tools (`operator_emergency`, `operator_release`, `wait_events`, map tile reads) remain blocked by approval policy before reaching the **Drone board**.
 
 ## Crew roles
 
-HORUS supports specialized **Crew** members (starting with the route planner role) that receive scoped **Drone board** tokens so read-only planners cannot issue flight commands. See the [Architecture](/horus-drone/concepts/architecture/) guide for block boundaries.
+HORUS supports specialized **Crew** members (starting with the route planner role) that receive scoped **Drone board** tokens so read-only planners can inspect maps and telemetry without being able to issue flight commands. See the [Architecture](/horus-drone/concepts/architecture/) guide for block boundaries.

@@ -58,6 +58,7 @@ export default defineConfig({
             { label: "MCP Drone Board Tools", slug: "reference/mcp-tools" },
             { label: "CLI & Configuration", slug: "reference/cli-and-config" },
             { label: "Experiments & Logs", slug: "reference/experiments" },
+            { label: "Credits & Licenses", slug: "reference/credits-and-licenses" },
           ],
         },
       ],

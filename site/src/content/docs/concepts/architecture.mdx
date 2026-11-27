@@ -3,16 +3,41 @@ title: Architecture
 description: HORUS v2 block architecture, responsibilities, and design boundary.
 ---
 
-HORUS splits semantic reasoning (in the cloud or workstation) from deterministic flight safety and short-horizon tracking (onboard the drone).
+HORUS separates high-level semantic reasoning (which runs in the cloud or on your workstation) from deterministic flight safety, telemetry supervision, and short-horizon tracking (which run on or next to the drone).
 
 ## System blocks
 
-1. **Control app** (`horus/commander/web/`, `ui/`, `horus/repl/`): HORUS Studio web app (laptop + phone PWA) or `horus tui` terminal. Emergency controls (`HOLD`, `LAND`, `HOME`) skip the AI.
-2. **AI pilot** (`horus/commander/`, `horus/studio/`): One mission-scoped conversation with the **AI model**, loopback HTTP/SSE API, and operator Studio session supervisor (`/api/studio/*`—never exposed to the AI).
-3. **AI model** (outside): Reached via OpenAI/compatible APIs, Anthropic, Claude Code, or OMP; picks one base move at a time.
-4. **Drone board** (`horus/mcp_server/`): The authenticated MCP server on the drone's computer—the AI's only control panel.
-5. **Flight moves** (`horus/executor/`): `take_off`, `goto`, `move`, `turn`, `look`, `hold`, `land`, `rth`; executes one move at a time and runs precision AprilTag landing.
-6. **Camera vision** (`horus/perception/`): Detects, numbers, and tracks objects in camera frames (YOLOv8n + OSNet ReID + CSRT + ring-buffer latency compensation).
-7. **Autopilot link** (`horus/flight/`): MAVLink bridge to **ArduPilot** sending **velocity setpoints only**.
-8. **ArduPilot** (outside): Attitude stabilization, 7-beam ToF proximity avoidance (`AVOID_ENABLE`), failsafes, and hardware RC `PILOT` override. No geofence.
-9. **Test world** (`horus/world/`, `sim/`, `gta/`): Built-in 3D Python/MuJoCo world (`#4e2c`), Gazebo Harmonic (`#71dd`), or GTA V (`#85c8`)—one world at a time.
+| Block | Code / Location | Responsibility |
+| --- | --- | --- |
+| **Control app** | `horus/commander/web/`, `ui/`, `horus/repl/` | HORUS Studio web dashboard (laptop + phone PWA) and `horus tui` terminal. Emergency controls (`HOLD`, `LAND`, `HOME`) skip the AI. |
+| **AI pilot** | `horus/commander/`, `horus/studio/` | Maintains one mission-scoped conversation with the **AI model**, streams executor/perception events, and runs the Studio process supervisor (`/api/studio/*`, never exposed to the AI). |
+| **AI model** | *(external)* | Reached via OpenAI/compatible APIs, Anthropic, Claude Code, or OMP; picks one base move at a time from what the camera shows. |
+| **Drone board** | `horus/mcp_server/` | Authenticated streamable-HTTP MCP server on the drone's companion computer—the AI's only control panel. |
+| **Flight moves** | `horus/executor/` | Executes one base move at a time (`take_off`, `goto`, `move`, `turn`, `look`, `hold`, `land`, `rth`) plus AprilTag precision landing. |
+| **Camera vision** | `horus/perception/`, `horus/grounder/` | Detects, numbers, and tracks objects (YOLOv8n + OSNet ReID + CSRT + ring-buffer latency compensation + scene watches). |
+| **Autopilot link** | `horus/flight/` | Threaded `pymavlink` bridge to **ArduPilot**, sending `GUIDED` **velocity setpoints only** and caching timestamped telemetry. |
+| **ArduPilot** | *(external)* | Flight controller or SITL owning attitude stabilization, 7-beam ToF proximity avoidance (`AVOID_ENABLE`), failsafes, and hardware RC `PILOT` override. No geofence. |
+| **Test world** | `horus/world/`, `sim/`, `gta/` | Built-in 3D Python/MuJoCo world, Gazebo Harmonic, or GTA V—strictly one active world at a time. |
+
+## Key architectural boundaries
+
+### Two-session design (`AI pilot` vs. passive display)
+
+**HORUS Studio** never shares the **AI pilot**'s MCP session or exposes the **Drone board** token to the browser. Instead, the Studio server opens a separate read-only `DisplayReader` session (`horus/commander/display.py`) that polls `/api/state`, `/api/frame`, and `/api/map/*` with `passive=True`:
+
+- Passive calls are **not written** to the mission event log.
+- Passive calls **never reset** the supervisory link-loss watchdog (`link_loss_rth_delay_s`), so the fail-safe still triggers even while you watch the dashboard.
+- Passive `list_candidates(passive=True)` calls never overwrite the **AI model**'s last set-of-mark view.
+
+### Gimbal Protocol v2 & 7-beam ToF bridge
+
+- **Gimbal (`horus/gimbal/`):** HORUS acts as a MAVLink Gimbal Protocol v2 manager over its own `gimbal.connection` endpoint, sending `GIMBAL_DEVICE_SET_ATTITUDE` (earth-frame pitch, nose-relative yaw) and reading `GIMBAL_DEVICE_ATTITUDE_STATUS`. If no gimbal endpoint is configured or no attitude is reported, HORUS treats the camera as fixed and refuses `look()`.
+- **7-Beam ToF (`horus/tof_bridge/`):** Forwards 6 horizontal sector beams (MAVLink orientations `0, 1, 2, 4, 6, 7`) and 1 downward rangefinder (`orientation 25`, `PITCH_270`) as `DISTANCE_SENSOR` messages to **ArduPilot** at 10–20 Hz.
+
+### Untrusted external strings
+
+To defend the **AI model** against prompt injection from labels, map names, or telemetry text, **Drone board** responses return detector labels, open-vocabulary spans, map names/kinds, and MAVLink `STATUSTEXT` as explicitly quoted untrusted strings (`horus/untrusted.py`).
+
+### Built vs. planned
+
+Remote links between a workstation and a companion **Drone board** are currently encrypted via SSH tunnels (`scripts/koko/remote_up.sh`) or Tailscale (`scripts/phone_serve.sh`). Native link encryption built directly into the **Drone board** radio transport for field companion computers is tracked as planned work in `HORUS — Design Document v2.md`.

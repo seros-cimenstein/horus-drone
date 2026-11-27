@@ -1,15 +1,40 @@
 ---
 title: Experiments & Logs
-description: Reproducing latency sweeps, safety trials, and inspecting JSONL event logs.
+description: Reproducing latency sweeps, OS-level tc netem shaping, inspecting JSONL event logs, and running pytest.
 ---
 
-Every **Drone board**, **AI pilot**, and **HORUS Studio** session writes structured JSONL event logs under `runs/` (secrets automatically redacted).
+Every **Drone board**, **AI pilot**, and **HORUS Studio** session writes structured JSONL event logs under `runs/` (bearer tokens and API secrets are automatically redacted).
 
-## Reproducing link-loss & latency trials
+## Reproducing link-loss & latency trials (Fault Lab)
 
-1. Launch `indoor_sar` in **HORUS Studio**.
+The fastest way to test latency tolerance and link-loss behavior is **HORUS Studio → Fault Lab**:
+
+1. Launch `indoor_sar` (or any scene) in **HORUS Studio**.
 2. Send a mission (or use **Manual Flight** to hover).
 3. Open **Fault Lab → Link-Loss & Latency**:
    - Select `500 ms`, `1500 ms`, or `3000 ms` to inject artificial MCP round-trip latency on the **AI pilot** link only.
    - Click **Cut AI Link** to simulate complete radio loss while passive telemetry continues updating the UI, and observe the transition from `EXECUTING → HOLDING → RTH` after `link_loss_rth_delay_s`.
 4. Browse recorded JSONL files under **Settings → Run Logs & Cache**.
+
+## OS-level latency emulation (`tc netem`)
+
+For container or split-host experiments that test real TCP/IP packet delay and loss on the supervisory commander↔MCP interface, use `scripts/netem.sh` (which shapes egress and redirects ingress via IFB so both directions share the impairment):
+
+```sh
+sudo bash scripts/netem.sh up veth-commander 500ms 2%
+sudo bash scripts/netem.sh down veth-commander
+```
+
+:::caution[Keep MAVLink unshaped]
+Run `netem.sh` only on a dedicated **AI pilot ↔ Drone board** interface or network namespace. Never shape the **Autopilot link** (MAVLink) interface when measuring supervisory-link delay.
+:::
+
+## Running the test suite (`pytest`)
+
+Run unit tests locally with:
+
+```sh
+pytest
+```
+
+The test suite covers executor state/TTL and input validation, mid-flight emergency preemption, stale telemetry refusal, tracker reference views and set-of-mark rendering, optical-flow/rangefinder bridge behavior, MCP authentication and `point()` configuration, REPL emergency routing, `sim/run.sh` one-world guards, Gimbal Protocol v2 links, and AprilTag `tag36h11` precision landing. Full flight safety and performance acceptance still requires live SITL scenarios in the built-in 3D **Test world** or Gazebo.

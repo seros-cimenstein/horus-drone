@@ -3,16 +3,38 @@ title: Phone Companion App
 description: Install the HORUS Control app on your phone over Tailscale HTTPS with offline map tiles.
 ---
 
-The HORUS **Control app** adapts automatically at `/?view=phone` as an installable Progressive Web App (PWA).
+The HORUS **Control app** automatically adapts at `/?view=phone` as an installable Progressive Web App (PWA) designed for field operations over low-bandwidth links.
 
 ## Publishing over Tailscale
 
-1. Enable HTTPS certificates in your Tailscale admin console.
-2. Start HORUS Studio with phone token support (`horus studio --phone`) or set `HORUS_COMMANDER_PHONE_TOKEN`.
-3. Publish the loopback server over your tailnet with `scripts/phone_serve.sh start` (uses `tailscale serve`, never public `tailscale funnel`).
-4. Open the printed `https://.../?view=phone#token=...` URL on your phone and tap **Add to Home Screen**.
+**One-time prerequisite:** Enable **MagicDNS** and **HTTPS certificates** in your Tailscale admin console, and sign both your laptop and phone into the same tailnet.
 
-## Phone-specific protections
+1. Start **HORUS Studio** with phone support enabled (or set `HORUS_COMMANDER_PHONE_TOKEN`):
 
-- **Token scoping:** Phone tokens can view telemetry/status and send missions or **HOLD / LAND / HOME**, while host configuration routes (`/api/studio/settings`, `/api/studio/session/*`, `/api/studio/link-shaper`) require the laptop token (`403` for phone tokens).
-- **Low bandwidth:** Shows **What the AI saw** frames on demand (plus an optional `Live` toggle) and caches map tiles in IndexedDB for offline use.
+   ```sh
+   horus studio --phone
+   ```
+
+2. Publish the loopback server strictly to your tailnet using `scripts/phone_serve.sh`:
+
+   ```sh
+   HORUS_COMMANDER_URL=http://127.0.0.1:8765 scripts/phone_serve.sh start
+   ```
+
+   `phone_serve.sh` supports `start`, `stop`, `status`, and `check`. It uses `tailscale serve` (never public `tailscale funnel`) and refuses to overwrite any pre-existing `tailscale serve` rule it did not create.
+
+3. Scan the printed QR code or open `https://<laptop>.<tailnet>.ts.net/?view=phone#token=<phone-token>` on your phone, then tap **Add to Home Screen**.
+
+To revoke phone access immediately, run `scripts/phone_serve.sh stop` or restart HORUS Studio without `--phone` (or with a new `HORUS_COMMANDER_PHONE_TOKEN`).
+
+## Mobile tabs & bandwidth design
+
+- **Compact state bar & pinned emergencies:** Always shows height, mode, battery, link health, executor action, and an unmistakable red **`operator_lock`** banner when active, above a large bottom **`HOLD` / `LAND` / `HOME`** bar that is never disabled.
+- **Feed:** Shows your missions, AI answers, emergencies, and task results. Each AI turn's tool calls fold into a compact **"Show commands (N)"** block while **"AI saw"** thumbnails stay visible below and open full-screen on tap.
+- **Map:** Full interactive 2D map with selections (`P1`, `A1`, two-tap **Fly here** / **Search area**) and **Offline map** caching (~5.9 MB for all 2,424 GTA tiles in IndexedDB; ~200 bytes every 2 s for live pose polling).
+- **Camera:** Displays **What the AI saw** (the newest 30 frames returned to the model, swipeable with age indicator like `"AI looked 12 s ago"`), rather than burning cellular data on constant video. Toggle **Live** on demand (up to 1 fps only while the Camera tab is visible) with live KB/frame and KB/min readouts.
+
+## Phone-specific security
+
+- **Token scoping:** Phone tokens can view telemetry, maps, and camera views and send missions or **`HOLD` / `LAND` / `HOME`**, while host configuration and process-management routes (`/api/studio/settings`, `/api/studio/session/*`, `/api/studio/link-shaper`, `/api/studio/bootstrap`) return `403` for phone tokens.
+- **Offline shell:** The PWA service worker caches only the static UI shell (`index.html`, `app.js`, `app.css`), never API responses or tokens.

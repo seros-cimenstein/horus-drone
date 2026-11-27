@@ -5,7 +5,7 @@ description: Install HORUS on Linux, Windows, or macOS with one command or uv/pi
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-HORUS runs natively on **Linux** (`x86_64` / `aarch64`), **Windows 10/11** (`x86_64`), and **macOS** on Python **3.10–3.13** (Python 3.12 recommended).
+HORUS runs natively on **Linux** (`x86_64` / `aarch64`), **Windows 10/11** (`x86_64`), and **macOS** on Python **3.10–3.13** (Python 3.12 recommended). A full install sets up **HORUS Studio**, the built-in 3D **Test world**, **Drone board**, and CPU vision runtime in one step.
 
 ## One-line installers
 
@@ -41,7 +41,7 @@ HORUS runs natively on **Linux** (`x86_64` / `aarch64`), **Windows 10/11** (`x86
   </TabItem>
 </Tabs>
 
-## Companion board install (Phase 4)
+## Companion board install
 
 On an onboard companion computer (e.g., BeagleY-AI / AM67A) that only runs the **Drone board** (`horus mcp`) without MuJoCo or cloud LLM SDKs, install the lean `board` extra:
 
@@ -55,13 +55,40 @@ Or from a local clone on the board:
 pip install -e ".[board]"
 ```
 
+## Optional extras
+
+When installing into a specialized environment (a lean **AI pilot** host, a headless Gazebo container, or an open-vocabulary **Grounder** host), choose from the extras defined in `pyproject.toml`:
+
+| Extra | What it installs | Typical use |
+| --- | --- | --- |
+| *(default)* | Studio, built-in 3D **Test world** (MuJoCo), **Drone board**, ONNX Runtime, OpenCV contrib, Anthropic & OpenAI SDKs | Standard laptop / workstation install |
+| `board` | `PyYAML`, `mcp`, `uvicorn`, `pymavlink`, `numpy`, `onnxruntime`, `pyserial` | Companion computers running `horus mcp` only |
+| `commander` | `mcp`, `httpx`, `uvicorn` | Lean host running **HORUS Studio** / `horus tui` against a remote **Drone board** |
+| `server` | `commander` + `pymavlink` | Flight-only **Drone board** (`horus mcp --no-perception`) |
+| `perception` | `numpy`, `onnxruntime` | CPU-only YOLOv8n + OSNet inference without Torch |
+| `model-tools` | `onnx` | One-time ONNX batch-axis export (`scripts/fetch_models.sh`) |
+| `opencv-headless` | `opencv-contrib-python-headless` | Local image/video CSRT tracking (no GStreamer) |
+| `grounder` | `torch==2.5.1`, `torchvision`, `transformers`, `scipy`, `Pillow` | Optional `horus-grounder` open-vocabulary service |
+| `test` | `pytest`, `commander`, `numpy` | Running the unit test suite |
+
+:::caution[OpenCV in Gazebo containers]
+Do **not** install `opencv-headless` inside the Gazebo simulation container. The pip `opencv-contrib-python-headless` wheel replaces Ubuntu's `python3-opencv` package and lacks GStreamer support needed for UDP H.264 video. Inside the sim container, use a virtualenv created with `--system-site-packages` and install `.[server,perception,model-tools,test]`.
+:::
+
+## Offline grounder cache
+
+If `huggingface.co` is unreachable when installing the optional open-vocabulary **Grounder** (`horus-grounder`):
+
+- Copy an existing Hugging Face `hub/` cache directory containing `models--IDEA-Research--grounding-dino-tiny` and/or `models--google--owlv2-base-patch16-ensemble` and set `HORUS_GROUNDER_HF_CACHE=/path/to/hf_cache` (enables `HF_HUB_OFFLINE=1`).
+- Or pass `HF_ENDPOINT=<mirror-url>` to `scripts/setup_grounder.sh` using a mirror that serves full Hub metadata (`Content-Length` and `X-Repo-Commit`).
+
 ## Verify your environment
 
 ```sh
 horus doctor
 ```
 
-`horus doctor` checks Python runtime, MuJoCo offscreen OpenGL, ArduCopter SITL binary, SHA-256-verified ONNX models (`yolov8n.onnx` and `osnet_x0_25_msmt17.onnx`), serial ports, Tailscale, and configured AI credentials.
+`horus doctor` checks the Python runtime, MuJoCo offscreen OpenGL, ArduCopter SITL binary, SHA-256-verified ONNX models (`yolov8n.onnx` and `osnet_x0_25_msmt17.onnx`), serial ports, Tailscale, and configured AI credentials.
 
 ## Updating & uninstalling
 

@@ -3,26 +3,101 @@ title: MCP Drone Board Tools
 description: Complete reference of Drone board tools exposed to the AI model and direct MCP clients.
 ---
 
-The **Drone board** (`horus mcp`) exposes authenticated streamable-HTTP MCP tools at `http://127.0.0.1:8000/mcp`. Studio management routes (`/api/studio/*`) are never exposed as MCP tools.
+The **Drone board** (`horus mcp`) exposes authenticated streamable-HTTP MCP tools at `http://127.0.0.1:8000/mcp`. Every HTTP request requires `Authorization: Bearer <HORUS_MCP_TOKEN>`. Studio management routes (`/api/studio/*`) are never exposed as MCP tools.
 
 ## Flight & gimbal moves
 
-- `take_off(altitude_m, ttl_s)` — Arm in `GUIDED` and climb to `altitude_m`.
-- `goto(pose, ttl_s)` — Fly in local NED (`north_m`, `east_m`, `up_m`) using velocity setpoints.
-- `move(forward_m, right_m, up_m, ttl_s)` — Body-relative displacement.
-- `turn(yaw_deg, rate_deg_s, ttl_s)` — Turn in place relative to current heading.
-- `look(pitch_deg, yaw_deg)` — Point the stabilized gimbal.
-- `hold()` / `land()` / `rth()` — AI-initiated hold, landing, or return-to-home.
+One base flight move executes at a time; `hold`, `land`, and `rth` preempt active or queued tasks.
 
-## Vision, maps & state
+| Tool | Signature | Description |
+| --- | --- | --- |
+| `take_off` | `take_off(altitude_m=2.0, heading_deg=None, ttl_s=None)` | Arm in `GUIDED` and climb to `altitude_m` above home (rejected if `≤ 0`), optionally turning to `heading_deg`. |
+| `goto` | `goto(pose, heading_deg=None, ttl_s=None)` | Fly closed-loop to local NED `pose` (`north_m`, `east_m`, `up_m`; rejected if `up_m ≤ 0`), optionally turning after arrival. |
+| `move` | `move(forward_m=0.0, right_m=0.0, up_m=0.0, ttl_s=None)` | Nose-relative displacement fixed when the task starts; heading stays unchanged. |
+| `turn` | `turn(heading_deg=None, by_deg=None, rate_deg_s=None, ttl_s=None)` | Hover and turn in place to absolute `heading_deg` (0 = north, clockwise) or by signed `by_deg` (up to `±360°`). |
+| `look` | `look(pitch_deg, yaw_deg=0.0)` | Point the stabilized gimbal (`pitch_deg` `-90..45`, `yaw_deg` `±160` default). Refused on fixed cameras or during precision landing. |
+| `hold` | `hold()` | Preempt queued work and hold position in `GUIDED` with zero velocity. |
+| `land` | `land()` | Preempt and land (uses AprilTag precision landing if within 3 m of home). |
+| `rth` | `rth()` | Preempt and return home with AprilTag precision landing. |
 
-- `get_state(passive=False)` — Vehicle pose, velocity, mode, battery, proximity, perception status.
-- `get_frame()` / `get_raw_frame()` / `list_candidates(passive=False)` — Annotated set-of-mark frames and tracked objects.
-- `set_vocabulary(terms)` / `point(target_id)` — Open-vocabulary detection and latency-compensated 3D localization.
-- `find_place(query, limit)` / `mark_place(name, north_m, east_m, note)` / `get_area_map(north_m, east_m, radius_m)` — Map search and operator marks.
+## State & telemetry
 
-## Connecting Claude Code or Codex directly
+| Tool | Signature | Description |
+| --- | --- | --- |
+| `get_state` | `get_state(passive=False)` | Vehicle pose, mode, armed state, battery, proximity, gimbal attitude, executor status, perception stats, `operator_lock`, and quoted `untrusted_statustext`. |
+| `get_map` | `get_map()` | Current local NED `vehicle_pose`, proximity readings, observation age, and tracked candidates. |
+| `get_link_status` | `get_link_status()` | Autopilot heartbeat age, `heartbeat_ok`, and telemetry observation age. |
+
+## Camera vision
+
+| Tool | Signature | Description |
+| --- | --- | --- |
+| `get_frame` | `get_frame(frame_id=None)` | Return a `≤640 px` set-of-mark JPEG and candidate table (`frame_id` selects a retained ring-buffer frame; expired IDs error). |
+| `get_raw_frame` | `get_raw_frame(frame_id=None)` | Return the source-resolution JPEG with no boxes or labels—matching the pixel coordinates `point(frame_id, box)` expects. |
+| `list_candidates` | `list_candidates(passive=False)` | Return the latest `≤640 px` set-of-mark JPEG and current tracker candidate table. |
+| `point` | `point(frame_id, description=None, box=None, compensate=None)` | Resolve a free-text description or source-image `[x1, y1, x2, y2]` box on `frame_id` to a live tracker ID via appearance re-ID and CSRT fast-forward. |
+| `set_vocabulary` | `set_vocabulary(terms)` | Continuously query up to 16 free-text terms via `horus-grounder`, emitting `open_vocab` candidates and `object_detected` events. |
+| `set_mode` | `set_mode(name)` | Set camera detection to `active` or `paused` (does not alter ArduPilot flight mode). |
+
+## Scene monitoring
+
+| Tool | Signature | Description |
+| --- | --- | --- |
+| `get_candidate_motion` | `get_candidate_motion(id)` | Estimate recent camera-relative image motion (frame fractions/s, never ground speed) plus `camera_motion.status`. |
+| `watch_region` | `watch_region(name, box, class_name=None, dwell_s=None, absence_s=1.0, ttl_s=None)` | Watch a normalized `[x1, y1, x2, y2]` box (0–1) anchored to camera pose; publishes `region_enter`, `region_exit`, `region_dwell`, `region_watch_paused`, `region_watch_resumed`, and `region_watch_expired`. |
+| `list_region_watches` | `list_region_watches()` | List active, stale, or paused region watches with occupants and timers. |
+| `remove_region_watch` | `remove_region_watch(watch_id)` | Stop a region watch by ID; unknown or expired IDs error. |
+
+## Maps & marks
+
+| Tool | Signature | Description |
+| --- | --- | --- |
+| `find_place` | `find_place(query, limit=5)` | Search named places, areas, and operator marks (`limit` 1–20), returning NED coordinates, distance, and bearing. |
+| `get_area_map` | `get_area_map(north_m, east_m, radius_m=100.0)` | Return clipped ways, walkable areas, obstacles, and `own_map` marks within `radius_m` (max `300` m). |
+| `mark_place` | `mark_place(name, north_m, east_m, note="")` | Save a persistent named NED mark (`marks.json` in the run directory). |
+
+## Tasks & events
+
+| Tool | Signature | Description |
+| --- | --- | --- |
+| `get_task_status` | `get_task_status(task_id)` | Inspect task state, TTL, errors, and `requested_target` / `executed_target`. |
+| `wait_for_task` | `wait_for_task(task_id, timeout_s=30.0)` | Block up to 60 s until a task finishes or times out (`timed_out: true` lets you keep waiting). |
+| `cancel` | `cancel(task_id)` | Cancel a queued or running task and inspect its terminal status. |
+| `wait_for_event` | `wait_for_event(kinds, after_id=None, timeout_s=20.0)` | Block until an event of `kinds` arrives (pass `last_id` as `after_id` on consecutive waits; capped at `min(25 s, 0.8 * link_loss_rth_delay_s)`). |
+
+## Reserved operator & display tools
+
+The **Drone board** also serves the following tools strictly for **Control app** / **AI pilot** infrastructure—they are never offered to the **AI model**:
+
+- `operator_emergency(action)` (`hold`, `rth`, `land`) & `operator_release()` — Manage `operator_lock`.
+- `wait_events(after_id=0, timeout_s=25.0)` — Raw event stream owned by the **AI pilot** event pump.
+- `get_map_index(known_version="", passive=False)`, `get_map_tile(level, x, y, known_version="", passive=False)`, `get_live_map(passive=False)` — Versioned tile and live-overlay reads for the **Control app** map.
+
+## Prompts & resources
+
+- **`horus_commander`** (MCP prompt) — System safety and mission supervision guidance for MCP clients.
+- **`horus://mission/brief`** (MCP resource) — Current mission brief metadata.
+
+## Connecting external MCP clients
+
+You can attach Claude Code, Codex CLI, or the terminal MCP helper directly to a running **Drone board**:
 
 ```sh
-codex mcp add horus --bearer-token-env-var HORUS_MCP_TOKEN http://127.0.0.1:8000/mcp
+# Claude Code
+claude mcp add --transport http horus http://127.0.0.1:8000/mcp \
+  --header "Authorization: Bearer $HORUS_MCP_TOKEN"
+
+# Codex CLI (reads $HORUS_MCP_TOKEN from environment)
+codex mcp add horus --url http://127.0.0.1:8000/mcp \
+  --bearer-token-env-var HORUS_MCP_TOKEN
+
+# Built-in CLI test client (saves JPEGs under runs/manager/)
+horus-mcp-call list-tools
+horus-mcp-call get-prompt horus_commander
+horus-mcp-call get_state
+horus-mcp-call get_frame
 ```
+
+:::note[Non-interactive `codex exec`]
+Non-interactive `codex exec` runs with approval policy `never` and refuses MCP calls unless pre-approved, e.g. `codex exec -c 'mcp_servers.horus.tools.get_state.approval_mode="approve"' '...'`.
+:::

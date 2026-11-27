@@ -3,10 +3,74 @@ title: Gazebo Harmonic
 description: Advanced Gazebo Harmonic simulation, Docker environment, procedural worldgen, and remote Koko compute.
 ---
 
-Gazebo Harmonic (`sim/`) remains fully supported as an advanced **Test world** and can be attached directly inside HORUS Studio (**Settings → Hardware & External Sim → GAZEBO**).
+Gazebo Harmonic (`sim/`) is supported as an advanced **Test world** for heavy outdoor scenarios, procedural seed sweeps, and GStreamer H.264 video testing. Attach a running Gazebo **Drone board** inside **HORUS Studio** via **Settings → Hardware & External Sim → GAZEBO**.
 
-## Running Gazebo simulation
+## Quick launch (`scripts/demo.sh`)
 
-- **Local container:** `scripts/demo.sh` or `sim/run.sh start` launches Gazebo Harmonic, ArduCopter SITL, GStreamer video, and the **Drone board**.
-- **Remote compute (`Koko`):** Heavy Gazebo episodes and seed sweeps run on a remote host via `scripts/koko/remote_up.sh`, forwarding only the **Drone board** port over SSH while **HORUS Studio** runs locally.
-- **Procedural worlds:** `sim/worldgen` builds seeded outdoor forest and urban worlds with civilian traffic and matching vector maps.
+After building the Gazebo/GUI container image documented in `sim/README.md`, launch the full stack with:
+
+```sh
+./scripts/demo.sh
+```
+
+Useful flags and options:
+
+- `--local`: Run Gazebo, SITL, ToF bridge, and **Drone board** locally in Docker instead of on a remote compute host.
+- `--remote HOST`: Run the simulation container on an SSH host (default `koko`) while displaying the Gazebo GUI and **HORUS Studio** locally.
+- `--terminal`: Open the `horus tui` terminal instead of **HORUS Studio** (`/hold`, `/land`, `/home` skip the AI; `/quit` stops everything).
+- `--phone`: Also start `scripts/phone_serve.sh` to expose the **Control app** over Tailscale.
+- `--procedural`: Generate and start a seeded procedural world (`--seed N`, `--kind forest|urban`, `--stratum baseline|chaotic`).
+- `--record out.mp4`: Capture the Gazebo XWayland window using `ffmpeg x11grab`.
+- `HORUS_COMMANDER_URL=http://127.0.0.1:8766`: Override the Studio port if `8765` is busy.
+
+:::note[One active world at a time]
+`sim/run.sh start` enforces a strict one-world guard and refuses to launch a second world (Gazebo or GTA V) or a mismatched YAML profile while another world is running.
+:::
+
+## Simulation ports & sensors
+
+Run **HORUS** services in the same network namespace as the simulation endpoints:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `TCP 127.0.0.1:5760` | **Autopilot link** (MAVLink flight control) |
+| `TCP 127.0.0.1:5763` | 7-beam ToF range bridge (`horus.tof_bridge.cli`, auto-started by `start_sim.sh`) |
+| `TCP 127.0.0.1:5762` | Monitor / pose trace |
+| `UDP 5600` | Gazebo H.264 RTP camera stream |
+
+Every Gazebo world includes `horus-gz-gimbal` (`python -m horus.gimbal.gazebo`), which stabilizes the camera against airframe lean and reports measured attitude, and loads `config/ardupilot/common.parm` for ToF proximity avoidance.
+
+## Outdoor & procedural worlds
+
+- **Canonical worlds:** Start `./sim/run.sh start horus_forest.sdf` or `horus_urban.sdf`, paired with `config/horus_forest.yaml` or `config/horus_urban.yaml`.
+- **Procedural generator:** `sim/run.sh start --procedural [--seed N] [--kind forest|urban] [--stratum baseline|chaotic]` (or `python3 -m sim.worldgen`) samples terrain, weather/lighting, civilian actors, vehicles, fauna, and sim-time disturbances, validating every path against static geometry in `sim/worldgen/validation.py`.
+- **Altitude-gated cruise:** Generated procedural profiles fly a 1.2 km map with a 360 s command TTL, cruising at `8 m/s` (`cruise_speed_m_s`) above `cruise_min_altitude_m` (`26 m` forest, `38 m` urban) and `3 m/s` (`speed_m_s`) below.
+- **Grounder person pass:** Outdoor profiles query `horus-grounder` at a low rate (`open_vocab_hz`) for `"person"`, `"person lying on the ground"`, and `"person sitting on the ground"` because overhead YOLOv8n misses many lying poses.
+
+## Container grounder & OpenCV
+
+To enable `horus-grounder` inside the `horus-sim` container without rebuilding the Docker image, run once:
+
+```sh
+docker exec horus-sim bash /horus/scripts/setup_grounder.sh
+```
+
+This creates `/horus/models/grounder-venv` and caches Hugging Face weights under `/horus/models/hf`. Remember that Gazebo containers rely on Ubuntu's GStreamer-enabled `python3-opencv`; never install `opencv-headless` into the container virtualenv.
+
+## Split laptop / remote compute (`Koko`)
+
+Heavy Gazebo episodes and seed sweeps can run on a dedicated remote Linux host (`koko`) with only the GUI and **HORUS Studio** on your laptop:
+
+```sh
+scripts/koko/remote_up.sh      # Start remote container + SSH tunnel for Drone board (port 8000)
+scripts/koko/remote_fetch_logs.sh
+scripts/koko/remote_down.sh    # Preserves sim/run, logs, runs, and models/ cache
+```
+
+Key environment variables: `HORUS_REMOTE` (`koko`), `HORUS_REMOTE_SIM_IMAGE`, `HORUS_REMOTE_SIM_GPU` (`amd`), `HORUS_REMOTE_SIM_MEMORY_LIMIT` (`8g`), `HORUS_REMOTE_SIM_MEMORY_SWAP_LIMIT` (`9g`), `HORUS_GZ_PARTITION` (`horus`), `HORUS_MCP_LOCAL_PORT` (`8000`), and `HORUS_GZ_RELAY_REMOTE` / `HORUS_GZ_RELAY_LOCAL` (when multicast discovery is blocked).
+
+:::tip[Gazebo multicast & Cloudflare WARP]
+Gazebo Transport discovery uses UDP `10317`/`10318` multicast (`239.255.0.7`) plus dynamic ZeroMQ TCP. Allow traffic between hosts in your firewall (`sudo ufw allow from 10.0.0.0/24`), and if using Cloudflare WARP, exclude multicast with `warp-cli tunnel ip add-range 239.255.0.0/16`.
+:::
+
+For Gazebo Fuel 3D model licenses and provenance, see [Credits & Licenses](/horus-drone/reference/credits-and-licenses/).

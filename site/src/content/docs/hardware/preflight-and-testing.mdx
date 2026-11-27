@@ -1,11 +1,46 @@
 ---
 title: Pre-flight & Testing
-description: Props-off bench verification, tethered hover, GPS-free optical flow, and the Studio Pre-Flight Checklist.
+description: Props-off bench verification, core ArduPilot parameters, GPS-free optical flow, and AprilTag precision landing.
 ---
 
-Always validate hardware changes in progressive gates before untethered flight:
+Always validate hardware, telemetry, and **ArduPilot** parameters in progressive gates—props off first—before untethered flight.
+
+## 1. Progressive hardware checks
 
 1. **Props-off bench test:** Connect via **HORUS Studio**, open **Fault Lab → Pre-Flight Checklist**, and verify **Telemetry freshness**, **EKF3 local position**, **ToF proximity ring**, **Downward rangefinder**, **Camera vision**, and **RC pilot override** (`PILOT` switch test).
-2. **Manual Flight Pad:** Verify `operator_emergency` (`HOLD` / `LAND` / `HOME`) and manual `Look` gimbal checks before arming with props.
-3. **GPS-free indoor hover:** Use the packaged `nogps.parm` optical-flow + barometer EKF3 profile when flying indoors without GPS.
-4. **AprilTag landing pad:** Place a `tag36h11` ID 0 marker at home; `rth` and `land` descend to the pad and hand touchdown to **ArduPilot** `LAND`.
+2. **Manual Flight Pad:** Test `operator_emergency` (`HOLD` / `LAND` / `HOME`) and manual `Look` gimbal movement before arming with props.
+3. **Tethered / open-area hover:** Confirm `take_off`, `hold`, and `land` behavior in a controlled space before enabling autonomous **AI pilot** missions.
+
+## 2. Core ArduPilot parameters (`common.parm`)
+
+Every HORUS profile expects MAVLink proximity and downward rangefinder settings matching `config/ardupilot/common.parm`:
+
+| Parameter | Value | Purpose |
+| --- | --- | --- |
+| `PRX1_TYPE` | `2` | Enable MAVLink `DISTANCE_SENSOR` proximity input |
+| `AVOID_ENABLE` | `3` | Enable proximity avoidance in `GUIDED` velocity mode |
+| `AVOID_MARGIN` | `1.0` | Horizontal obstacle braking margin in meters (ArduPilot default is `2.0`) |
+| `RNGFND1_TYPE` | `10` | MAVLink downward rangefinder |
+| `RNGFND1_ORIENT` | `25` | `PITCH_270` (downward) |
+| `RNGFND1_MIN` / `MAX` | `0.05` / `4.0` | Valid rangefinder bounds in meters |
+
+:::note
+Verify proximity sensor orientations (`0, 1, 2, 4, 6, 7` horizontal, `25` downward) and `GUIDED` velocity avoidance in SITL or a props-off bench test before flying. HORUS does not enable an ArduPilot geofence (`FENCE_ENABLE 0`).
+:::
+
+## 3. GPS-free indoor flight (`nogps.parm`)
+
+When flying indoors without GPS, pair `config/horus_nogps.yaml` with `config/ardupilot/nogps.parm` (Copter 4.7.1 profile):
+
+- Disables GPS1 and skips only the GPS-lock pre-arm check (`ARMING_SKIPCHK 8`), keeping all other pre-arm checks enabled.
+- Selects optical-flow horizontal velocity and barometer vertical position in EKF3 alongside the downward MAVLink rangefinder.
+- Setting `flight.gps_free_mode: true` in YAML sends `SET_GPS_GLOBAL_ORIGIN` (`global_origin_latitude_deg` / `longitude_deg` / `altitude_m`) on MAVLink connect so EKF3 initializes a local frame without fabricating telemetry.
+
+## 4. AprilTag precision landing (`tag36h11` ID 0)
+
+Place a `tag36h11` ID `0` marker at home for repeatable `rth` and `land` touchdowns:
+
+1. **Acquisition (`≤3 m` from home):** **Flight moves** points the gimbal straight down (`-90°`) and waits for a fresh `tag36h11` ID `0` detection before switching to `GUIDED` precision centering.
+2. **Centering & descent:** Horizontal velocity is proportional to tag image offset (`0.35 m/s` max, zero inside a 5% deadband) while descending at `0.15 m/s` inside a 15% cone. Below `0.6 m`, control hands off to vertical `LAND`.
+3. **Grace & safe fallback:** Brief detection misses hold the last validated setpoint for `executor.precision_landing_target_grace_s` (default `1` s) before pausing descent. If descent stalls (`precision_landing_min_descent_m_s` over `precision_landing_stall_s`), pose/heading goes stale, or perception errors after acquisition, HORUS hands off cleanly to `LAND` (`precision_landing_stalled`)—an armed `GUIDED` hover above the pad is never left as a terminal state.
+4. **Post-landing:** The gimbal re-levels after landing and on every subsequent `take_off`. `get_state` exposes `precision_landing` counters (`detections`, `acquisitions`, `completed landings`, `last_fallback`).

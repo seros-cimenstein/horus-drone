@@ -1,15 +1,50 @@
 ---
 title: Safety Model
-description: Deterministic ArduPilot safety, operator emergency lock, and AI link-loss failsafe.
+description: Deterministic ArduPilot safety, velocity setpoints, operator emergency lock, and AI link-loss failsafe.
 ---
 
-Safety in HORUS never relies on LLM prompt compliance. Every critical boundary is enforced deterministically in **Flight moves**, **Autopilot link**, and **ArduPilot**.
+Safety in HORUS never depends on LLM prompt compliance. Every critical boundary is enforced deterministically in **Flight moves** (`horus/executor/`), **Autopilot link** (`horus/flight/`), and **ArduPilot**.
 
-## Core invariants
+## Why velocity setpoints only
 
-- **One base move at a time:** The **AI model** can only select one base move (`take_off`, `goto`, `move`, `turn`, `look`, `hold`, `land`, `rth`). No autonomous search or chase loop runs behind the AI's back.
-- **Velocity setpoints only:** **Autopilot link** sends `GUIDED` velocity setpoints (`SET_POSITION_TARGET_LOCAL_NED`), never bypassing **ArduPilot**'s internal `AVOID_ENABLE` proximity braking.
-- **No geofence:** HORUS enforces no artificial altitude ceiling, floor, or fence in any world or hardware profile; physical obstacles are handled by the 7-beam ToF ring + `AVOID_MARGIN`.
-- **Instant operator emergencies:** **Control app** `HOLD`, `LAND`, and `HOME` calls hit `/emergency` → `operator_emergency`, interrupting any active model turn and engaging `operator_lock`. AI flight tools stay refused until the operator sends a new mission or explicit release.
-- **RC hardware priority (`PILOT`):** Flipping the RC transmitter out of `GUIDED` immediately hands control to the human pilot (`pilot_override: true`).
-- **AI link-loss failsafe:** Passive UI display reads (`passive=True`) never reset the supervisory contact timer. If the **AI pilot** goes silent for `link_loss_rth_delay_s` (default 30 s), **Flight moves** automatically enters `HOLDING` and then triggers `auto_rth`.
+**ArduCopter**'s simple proximity avoidance (`AVOID_ENABLE`) applies to `GUIDED` **velocity** targets, not position or attitude targets. All HORUS horizontal and vertical translations (`take_off`, `goto`, `move`) therefore run a closed-loop local pose-feedback controller inside **Flight moves** that sends velocity-only `SET_POSITION_TARGET_LOCAL_NED` messages at 10–20 Hz.
+
+HORUS intentionally **omits** the rest of ArduPilot's Guided and safety-bypass commands:
+- No raw attitude, rate, or position targets (which bypass simple proximity avoidance).
+- No flight termination, parachute deployment, geofence enable/disable, or reboot commands.
+
+## No geofence & obstacle handling
+
+HORUS imposes no artificial boundary, altitude ceiling, or floor in any world or hardware profile (`FENCE_ENABLE 0`). Input validation checks only that numbers are finite, `take_off` `altitude_m > 0`, and `goto` / `move` targets stay above home altitude (`up_m > 0`).
+
+- **Horizontal obstacles:** The 7-beam ToF ring + `AVOID_MARGIN 1.0` m (`common.parm`) stops horizontal motion short of walls and obstacles seen by the range sensors.
+- **Vertical clearance:** Horizontal ToF beams do not detect ceilings or overhangs—do not command climbs above an indoor ceiling or under low structures.
+
+## Task lifecycle & telemetry guards
+
+Every flight move returns a task ID with `requested_target`, `executed_target`, and one of five terminal reasons: `succeeded`, `clamped` (e.g. a `turn` sweep capped at ±360°), `expired` (TTL elapsed), `failed`, or `cancelled`.
+
+- **Freshness guard:** Translations require pose telemetry, and turns require a heading sample, no older than `executor.telemetry_max_age_s` (default `1.5` s wall time). The **Autopilot link** requests `ATTITUDE`, `LOCAL_POSITION_NED`, `GLOBAL_POSITION_INT`, and `SYSTEM_TIME` at 20 Hz of autopilot time so freshness holds down to a simulation real-time factor around `0.1`.
+- **Clean preemption:** On TTL expiry, cancellation, or completion, **Flight moves** commands zero velocity in `GUIDED`. When an emergency preempts an in-flight step, that step's completion or cleanup path is barred from sending any later `GUIDED` or velocity command.
+
+## Operator lock & emergency grammar
+
+Click **`HOLD`**, **`LAND`**, or **`HOME`** in **HORUS Studio** (or use `/hold`, `/land`, `/rth`, `/home` in `horus tui`) to immediately interrupt the running model turn and send `operator_emergency` to the **Drone board**:
+
+1. Queued operator messages and stale notices not yet sent to the model are dropped.
+2. **Flight moves** cancels active work, executes the emergency action, and engages **`operator_lock`**.
+3. While `operator_lock` is active, AI flight tools (`take_off`, `goto`, `move`, `turn`, `hold`, `rth`, `land`) are refused so the **AI model** cannot undo your command.
+4. Sending a new mission, pressing **New mission**, or executing a manual `/take_off` or `/goto` sends `operator_release` and unlocks flight tools.
+
+Short exact imperatives typed into the mission box or `horus tui`—`stop`, `halt`, `abort`, `hold`, `freeze`, `land`, `rth`, `return home`, `home`, `go home` (optionally followed by `now` or `immediately` and punctuation)—also trigger the direct emergency path. Longer sentences (e.g., `"land next to the hiker"`) are routed to the **AI pilot**.
+
+## AI link-loss failsafe & hardware RC override
+
+- **AI link-loss (`auto_rth`):** If no active MCP call reaches the **Drone board** for `executor.link_loss_rth_delay_s` (default `30` s), **Flight moves** holds position in `GUIDED` (`HOLDING`) and escalates to `rth`. `passive=True` UI reads never reset this timer. Note that `link_loss_rth` remains active even during `operator_lock`.
+- **Hardware RC priority (`PILOT`):** Flipping the RC transmitter out of `GUIDED` immediately hands control to the human pilot (`pilot_override: true`). HORUS never fights an RC override and blocks `look` / AI flight tools while the pilot holds control.
+
+## Network & token security
+
+- Both **HORUS Studio** (`127.0.0.1:8765`) and the **Drone board** (`127.0.0.1:8000`) bind to loopback by default and require bearer tokens on every HTTP request.
+- The Studio token travels in the URL fragment (`#token=...`), which browsers never send to servers; the app stores it in `sessionStorage`, strips it from the address bar, serves pages with `Cache-Control: no-store` and a strict `Content-Security-Policy` (`default-src 'self'`), and never writes tokens to event logs.
+- Remote access is intended strictly over SSH tunnels or private Tailscale (`tailscale serve`), never public internet exposure.

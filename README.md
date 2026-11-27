@@ -144,3 +144,4 @@ Full guides and reference live at **[https://seros-cimenstein.github.io/horus-dr
 | Built-in 3D, Gazebo & GTA V | [Built-in 3D World](https://seros-cimenstein.github.io/horus-drone/simulation/builtin-3d/) |
 | Companion Board & Phone PWA | [Companion Setup](https://seros-cimenstein.github.io/horus-drone/hardware/companion-setup/) |
 | MCP Tools, CLI & Fault Lab | [MCP Tools](https://seros-cimenstein.github.io/horus-drone/reference/mcp-tools/) |
+| Credits & Licenses | [Credits & Licenses](https://seros-cimenstein.github.io/horus-drone/reference/credits-and-licenses/) |

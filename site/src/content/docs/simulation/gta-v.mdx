@@ -3,11 +3,40 @@ title: GTA V Integration
 description: Fly a physical quadrotor in GTA V with HorusGta.dll JSON physics, 7-beam ToF raycasts, gimbal, and whole-map tiles.
 ---
 
-GTA V (`gta/`) runs as a physical **Test world** with collisions enabled (`HorusGta.dll` + `horus_capture.asi`).
+GTA V (`gta/`) runs as a physical **Test world** with full world collisions enabled (`HorusGta.dll` + `horus_capture.asi` running on the HORUS Script Hook for GTA V Enhanced).
 
 ## How it connects
 
-- **JSON lockstep:** ArduCopter SITL (`--model JSON`) exchanges UDP `9002` servo/state packets with `HorusGta.dll`.
-- **7-beam ToF & gimbal:** `HorusGta.dll` casts 7 collision rays bridged by `horus.tof_bridge.gta` into `DISTANCE_SENSOR`, and `horus-gta-gimbal` (`horus/gimbal/gta.py`) relays horizon-locked pitch/yaw setpoints.
-- **Whole-map tiles:** Built once with `scripts/maps/build_gta_tiles.py` and served at 3 levels of detail (250 m, 1000 m, 4000 m) to both the **AI model** (`find_place`, `get_area_map`) and the **Control app** map.
-- **Attaching from HORUS Studio:** Select **Settings → Hardware & External Sim → GTA** and provide the running **Drone board** URL and bearer token.
+Start the GTA SITL stack with `sim/run.sh start --gta` and `config/horus_gta.yaml`:
+
+- **JSON lockstep physics:** ArduCopter SITL (`--model JSON`) exchanges UDP `9002` servo/state packets with `HorusGta.dll`, which flies the quadrotor physically inside GTA V so it collides with buildings, terrain, and props.
+- **Renderer capture (`gta://`):** `horus_capture.asi` copies frames directly from GTA V Enhanced's renderer and serves them on `perception.source: gta://127.0.0.1:5610`.
+- **7-beam ToF & gimbal:** `HorusGta.dll` casts 7 collision rays at 20 Hz over UDP `5612`, bridged by `horus.tof_bridge.gta` into MAVLink `DISTANCE_SENSOR` messages on SITL `tcp:5763` (`AVOID_MARGIN 1.0`). `horus-gta-gimbal` (`horus/gimbal/gta.py`) relays gimbal attitude packets over UDP `5613`/`5614` (if no gimbal device answers, the camera rests at `-45°` and `look` is refused).
+
+:::note[No geofence in GTA V]
+Like all HORUS worlds, GTA V has no geofence or altitude ceiling. Horizontal ToF beams stop the drone roughly 1 m from walls, but horizontal sensors do not block vertical climbs or descents into low roofs or street furniture.
+:::
+
+## Whole-map tiles (`provider: gta`)
+
+`config/horus_gta.yaml` provides full street-map coverage of Los Santos and Blaine County to both the **AI model** (`find_place`, `get_area_map`) and the **Control app** map via prebuilt tiles under `data/maps/gta/tiles`.
+
+Build the tiles once per machine in a throwaway virtualenv:
+
+```sh
+python -m venv /tmp/navmesh-venv
+/tmp/navmesh-venv/bin/pip install msgpack lz4 cryptography pyyaml
+/tmp/navmesh-venv/bin/python scripts/maps/build_gta_tiles.py
+```
+
+- Takes ~2 minutes and ~0.6 GB RAM (pass `--no-walkable` to omit the ped navmesh and run inside HORUS's own environment).
+- Downloads pinned DurtyFree data dumps (SHA-256 verified), converts road graphs, crossings, districts, landmarks, and walkable polygons to NED meters, and cuts 3 zoom levels: **250 m** (full detail), **1000 m** (simplified ways), and **4000 m** (freeways and districts)—keeping the **Drone board**'s tile cache under 40 MB of RAM.
+- Derived GTA map dumps carry no license and are strictly for **local research only**; never commit `data/maps/` to Git. See [Credits & Licenses](/horus-drone/reference/credits-and-licenses/).
+
+### OpenStreetMap alternative (`provider: osm`)
+
+For real-world or non-GTA coordinates, set `map.provider: osm` and fetch a cached Overpass extract with `scripts/maps/fetch_osm.py` into `data/maps/osm/` (converted around `map.origin_latitude_deg` / `map.origin_longitude_deg`; © OpenStreetMap contributors, ODbL).
+
+## Attaching from HORUS Studio
+
+In **HORUS Studio**, open **Settings → Hardware & External Sim → GTA**, enter the running **Drone board** URL and bearer token, and connect.
