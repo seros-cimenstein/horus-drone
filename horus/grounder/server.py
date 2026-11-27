@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 
 from horus.grounder.backends import MODEL_IDS, create_backend
+from horus.logging import configure_logging, install_unhandled_exception_hooks
 from horus.perception.grounding import DEFAULT_BOX_THRESHOLD, DEFAULT_TEXT_THRESHOLD
 
 _LOG = logging.getLogger(__name__)
@@ -187,7 +188,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.threads < 1:
         parser.error("--threads must be a positive integer")
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging(component="grounder")
+    install_unhandled_exception_hooks("horus.grounder")
     backend = create_backend(args.model, args.threads)
     _LOG.info("Loading %s on CPU with %d Torch threads", backend.model_id, args.threads)
     backend.load(warmup=True)

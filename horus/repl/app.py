@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import shlex
 import sys
@@ -14,7 +15,10 @@ from horus.commander import HorusCommander
 from horus.commander.intents import emergency_action
 from horus.config import HorusConfig, load_config
 from horus.event_log import JsonlEventLog, event_log_from_environment
+from horus.logging import add_logging_arguments, configure_logging, install_unhandled_exception_hooks, register_secret
 from horus.mcp_client import DEFAULT_MCP_URL, call_json, open_session
+
+logger = logging.getLogger(__name__)
 
 EMERGENCY_TOOLS = {"hold", "rth", "land"}
 # Slash emergencies: the tool names plus /home, the operator's word for return-to-home.
@@ -99,7 +103,7 @@ def _record_emergency(event_log: JsonlEventLog | None, action: str, **outcome: A
     try:
         event_log.append({"kind": "emergency", "action": action, "source": "operator", **outcome})
     except (OSError, TypeError) as exc:
-        print(f"warning: could not append the emergency to the event log: {exc}", file=sys.stderr)
+        logger.warning("Could not append the emergency to the event log: %s", exc)
 
 
 async def interactive(server_url: str, token: str, config: HorusConfig) -> None:
@@ -182,6 +186,7 @@ async def _run(args: argparse.Namespace, config: HorusConfig) -> None:
     token = os.environ.get(config.server.auth_token_env)
     if not token:
         raise RuntimeError(f"{config.server.auth_token_env} must be set")
+    register_secret(token)
     await interactive(server_url, token, config)
 
 
@@ -189,7 +194,15 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="HORUS terminal REPL")
     parser.add_argument("--server-url", help=f"MCP streamable HTTP URL (default: {DEFAULT_MCP_URL})")
     parser.add_argument("--config", help="HORUS YAML config file")
+    add_logging_arguments(parser)
     args = parser.parse_args(argv)
+    configure_logging(
+        level=args.log_level,
+        fmt=args.log_format,
+        log_file=args.log_file,
+        component="tui",
+    )
+    install_unhandled_exception_hooks("horus.repl")
     try:
         asyncio.run(_run(args, load_config(args.config)))
     except (RuntimeError, ValueError, OSError, TimeoutError) as exc:

@@ -4,8 +4,8 @@ backend from :mod:`horus.commander.backends` (Claude Code session or provider AP
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
-import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
@@ -18,6 +18,8 @@ from horus.config import CommanderSettings
 from horus.event_log import JsonlEventLog, _safe_value, event_log_from_environment
 from horus.events import EVENT_KINDS, REGION_TRANSITION_KINDS
 from horus.mcp_client import call_json, open_session, raise_for_error, tool_text
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -572,12 +574,12 @@ class HorusCommander:
             try:
                 self.event_log.append(record)
             except (OSError, TypeError) as exc:
-                print(f"warning: could not append commander event log: {exc}", file=sys.stderr)
+                logger.warning("Could not append commander event log: %s", exc)
         if self.event_callback is not None:
             try:
                 self.event_callback(_safe_value(record))
             except Exception as exc:
-                print(f"warning: commander event callback failed: {exc}", file=sys.stderr)
+                logger.warning("Commander event callback failed: %s", exc)
 
 
 def _mcp_prompt_text(result: Any) -> str:

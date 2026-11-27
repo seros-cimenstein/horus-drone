@@ -42,4 +42,24 @@ def test_cli_help_exits_cleanly(capsys) -> None:
     with pytest.raises(SystemExit) as exc:
         cli.main(["--help"])
     assert exc.value.code == 0
-    assert "studio" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "studio" in out
+    assert "logs" in out
+
+
+def test_cli_doctor_human_output(capsys, monkeypatch) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
+    rc = cli.main(["doctor"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "HORUS Doctor" in out
+    assert "MuJoCo GL" in out
+
+
+def test_cli_logs_help_exits_cleanly(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["logs", "--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--service" in out
+    assert "--follow" in out

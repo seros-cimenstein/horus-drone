@@ -20,6 +20,7 @@ import httpx
 import yaml
 
 from horus.bootstrap import check_assets, ensure_assets
+from horus.logging import unwrap_exception
 from horus.mcp_client import open_session
 from horus.studio.capabilities import check_capabilities
 from horus.studio.link_shaper import LinkShaper
@@ -45,13 +46,13 @@ def _allocate_udp_port() -> int:
         return int(s.getsockname()[1])
 
 
-def _unwrap_exception(exc: BaseException) -> BaseException:
-    """Unwrap anyio/ExceptionGroup wrappers to the underlying cause."""
-    sub = getattr(exc, "exceptions", None)
-    while isinstance(sub, (list, tuple)) and sub and isinstance(sub[0], BaseException):
-        exc = sub[0]
-        sub = getattr(exc, "exceptions", None)
-    return exc
+def _child_log_env(base_env: Mapping[str, str]) -> dict[str, str]:
+    """Ensure child processes writing to `.log` files emit plain or JSON logs without ANSI escapes."""
+    env = dict(base_env)
+    fmt = env.get("HORUS_LOG_FORMAT", "").strip().lower()
+    if fmt != "json":
+        env["HORUS_LOG_FORMAT"] = "plain"
+    return env
 
 
 def _tail_log_lines(log_path: Path, max_lines: int = 15) -> str:
@@ -238,6 +239,7 @@ class StudioSupervisor:
             )
             self._emit_status()
             try:
+                logger.info("Starting Studio session (%s, run_id=%s)", mode, self._state.run_id)
                 if mode == "builtin_sim":
                     await self._start_builtin_sim(params)
                 elif mode == "real_drone":
@@ -249,6 +251,7 @@ class StudioSupervisor:
                 self._state.lifecycle = "running"
                 self._state.error = None
                 self._emit_status()
+                logger.info("Studio session ready (%s: %s)", mode, self._state.target_label)
                 return self.status()
             except Exception as exc:
                 logger.exception("Studio failed to start session (%s)", mode)
@@ -289,7 +292,7 @@ class StudioSupervisor:
 
         from horus.bootstrap import preferred_linux_mujoco_gl
 
-        world_env = dict(os.environ)
+        world_env = _child_log_env(os.environ)
         gl = preferred_linux_mujoco_gl()
         if gl is not None:
             world_env.setdefault("MUJOCO_GL", gl)
@@ -405,12 +408,14 @@ class StudioSupervisor:
         cfg_path = run_dir / "horus_studio.yaml"
         cfg_path.write_text(yaml.safe_dump(cfg_data, sort_keys=False), encoding="utf-8")
 
-        env = {
-            **os.environ,
-            "HORUS_CONFIG": str(cfg_path),
-            "HORUS_MCP_TOKEN": mcp_token,
-            "HORUS_RUN_DIR": str(run_dir / "mcp_run"),
-        }
+        env = _child_log_env(
+            {
+                **os.environ,
+                "HORUS_CONFIG": str(cfg_path),
+                "HORUS_MCP_TOKEN": mcp_token,
+                "HORUS_RUN_DIR": str(run_dir / "mcp_run"),
+            }
+        )
         mcp_cmd = [sys.executable, "-m", "horus.mcp_server.server"]
         mcp_log = run_dir / "mcp.log"
         mcp_proc = self._procs.spawn("mcp", mcp_cmd, cwd=str(Path.cwd()), env=env, log_path=str(mcp_log))
@@ -465,7 +470,7 @@ class StudioSupervisor:
             }
             cfg_path = run_dir / "horus_real.yaml"
             cfg_path.write_text(yaml.safe_dump(cfg_data, sort_keys=False), encoding="utf-8")
-            env = {**os.environ, "HORUS_CONFIG": str(cfg_path), "HORUS_MCP_TOKEN": mcp_token}
+            env = _child_log_env({**os.environ, "HORUS_CONFIG": str(cfg_path), "HORUS_MCP_TOKEN": mcp_token})
             cmd = [sys.executable, "-m", "horus.mcp_server.server"]
             if not camera_source:
                 cmd.append("--no-perception")
@@ -564,16 +569,18 @@ class StudioSupervisor:
                     "gta_gimbal",
                     [sys.executable, "-m", "horus.gimbal.gta", "--mavlink", "udpout:127.0.0.1:14600", "--mod", f"{gta_addr}:5613", "--listen", "127.0.0.1:5614"],
                     cwd=str(Path.cwd()),
+                    env=_child_log_env(os.environ),
                     log_path=str(run_dir / "gimbal.log"),
                 )
                 self._procs.spawn(
                     "gta_tof",
                     [sys.executable, "-m", "horus.tof_bridge.gta", "--listen", "127.0.0.1:5612", "--mavlink", "tcp:127.0.0.1:5763"],
                     cwd=str(Path.cwd()),
+                    env=_child_log_env(os.environ),
                     log_path=str(run_dir / "tof.log"),
                 )
                 cfg_path = Path.cwd() / "config" / "horus_gta.yaml"
-                env = {**os.environ, "HORUS_CONFIG": str(cfg_path), "HORUS_MCP_TOKEN": mcp_token}
+                env = _child_log_env({**os.environ, "HORUS_CONFIG": str(cfg_path), "HORUS_MCP_TOKEN": mcp_token})
                 self._procs.spawn("gta_mcp", [sys.executable, "-m", "horus.mcp_server.server"], cwd=str(Path.cwd()), env=env, log_path=str(run_dir / "mcp.log"))
                 if not await asyncio.to_thread(wait_for_tcp_port, "127.0.0.1", 8000, 30.0):
                     raise RuntimeError("GTA Drone board did not open tcp:127.0.0.1:8000")
@@ -617,6 +624,7 @@ class StudioSupervisor:
             return
         self._state.lifecycle = "stopping"
         self._emit_status()
+        logger.info("Stopping Studio session (%s)", self._state.mode)
         if self.commander is not None and hasattr(self.commander, "unbind"):
             try:
                 await self.commander.unbind()
@@ -772,7 +780,7 @@ class StudioSupervisor:
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
-            inner = _unwrap_exception(exc)
+            inner = unwrap_exception(exc)
             if inner is not exc:
                 raise RuntimeError(str(inner)) from inner
             raise

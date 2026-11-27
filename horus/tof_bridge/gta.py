@@ -14,6 +14,7 @@ Datagram (little-endian, 44 bytes): ``b"HRNG"``, uint32 version 1, uint32 seq, u
 from __future__ import annotations
 
 import argparse
+import logging
 import math
 import socket
 import struct
@@ -22,6 +23,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+from horus.logging import configure_logging, install_unhandled_exception_hooks
 
 from .bridge import DistanceSensorReading, laser_scan_to_distance_sensor
 from .mavlink_out import BRIDGE_SOURCE_COMPONENT, BRIDGE_SOURCE_SYSTEM, PAYLOAD_SENSORS, PymavlinkSender, open_mavlink
@@ -165,22 +168,27 @@ def _open_when_listening(endpoint: str) -> Any:
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    configure_logging(component="tof-bridge-gta")
+    install_unhandled_exception_hooks("horus.tof_bridge.gta")
+    logger = logging.getLogger(__name__)
     try:
         listen = _parse_address(args.listen)
     except ValueError as exc:
         parser.error(str(exc))
     link = _open_when_listening(args.mavlink)
-    print(
-        f"Connected to {args.mavlink} as sysid={BRIDGE_SOURCE_SYSTEM} compid={BRIDGE_SOURCE_COMPONENT}",
-        flush=True,
+    logger.info(
+        "Connected to %s as sysid=%s compid=%s",
+        args.mavlink,
+        BRIDGE_SOURCE_SYSTEM,
+        BRIDGE_SOURCE_COMPONENT,
     )
     # Bound only now, so sweeps sent while SITL was still booting are not queued and replayed.
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(listen)
     sock.settimeout(1.0)
-    print(f"listening for HorusGta range packets on udp {args.listen}", flush=True)
+    logger.info("Listening for HorusGta range packets on udp %s", args.listen)
     try:
-        serve(sock, PymavlinkSender(link), log=lambda line: print(line, flush=True))
+        serve(sock, PymavlinkSender(link), log=logger.info)
     except KeyboardInterrupt:
         return 0
     finally:

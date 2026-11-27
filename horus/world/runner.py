@@ -16,6 +16,7 @@ _gl = preferred_linux_mujoco_gl()
 if _gl is not None:
     os.environ.setdefault("MUJOCO_GL", _gl)
 
+from horus.logging import configure_logging, install_unhandled_exception_hooks
 from horus.maps.tiles import write_tile_directory
 from horus.world.camera_server import WorldCameraServer
 from horus.world.physics import MuJoCoQuadWorld
@@ -79,7 +80,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--map-dir", type=Path, default=None)
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    configure_logging(component="world")
+    install_unhandled_exception_hooks("horus.world")
     stop = threading.Event()
     for sig_name in ("SIGINT", "SIGTERM"):
         sig = getattr(signal, sig_name, None)

@@ -1,6 +1,7 @@
 """Command-line Gazebo LaserScan to MAVLink DISTANCE_SENSOR bridge."""
 
 import argparse
+import logging
 import math
 import queue
 import sys
@@ -8,6 +9,8 @@ import threading
 import time
 from collections.abc import Sequence
 from typing import Any
+
+from horus.logging import configure_logging, install_unhandled_exception_hooks
 
 from .bridge import (
     MultiSensorBridge,
@@ -222,6 +225,9 @@ def _serve(
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    configure_logging(component="tof-bridge")
+    install_unhandled_exception_hooks("horus.tof_bridge")
+    logger = logging.getLogger(__name__)
     if not math.isfinite(args.startup_timeout) or args.startup_timeout < 0:
         parser.error("--startup-timeout must be finite and non-negative")
     try:
@@ -231,10 +237,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     try:
         link = open_mavlink(args.mavlink)
-        print(
-            f"Connected to {args.mavlink} as sysid={BRIDGE_SOURCE_SYSTEM} "
-            f"compid={BRIDGE_SOURCE_COMPONENT}",
-            flush=True,
+        logger.info(
+            "Connected to %s as sysid=%s compid=%s",
+            args.mavlink,
+            BRIDGE_SOURCE_SYSTEM,
+            BRIDGE_SOURCE_COMPONENT,
         )
         try:
             _serve(sensors, link, args.rate_hz, args.startup_timeout)
@@ -245,6 +252,7 @@ def main(argv: list[str] | None = None) -> int:
             if callable(close):
                 close()
     except (RuntimeError, ValueError) as exc:
+        logger.error("horus-tof-bridge failed: %s", exc)
         print(f"horus-tof-bridge: {exc}", file=sys.stderr)
         return 2
     return 0

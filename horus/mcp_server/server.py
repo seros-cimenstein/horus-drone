@@ -15,6 +15,7 @@ from horus.event_log import JsonlEventLog, event_log_path_from_environment
 from horus.events import EventBus
 from horus.executor import HorusExecutor
 from horus.flight import FlightLink
+from horus.logging import add_logging_arguments, configure_logging, install_unhandled_exception_hooks
 from horus.mcp_server import flight as flight_tools
 from horus.mcp_server import guidance, maps, scene, tasks
 from horus.mcp_server import perception as perception_tools
@@ -123,17 +124,22 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="run flight, emergency, and state tools without initializing the camera",
     )
+    add_logging_arguments(parser)
     args = parser.parse_args(argv)
-    logging.basicConfig(
-        level=getattr(logging, os.environ.get("HORUS_LOG_LEVEL", "INFO").upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
     config = load_config()
+    token = os.environ.get(config.server.auth_token_env)
+    configure_logging(
+        level=args.log_level,
+        fmt=args.log_format,
+        log_file=args.log_file,
+        component="mcp",
+        extra_secrets=[token],
+    )
+    install_unhandled_exception_hooks("horus.mcp_server")
     logging.getLogger(__name__).info(
         "HORUS config %s (perception.source %s)",
         os.environ.get("HORUS_CONFIG", "config/horus.yaml"), config.perception.source,
     )
-    token = os.environ.get(config.server.auth_token_env)
     if not token:
         raise SystemExit(f"{config.server.auth_token_env} must be set before starting HORUS MCP")
 
@@ -220,7 +226,14 @@ def main(argv: list[str] | None = None) -> None:
             event_bus=event_bus,
         )
         app = create_application(mcp, token)
-        uvicorn.run(app, host=config.server.host, port=config.server.port, log_level="info")
+        uvicorn.run(
+            app,
+            host=config.server.host,
+            port=config.server.port,
+            log_level="info",
+            log_config=None,
+            access_log=False,
+        )
     finally:
         if live_publisher is not None:
             live_publisher.close()

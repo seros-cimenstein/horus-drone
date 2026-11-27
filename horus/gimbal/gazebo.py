@@ -29,6 +29,7 @@ from typing import Any, NamedTuple
 
 from horus.gimbal import frames
 from horus.gimbal.device import GimbalDeviceEndpoint
+from horus.logging import configure_logging, install_unhandled_exception_hooks
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +212,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.rate_hz <= 0:
         parser.error("--rate-hz must be positive")
-    logging.basicConfig(level=os.environ.get("HORUS_LOG_LEVEL", "INFO"))
+    configure_logging(component="gimbal")
+    install_unhandled_exception_hooks("horus.gimbal")
     try:
         from gz.msgs10.double_pb2 import Double
         from gz.msgs10.imu_pb2 import IMU

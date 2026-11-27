@@ -24,6 +24,7 @@ from horus.commander.display import DisplayReader, DisplayUnavailable
 from horus.commander.intents import emergency_action, is_reset_command
 from horus.config import load_config
 from horus.event_log import _safe_value
+from horus.logging import configure_logging, install_unhandled_exception_hooks
 from horus.mcp_client import DEFAULT_MCP_URL
 
 
@@ -938,9 +939,14 @@ def main(argv: list[str] | None = None) -> None:
     if not mcp_token or not mcp_token.strip():
         parser.error(f"{token_env} must be set to the HORUS MCP bearer token")
     server_url = os.environ.get("HORUS_MCP_URL") or DEFAULT_MCP_URL
-    commander = HorusCommander(server_url, mcp_token, config.commander)
     # The phone app's own token (optional); scripts/phone_serve.sh prints the phone address.
     phone_token = (os.environ.get("HORUS_COMMANDER_PHONE_TOKEN") or "").strip() or None
+    configure_logging(
+        component="commander",
+        extra_secrets=[command_token, mcp_token, phone_token],
+    )
+    install_unhandled_exception_hooks("horus.commander")
+    commander = HorusCommander(server_url, mcp_token, config.commander)
     # The control app's reads use their own session, never the AI pilot's.
     display = DisplayReader(server_url, mcp_token)
     app = create_app(commander, command_token, display=display, phone_token=phone_token)
@@ -959,6 +965,8 @@ def main(argv: list[str] | None = None) -> None:
                 host=DEFAULT_HOST,
                 port=args.port,
                 log_level="info",
+                log_config=None,
+                access_log=False,
                 # An open control app keeps its /events stream open forever; without a bound,
                 # shutdown would wait for that page and the page would never see the restart.
                 timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN_S,

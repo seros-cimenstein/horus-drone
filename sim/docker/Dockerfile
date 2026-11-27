@@ -108,7 +108,7 @@ RUN /opt/horus-venv/bin/pip install --no-cache-dir --no-build-isolation --no-dep
     && /opt/horus-venv/bin/pip install --no-cache-dir \
         'PyYAML>=6.0,<7' 'mcp>=1.30.0,<2' 'httpx>=0.27,<1' 'uvicorn>=0.29,<1' \
         'pymavlink>=2.4.41,<3' 'numpy>=1.24,<2' 'onnxruntime>=1.17,<2' \
-        'platformdirs>=4.2,<5' 'pyserial>=3.5,<4' 'pytest>=8,<9' \
+        'platformdirs>=4.2,<5' 'pyserial>=3.5,<4' 'pytest>=8,<9' 'rich>=13.7,<15' \
     && rm -rf /tmp/horus-source
 
 

@@ -23,6 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from horus.gimbal.device import GimbalDeviceEndpoint
+from horus.logging import configure_logging, install_unhandled_exception_hooks
 
 logger = logging.getLogger(__name__)
 
@@ -203,8 +204,8 @@ def main(argv: list[str] | None = None) -> int:
         listen = parse_address(args.listen)
     except ValueError as exc:
         parser.error(str(exc))
-    logging.basicConfig(level=os.environ.get("HORUS_LOG_LEVEL", "INFO"),
-                        format="%(asctime)s %(name)s %(message)s")
+    configure_logging(component="gimbal")
+    install_unhandled_exception_hooks("horus.gimbal")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(listen)
     sock.setblocking(False)
