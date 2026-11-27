@@ -372,7 +372,8 @@ export function App() {
   const isIdle = studioStatus !== null && studioStatus.lifecycle === "idle";
   const lockDesktopViewport = nav === "flight" && !isIdle;
   const aiViewsCount = events.filter((e) => e.kind === "ai_view" && typeof e.view_id === "string").length;
-  const readyCapsCount = caps.filter((c) => c.ready).length;
+  const coreCaps = caps.filter((c) => c.tier !== "optional");
+  const readyCoreCapsCount = coreCaps.filter((c) => c.ready).length;
   const ThemeIcon = theme === "light" ? Sun : theme === "dark" ? Moon : Monitor;
 
   const rawNotice = notice || (!dismissedError ? studioStatus?.error || "" : "");
@@ -454,9 +455,9 @@ export function App() {
                     <StatusDot status="ok" />
                   ) : !sidebarCollapsed && item.id === "ai" ? (
                     <StatusDot status={studioStatus?.ai_status.configured ? "ok" : "warn"} />
-                  ) : !sidebarCollapsed && item.id === "system" && caps.length > 0 ? (
+                  ) : !sidebarCollapsed && item.id === "system" && coreCaps.length > 0 ? (
                     <span className="ml-auto font-mono text-[11.5px] text-muted tabular-nums">
-                      {readyCapsCount}/{caps.length}
+                      {readyCoreCapsCount}/{coreCaps.length}
                     </span>
                   ) : null;
                 return (
@@ -729,7 +730,7 @@ export function App() {
                     AI &amp; MCP
                   </Button>
                   <Button variant="ghost" onClick={() => setNav("system")}>
-                    System &amp; Logs ({readyCapsCount}/{caps.length || 7})
+                    System &amp; Logs ({readyCoreCapsCount}/{coreCaps.length || 3})
                   </Button>
                 </div>
               </div>
@@ -953,8 +954,8 @@ export function App() {
         targetLabel={studioStatus?.target_label || (sseState === "live" ? "Connected" : sseState)}
         statusDotKind={statusDotKind}
         aiConfigured={Boolean(studioStatus?.ai_status.configured)}
-        readyCapsCount={readyCapsCount}
-        totalCapsCount={caps.length}
+        readyCapsCount={readyCoreCapsCount}
+        totalCapsCount={coreCaps.length}
         theme={theme}
         onCycleTheme={cycleTheme}
         onStopSession={() => void handleStopSession()}

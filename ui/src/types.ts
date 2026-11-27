@@ -59,6 +59,7 @@ export interface SceneInfo {
 
 export interface AssetInfo {
   available: boolean;
+  optional?: boolean;
   path: string | null;
   source: string;
   detail: string;
@@ -127,6 +128,7 @@ export interface StudioSettingsView {
 export interface CapabilityCheck {
   name: string;
   ok: boolean;
+  optional?: boolean;
   detail: string;
   fix_hint: string;
 }
@@ -134,6 +136,7 @@ export interface CapabilityCheck {
 export interface CapabilityItem {
   id: string;
   title: string;
+  tier?: "core" | "optional";
   ready: boolean;
   summary: string;
   checks: CapabilityCheck[];

@@ -25,16 +25,26 @@ class _FakeCommander:
         return None
 
 
-def test_capabilities_engine_reports_all_seven_stacks(tmp_path: Path) -> None:
+def test_capabilities_engine_reports_all_seven_stacks(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-1234567890")
     store = StudioSettingsStore(tmp_path / "cfg")
     caps = check_capabilities(store, cache_dir=tmp_path / "assets", probe_external_tools=False)
     ids = [c["id"] for c in caps]
     assert ids == ["builtin_3d", "gazebo", "gta", "real_drone", "grounder", "agents", "phone_pwa"]
+    tiers = {c["id"]: c["tier"] for c in caps}
+    assert tiers["builtin_3d"] == "core"
+    assert tiers["real_drone"] == "core"
+    assert tiers["agents"] == "core"
+    for opt_id in ("gazebo", "gta", "grounder", "phone_pwa"):
+        assert tiers[opt_id] == "optional"
     for cap in caps:
         assert isinstance(cap["ready"], bool)
         assert cap["checks"]
         for chk in cap["checks"]:
             assert {"name", "ok", "detail", "fix_hint"} <= set(chk)
+    agents = next(c for c in caps if c["id"] == "agents")
+    claude_chk = next(chk for chk in agents["checks"] if chk["name"] == "Claude Code CLI")
+    assert claude_chk.get("optional") is True
 
 
 def test_omp_pi_and_tuning_settings_wire_into_commander_settings(tmp_path: Path, monkeypatch) -> None:

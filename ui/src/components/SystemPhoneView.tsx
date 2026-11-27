@@ -90,8 +90,9 @@ export function SystemPhoneView({
     setCheckingCaps(true);
     try {
       const latest = await onRefreshCaps(true);
-      const readyCount = latest.filter((c) => c.ready).length;
-      toast.success("System checks updated", `${readyCount}/${latest.length} capabilities ready`);
+      const core = latest.filter((c) => c.tier !== "optional");
+      const readyCount = core.filter((c) => c.ready).length;
+      toast.success("System checks updated", `Core: ${readyCount}/${core.length} ready`);
     } catch (e: unknown) {
       toast.error("System check failed", e instanceof Error ? e.message : String(e));
     } finally {
@@ -276,11 +277,50 @@ export function SystemPhoneView({
     );
   }
 
+  const coreCaps = caps.filter((c) => c.tier !== "optional");
+  const optionalCaps = caps.filter((c) => c.tier === "optional");
+  const optionalActiveCount = optionalCaps.filter((c) => c.ready).length;
+
+  const renderCapabilityCard = (cap: CapabilityItem, isOptionalTier: boolean) => (
+    <div key={cap.id}>
+      <div className="flex items-center justify-between gap-4 px-5 py-3.5">
+        <div className="min-w-0">
+          <div className="text-[14.5px] font-medium text-primary">{cap.title}</div>
+          <div className="mt-0.5 text-[13px] text-secondary">{cap.summary}</div>
+        </div>
+        <StatusBadge tone={cap.ready ? "ok" : isOptionalTier ? "neutral" : "warn"}>
+          {cap.ready ? "Ready" : isOptionalTier ? "Optional" : "Setup needed"}
+        </StatusBadge>
+      </div>
+      <div className="divide-y divide-border border-t border-border bg-canvas px-5">
+        {cap.checks.map((c) => {
+          const checkOptional = Boolean(c.optional || isOptionalTier);
+          return (
+            <div key={c.name} className="flex items-start justify-between gap-4 py-3 text-[13px]">
+              <div>
+                <div className="font-medium text-primary">{c.name}</div>
+                <div className="text-secondary">{c.detail}</div>
+                {!c.ok && c.fix_hint && (
+                  <div className={`mt-1 ${checkOptional ? "text-muted" : "text-warning"}`}>
+                    {checkOptional ? `Note: ${c.fix_hint}` : `Fix: ${c.fix_hint}`}
+                  </div>
+                )}
+              </div>
+              <StatusBadge tone={c.ok ? "ok" : checkOptional ? "neutral" : "warn"}>
+                {c.ok ? "OK" : checkOptional ? "Optional" : "Missing"}
+              </StatusBadge>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-8 px-6 py-8">
       <PageHeader
         title="System & Logs"
-        description="Inspect dependency checks across all HORUS features, downloaded assets, and recent flight logs."
+        description="Inspect core standalone requirements, optional integrations, cached assets, and recent flight logs."
         action={
           <div className="flex flex-wrap items-center gap-2">
             {studioStatus && !studioStatus.assets_ready && onBootstrap && (
@@ -297,35 +337,34 @@ export function SystemPhoneView({
       />
 
       <Section
-        title="System Requirements"
-        description="All dependency checks and copy-ready fix hints are shown below."
+        title="Core Requirements"
+        description="Everything needed for built-in 3D simulation, AI missions, and real drone telemetry."
       >
         <div className="divide-y divide-border overflow-hidden rounded-[10px] border border-border bg-surface">
-          {caps.map((cap) => (
-            <div key={cap.id}>
-              <div className="flex items-center justify-between gap-4 px-5 py-3.5">
-                <div className="min-w-0">
-                  <div className="text-[14.5px] font-medium text-primary">{cap.title}</div>
-                  <div className="mt-0.5 text-[13px] text-secondary">{cap.summary}</div>
-                </div>
-                <StatusBadge tone={cap.ready ? "ok" : "warn"}>{cap.ready ? "Ready" : "Setup needed"}</StatusBadge>
-              </div>
-              <div className="divide-y divide-border border-t border-border bg-canvas px-5">
-                {cap.checks.map((c) => (
-                  <div key={c.name} className="flex items-start justify-between gap-4 py-3 text-[13px]">
-                    <div>
-                      <div className="font-medium text-primary">{c.name}</div>
-                      <div className="text-secondary">{c.detail}</div>
-                      {!c.ok && c.fix_hint && <div className="mt-1 text-warning">Fix: {c.fix_hint}</div>}
-                    </div>
-                    <StatusBadge tone={c.ok ? "ok" : "warn"}>{c.ok ? "OK" : "Missing"}</StatusBadge>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
+          {coreCaps.map((cap) => renderCapabilityCard(cap, false))}
         </div>
       </Section>
+
+      {optionalCaps.length > 0 && (
+        <Section
+          title="Optional & Advanced Integrations"
+          description="Extra simulators, local PyTorch grounder, and remote Tailscale access — not required for standalone flights."
+        >
+          <details className="group overflow-hidden rounded-[10px] border border-border bg-surface">
+            <summary className="flex cursor-pointer select-none items-center justify-between gap-4 px-5 py-3.5 text-[14px] font-medium text-primary transition-colors hover:bg-hover">
+              <span>
+                Gazebo Harmonic, GTA V, Open-Vocab Grounder &amp; Phone Tailscale
+              </span>
+              <span className="font-mono text-[12.5px] text-secondary tabular-nums">
+                {optionalActiveCount}/{optionalCaps.length} active
+              </span>
+            </summary>
+            <div className="divide-y divide-border border-t border-border">
+              {optionalCaps.map((cap) => renderCapabilityCard(cap, true))}
+            </div>
+          </details>
+        </Section>
+      )}
 
       <Section title="Cached Assets & Recent Run Logs">
         <div className="divide-y divide-border overflow-hidden rounded-[10px] border border-border bg-surface text-[13.5px]">
@@ -335,7 +374,9 @@ export function SystemPhoneView({
                 <strong className="font-medium text-primary">{name}</strong> ·{" "}
                 <span className="text-secondary">{info.detail}</span>
               </span>
-              <StatusBadge tone={info.available ? "ok" : "warn"}>{info.available ? "Ready" : "Missing"}</StatusBadge>
+              <StatusBadge tone={info.available ? "ok" : info.optional ? "neutral" : "warn"}>
+                {info.available ? "Ready" : info.optional ? "Optional" : "Missing"}
+              </StatusBadge>
             </div>
           ))}
           {runs.slice(0, 10).map((r) => (
