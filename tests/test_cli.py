@@ -71,3 +71,73 @@ def test_cli_studio_accepts_lan_flag() -> None:
     assert args.phone is True
     assert args.lan is True
     assert args.no_browser is True
+
+
+def test_cli_studio_accepts_no_auto_setup_flag() -> None:
+    args = cli._build_parser().parse_args(["studio", "--no-auto-setup"])
+    assert args.command == "studio"
+    assert args.no_auto_setup is True
+
+
+def test_maybe_auto_setup_downloads_when_missing(monkeypatch) -> None:
+    from horus.bootstrap import AssetStatus
+
+    calls: list[bool] = []
+    missing = {
+        "sitl": AssetStatus("sitl", False, None, "missing", False, "missing"),
+        "yolov8n": AssetStatus("yolov8n", True, None, "cache", True, "ok"),
+        "reid": AssetStatus("reid", False, None, "missing", False, "optional", optional=True),
+    }
+    monkeypatch.delenv("HORUS_SKIP_SETUP", raising=False)
+    monkeypatch.setattr(cli, "check_assets", lambda: missing)
+    monkeypatch.setattr(cli, "_download_assets_with_progress", lambda: calls.append(True) or missing)
+
+    args = cli._build_parser().parse_args(["studio"])
+    cli._maybe_auto_setup_for_studio(args)
+    assert calls == [True]
+
+
+def test_maybe_auto_setup_skips_when_ready_or_opted_out(monkeypatch) -> None:
+    from horus.bootstrap import AssetStatus
+
+    calls: list[bool] = []
+    ready = {
+        "sitl": AssetStatus("sitl", True, None, "cache", True, "ok"),
+        "yolov8n": AssetStatus("yolov8n", True, None, "cache", True, "ok"),
+        "reid": AssetStatus("reid", False, None, "missing", False, "optional", optional=True),
+    }
+    missing = {
+        "sitl": AssetStatus("sitl", False, None, "missing", False, "missing"),
+        "yolov8n": AssetStatus("yolov8n", False, None, "missing", False, "missing"),
+        "reid": AssetStatus("reid", False, None, "missing", False, "optional", optional=True),
+    }
+    monkeypatch.setattr(cli, "_download_assets_with_progress", lambda: calls.append(True) or ready)
+
+    monkeypatch.setattr(cli, "check_assets", lambda: ready)
+    cli._maybe_auto_setup_for_studio(cli._build_parser().parse_args(["studio"]))
+    assert calls == []
+
+    monkeypatch.setattr(cli, "check_assets", lambda: missing)
+    cli._maybe_auto_setup_for_studio(cli._build_parser().parse_args(["studio", "--no-auto-setup"]))
+    assert calls == []
+
+    monkeypatch.setenv("HORUS_SKIP_SETUP", "1")
+    cli._maybe_auto_setup_for_studio(cli._build_parser().parse_args(["studio"]))
+    assert calls == []
+
+
+def test_maybe_auto_setup_ignores_download_failure(monkeypatch) -> None:
+    from horus.bootstrap import AssetStatus
+
+    missing = {
+        "sitl": AssetStatus("sitl", False, None, "missing", False, "missing"),
+        "yolov8n": AssetStatus("yolov8n", False, None, "missing", False, "missing"),
+    }
+    monkeypatch.delenv("HORUS_SKIP_SETUP", raising=False)
+    monkeypatch.setattr(cli, "check_assets", lambda: missing)
+
+    def fail() -> dict[str, AssetStatus]:
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(cli, "_download_assets_with_progress", fail)
+    cli._maybe_auto_setup_for_studio(cli._build_parser().parse_args(["studio"]))

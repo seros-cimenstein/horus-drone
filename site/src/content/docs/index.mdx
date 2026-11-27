@@ -31,24 +31,20 @@ import { Card, CardGrid, Tabs, TabItem } from '@astrojs/starlight/components';
     ```
   </TabItem>
   <TabItem label="uv / pip">
-    From GitHub:
+    From GitHub (no `git` required):
     ```sh
-    uv tool install --python 3.12 git+https://github.com/seros-cimenstein/horus-drone.git
-    horus setup
+    uv tool install --python 3.12 https://github.com/seros-cimenstein/horus-drone/archive/refs/heads/main.tar.gz
+    horus
     ```
     Or from a local clone:
     ```sh
     uv tool install --python 3.12 -e .
-    horus setup
+    horus
     ```
   </TabItem>
 </Tabs>
 
-Then launch **HORUS Studio**:
-
-```sh
-horus
-```
+The one-line installers bootstrap `uv` + Python 3.12, download SITL and vision models, and start **HORUS Studio** automatically (set `HORUS_NO_START=1` to skip auto-launch). When installing manually with `uv`, `horus` automatically fetches missing SITL/models on first launch.
 
 ## Why HORUS?
 

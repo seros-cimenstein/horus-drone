@@ -38,7 +38,7 @@ HORUS lets a natural-language **AI model** supervise an **ArduPilot** multirotor
 
 ## Quickstart
 
-### One-line install (no manual clone needed)
+### One-line install (zero Python / `uv` / `git` prerequisites)
 
 **Linux / macOS:**
 
@@ -52,11 +52,12 @@ curl -LsSf https://seros-cimenstein.github.io/horus-drone/install.sh | sh
 irm https://seros-cimenstein.github.io/horus-drone/install.ps1 | iex
 ```
 
-**Direct with `uv`:**
+The one-line installers bootstrap `uv` + standalone Python 3.12 automatically, install HORUS, run `horus setup` to fetch ArduCopter SITL and ONNX models, and launch **HORUS Studio** immediately (set `HORUS_NO_START=1` or `HORUS_SKIP_SETUP=1` to opt out).
+
+**Direct with `uv` (no `git` required):**
 
 ```sh
-uv tool install --python 3.12 git+https://github.com/seros-cimenstein/horus-drone.git
-horus setup
+uv tool install --python 3.12 https://github.com/seros-cimenstein/horus-drone/archive/refs/heads/main.tar.gz
 horus
 ```
 
@@ -64,11 +65,10 @@ horus
 
 ```sh
 uv tool install --python 3.12 -e .
-horus setup
 horus
 ```
 
-If you work inside a local virtualenv instead of `uv tool install`, run `.venv/bin/horus setup` and `.venv/bin/horus`.
+`horus` automatically runs asset setup on first launch if SITL or ONNX models are missing (pass `--no-auto-setup` or set `HORUS_SKIP_SETUP=1` to skip, or run `horus setup` ahead of time). If you work inside a local virtualenv instead of `uv tool install`, run `.venv/bin/horus`.
 
 `horus` launches **HORUS Studio** with zero Docker, Gazebo, GStreamer, or hand-edited YAML required. Pick **Indoor SAR Room**, **Outdoor Forest**, **Urban Plaza**, **Procedural World**, or **Real Drone** in one click.
 

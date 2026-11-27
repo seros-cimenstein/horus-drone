@@ -105,7 +105,7 @@ export function SystemLogsView({
           title="Optional & Advanced Integrations"
           description="Extra simulators, local PyTorch grounder, and remote Tailscale access (not required for standalone flights)."
         >
-          <details className="group overflow-hidden rounded-[10px] border border-border bg-surface">
+          <details open className="group overflow-hidden rounded-[10px] border border-border bg-surface">
             <summary className="flex cursor-pointer select-none items-center justify-between gap-4 px-5 py-3.5 text-[14px] font-medium text-primary transition-colors hover:bg-hover">
               <span>Gazebo Harmonic, GTA V, Open-Vocab Grounder &amp; Phone Tailscale</span>
               <span className="font-mono text-[12.5px] text-secondary tabular-nums">

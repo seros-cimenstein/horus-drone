@@ -11,8 +11,8 @@ Running `horus` with no arguments starts **HORUS Studio**:
 
 ```sh
 # Web dashboard (default when running `horus` alone)
-horus                             # Start HORUS Studio and open it in your browser
-horus studio --port 8765          # Choose a custom port (optional: --no-browser, --phone)
+horus                             # Start HORUS Studio (auto-fetches missing SITL/models) and open browser
+horus studio --port 8765          # Choose a custom port (--no-browser, --phone, --lan, --no-auto-setup)
 
 # Terminal client & standalone Drone board
 horus tui                         # Interactive terminal control app (--server-url, --config)
@@ -86,5 +86,6 @@ YAML configs are parsed **strictly**: unknown keys are rejected at startup so ty
 | `HORUS_LOG_LEVEL`, `HORUS_LOG_FORMAT`, `HORUS_LOG_FILE` | Control logging verbosity (`INFO`), output format (`auto`, `rich`, `plain`, `json`), and rotating log file path |
 | `HORUS_TRACEBACK_LOCALS`, `NO_COLOR` | Include locals in Rich tracebacks when `1`; disable terminal colors when set |
 | `HORUS_ASSETS_DIR`, `HORUS_CONFIG_DIR` | Override asset cache and Studio config directories |
+| `HORUS_SKIP_SETUP`, `HORUS_NO_START` | Skip automatic `horus setup` on Studio startup/install (`1`), or skip auto-launching `horus` after one-line install (`1`) |
 | `HORUS_SITL_BIN`, `HORUS_YOLO_MODEL`, `HORUS_REID_MODEL` | Explicit binary/model overrides |
 | `HORUS_GROUNDER_HF_CACHE` | Offline Hugging Face cache directory (`HF_HUB_OFFLINE=1`) |

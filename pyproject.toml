@@ -83,7 +83,7 @@ horus-grounder = "horus.grounder.server:main"
 include = ["horus*"]
 
 [tool.setuptools.package-data]
-"horus.commander" = ["web/*"]
+"horus.commander" = ["web/*", "web/scenes/*"]
 "horus.world" = ["data/*", "data/ardupilot/*", "scenes/*"]
 
 [tool.pytest.ini_options]

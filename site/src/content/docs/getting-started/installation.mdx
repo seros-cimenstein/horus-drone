@@ -9,35 +9,38 @@ HORUS runs natively on **Linux** (`x86_64` / `aarch64`), **Windows 10/11** (`x86
 
 ## One-line installers
 
+No pre-installed Python, `uv`, or `git` is required. Each installer bootstraps `uv` + standalone Python 3.12, installs HORUS, runs `horus setup`, and launches **HORUS Studio** automatically.
+
 <Tabs>
   <TabItem label="Linux / macOS">
     ```sh
     curl -LsSf https://seros-cimenstein.github.io/horus-drone/install.sh | sh
     ```
-    Set `HORUS_SKIP_SETUP=1` to install the CLI without downloading SITL/ONNX assets yet.
+    Set `HORUS_SKIP_SETUP=1` to skip downloading SITL/ONNX assets during install, or `HORUS_NO_START=1` to install without auto-launching **HORUS Studio**.
   </TabItem>
   <TabItem label="Windows (PowerShell)">
     ```powershell
     irm https://seros-cimenstein.github.io/horus-drone/install.ps1 | iex
     ```
-    Set `$env:HORUS_SKIP_SETUP = "1"` before running to skip asset downloads.
+    Set `$env:HORUS_SKIP_SETUP = "1"` to skip asset downloads during install, or `$env:HORUS_NO_START = "1"` to install without auto-launching **HORUS Studio**.
   </TabItem>
   <TabItem label="uv / pip">
-    Install directly from GitHub with `uv`:
+    Install directly from GitHub with `uv` (no `git` required):
     ```sh
-    uv tool install --python 3.12 git+https://github.com/seros-cimenstein/horus-drone.git
-    horus setup
+    uv tool install --python 3.12 https://github.com/seros-cimenstein/horus-drone/archive/refs/heads/main.tar.gz
+    horus
     ```
     Or install from a local clone in editable mode:
     ```sh
     uv tool install --python 3.12 -e .
-    horus setup
+    horus
     ```
     Or with `pip`:
     ```sh
-    pip install git+https://github.com/seros-cimenstein/horus-drone.git
-    horus setup
+    pip install https://github.com/seros-cimenstein/horus-drone/archive/refs/heads/main.tar.gz
+    horus
     ```
+    On first launch, `horus` automatically runs `horus setup` if required SITL/ONNX assets are missing (pass `--no-auto-setup` or set `HORUS_SKIP_SETUP=1` to skip, or run `horus setup` manually ahead of time).
   </TabItem>
 </Tabs>
 

@@ -19,7 +19,7 @@ import time
 from typing import Sequence
 import webbrowser
 
-from horus.bootstrap import assets_ready, check_assets, doctor_report, ensure_assets
+from horus.bootstrap import AssetStatus, assets_ready, check_assets, doctor_report, ensure_assets
 from horus.commander.server import DEFAULT_HOST, DEFAULT_PORT, _GRACEFUL_SHUTDOWN_S, control_app_url, create_app
 from horus.logging import (
     _RICH_AVAILABLE,
@@ -120,6 +120,7 @@ def _run_studio(args: argparse.Namespace) -> int:
         active_log_path = None
         logger.warning("Could not open studio log file %s: %s", chosen_log, exc)
     install_unhandled_exception_hooks("horus.studio")
+    _maybe_auto_setup_for_studio(args)
 
     store = StudioSettingsStore()
     shaper = LinkShaper()
@@ -274,6 +275,94 @@ def _run_studio(args: argparse.Namespace) -> int:
     return 0
 
 
+def _download_assets_with_progress() -> dict[str, AssetStatus]:
+    """Download and verify missing standalone SITL and ONNX assets with progress output."""
+    if _RICH_AVAILABLE and _is_interactive_tty(sys.stdout):
+        from rich.progress import (
+            BarColumn,
+            DownloadColumn,
+            Progress,
+            SpinnerColumn,
+            TaskID,
+            TextColumn,
+            TimeRemainingColumn,
+            TransferSpeedColumn,
+        )
+
+        console = get_console(stderr=False)
+        if console is not None:
+            console.print("[horus.brand]Checking/downloading HORUS standalone assets...[/]")
+            tasks_by_name: dict[str, TaskID] = {}
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold]{task.fields[asset]}[/]"),
+                BarColumn(),
+                DownloadColumn(),
+                TransferSpeedColumn(),
+                TimeRemainingColumn(),
+                TextColumn("{task.fields[state]}"),
+                console=console,
+            ) as progress_bar:
+
+                def rich_progress(name: str, done: int, total: int | None, state: str) -> None:
+                    task_id = tasks_by_name.get(name)
+                    if task_id is None:
+                        task_id = progress_bar.add_task(
+                            name,
+                            total=total or 1,
+                            completed=done,
+                            asset=name,
+                            state=state,
+                        )
+                        tasks_by_name[name] = task_id
+                    else:
+                        progress_bar.update(
+                            task_id,
+                            total=total if total is not None else max(done, 1),
+                            completed=done,
+                            state=state,
+                        )
+
+                statuses = ensure_assets(progress_cb=rich_progress)
+            for name, st in statuses.items():
+                style = "horus.ok" if st.available else ("horus.muted" if st.optional else "horus.err")
+                console.print(f"  [{style}]{name}[/]: {st.detail}")
+            return statuses
+
+    def progress(name: str, done: int, total: int | None, state: str) -> None:
+        if state in {"verifying", "ready", "optional", "error"}:
+            print(f"  {name}: {state} ({done} bytes)", flush=True)
+
+    print("Checking/downloading HORUS standalone assets...", flush=True)
+    statuses = ensure_assets(progress_cb=progress)
+    for name, st in statuses.items():
+        print(f"  {name}: {st.detail}")
+    return statuses
+
+
+def _maybe_auto_setup_for_studio(args: argparse.Namespace) -> None:
+    """Automatically fetch missing required SITL/ONNX assets on first Studio launch."""
+    if getattr(args, "no_auto_setup", False):
+        return
+    if os.environ.get("HORUS_SKIP_SETUP", "").strip().lower() in {"1", "true", "yes"}:
+        return
+    if assets_ready(check_assets()):
+        return
+
+    logger.info(
+        "Missing required standalone assets; downloading automatically "
+        "(pass --no-auto-setup or HORUS_SKIP_SETUP=1 to skip)..."
+    )
+    try:
+        _download_assets_with_progress()
+    except Exception as exc:
+        logger.warning(
+            "Automatic asset setup did not complete: %s. "
+            "Continuing without cached SITL/models; run `horus setup` or use Studio's Download button later.",
+            exc,
+        )
+
+
 def _run_setup(args: argparse.Namespace) -> int:
     configure_logging(
         level=args.log_level,
@@ -309,81 +398,25 @@ def _run_setup(args: argparse.Namespace) -> int:
             print(f"[{mark}] {name}: {st.detail}")
         return 0 if ok else 1
 
-    if _RICH_AVAILABLE and _is_interactive_tty(sys.stdout):
-        from rich.progress import (
-            BarColumn,
-            DownloadColumn,
-            Progress,
-            SpinnerColumn,
-            TaskID,
-            TextColumn,
-            TimeRemainingColumn,
-            TransferSpeedColumn,
-        )
+    try:
+        statuses = _download_assets_with_progress()
+    except Exception as exc:
+        if _RICH_AVAILABLE and _is_interactive_tty(sys.stdout):
+            render_error("HORUS asset download failed", exc)
+        else:
+            print(f"Asset download failed: {exc}", file=sys.stderr)
+        return 1
 
-        console = get_console(stderr=False)
-        if console is not None:
-            console.print("[horus.brand]Checking/downloading HORUS standalone assets...[/]")
-            tasks_by_name: dict[str, TaskID] = {}
-            try:
-                with Progress(
-                    SpinnerColumn(),
-                    TextColumn("[bold]{task.fields[asset]}[/]"),
-                    BarColumn(),
-                    DownloadColumn(),
-                    TransferSpeedColumn(),
-                    TimeRemainingColumn(),
-                    TextColumn("{task.fields[state]}"),
-                    console=console,
-                ) as progress_bar:
-
-                    def rich_progress(name: str, done: int, total: int | None, state: str) -> None:
-                        task_id = tasks_by_name.get(name)
-                        if task_id is None:
-                            task_id = progress_bar.add_task(
-                                name,
-                                total=total or 1,
-                                completed=done,
-                                asset=name,
-                                state=state,
-                            )
-                            tasks_by_name[name] = task_id
-                        else:
-                            progress_bar.update(
-                                task_id,
-                                total=total if total is not None else max(done, 1),
-                                completed=done,
-                                state=state,
-                            )
-
-                    statuses = ensure_assets(progress_cb=rich_progress)
-            except Exception as exc:
-                render_error("HORUS asset download failed", exc)
-                return 1
-            for name, st in statuses.items():
-                style = "horus.ok" if st.available else ("horus.muted" if st.optional else "horus.err")
-                console.print(f"  [{style}]{name}[/]: {st.detail}")
-            if args.with_grounder:
+    if args.with_grounder:
+        if _RICH_AVAILABLE and _is_interactive_tty(sys.stdout):
+            console = get_console(stderr=False)
+            if console is not None:
                 console.print(
                     "[horus.muted]Optional local Grounder setup is available via "
                     "`scripts/setup_grounder_venv.sh`.[/]"
                 )
-            return 0 if assets_ready(statuses) else 1
-
-    def progress(name: str, done: int, total: int | None, state: str) -> None:
-        if state in {"verifying", "ready", "optional", "error"}:
-            print(f"  {name}: {state} ({done} bytes)", flush=True)
-
-    print("Checking/downloading HORUS standalone assets...", flush=True)
-    try:
-        statuses = ensure_assets(progress_cb=progress)
-    except Exception as exc:
-        print(f"Asset download failed: {exc}", file=sys.stderr)
-        return 1
-    for name, st in statuses.items():
-        print(f"  {name}: {st.detail}")
-    if args.with_grounder:
-        print("Optional local Grounder setup is available via `scripts/setup_grounder_venv.sh`.")
+        else:
+            print("Optional local Grounder setup is available via `scripts/setup_grounder_venv.sh`.")
     return 0 if assets_ready(statuses) else 1
 
 
@@ -671,6 +704,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--lan",
         action="store_true",
         help="Bind on LAN (0.0.0.0) with a local self-signed HTTPS cert for Wi-Fi Phone PWA",
+    )
+    p_studio.add_argument(
+        "--no-auto-setup",
+        action="store_true",
+        help="Skip automatic download of missing SITL/ONNX assets on startup (env: HORUS_SKIP_SETUP=1)",
     )
     add_logging_arguments(p_studio)
 
