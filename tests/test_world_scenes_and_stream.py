@@ -24,6 +24,7 @@ def test_all_built_in_3d_scenes_compile_and_build_maps(tmp_path: Path) -> None:
         mujoco.mj_forward(model, data)
         assert model.nsensor == 7
         assert (tmp_path / name / "assets" / "apriltag_id0.png").is_file()
+        assert any((tmp_path / name / "assets").glob("sky_*.png"))
 
         map_dir = tmp_path / name / "map"
         write_tile_directory(bundle.map_data, map_dir, "builtin_3d")
@@ -112,3 +113,50 @@ def test_sitl_process_composes_parms_and_direct_command(tmp_path: Path) -> None:
     assert "--serial2" in argv and "tcp:15763" in argv
     assert cwd == tmp_path / "run" / "sitl"
     assert (cwd / "copter-default.parm").is_file()
+
+
+def test_world_camera_server_mjpeg_stream_emits_valid_multipart_jpegs(tmp_path: Path) -> None:
+    import io
+    import threading
+    import time
+
+    bundle = build_scene_bundle("indoor_sar", tmp_path / "assets")
+    world = MuJoCoQuadWorld(bundle)
+    server = WorldCameraServer(world, camera_port=0, spectator_port=0)
+    try:
+        server.start()
+        assert server._http_server is not None
+        handler_cls = server._http_server.RequestHandlerClass
+
+        class _FakeSock:
+            def __init__(self, req_bytes: bytes) -> None:
+                self._rfile = io.BytesIO(req_bytes)
+                self._wfile = io.BytesIO()
+
+            def makefile(self, mode: str, *args, **kwargs):
+                return self._rfile if "r" in mode else self._wfile
+
+            def sendall(self, data: bytes) -> None:
+                self._wfile.write(data)
+
+        fake_sock = _FakeSock(b"GET /stream.mjpg?preset=follow&tof=1&fps=25 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+
+        def _stop_soon() -> None:
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if fake_sock._wfile.getvalue().count(b"--horusframe") >= 2:
+                    break
+                time.sleep(0.02)
+            server._stop.set()
+
+        stopper = threading.Thread(target=_stop_soon, daemon=True)
+        stopper.start()
+        handler_cls(fake_sock, ("127.0.0.1", 12345), server._http_server)
+        stopper.join(timeout=2.0)
+
+        out = fake_sock._wfile.getvalue()
+        assert b"multipart/x-mixed-replace; boundary=horusframe" in out
+        assert out.count(b"--horusframe") >= 2
+        assert b"\xff\xd8\xff" in out
+    finally:
+        server.close()

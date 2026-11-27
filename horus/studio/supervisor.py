@@ -845,6 +845,31 @@ class StudioSupervisor:
             raise RuntimeError(f"Spectator frame unavailable (HTTP {resp.status_code})")
         return resp.content
 
+    async def stream_spectator_mjpeg(
+        self,
+        *,
+        preset: str = "follow",
+        show_tof: bool = True,
+        fps: int = 25,
+    ):
+        """Yield raw multipart MJPEG chunks from the active WorldCameraServer."""
+        url = self._state.spectator_url
+        if not url:
+            raise RuntimeError("No 3D spectator stream is active")
+        stream_url = url.rsplit("/", 1)[0] + "/stream.mjpg"
+        clamped_fps = max(1, min(30, int(fps)))
+        async with self._http_client.stream(
+            "GET",
+            stream_url,
+            params={"preset": preset, "tof": "1" if show_tof else "0", "fps": str(clamped_fps)},
+            timeout=None,
+        ) as resp:
+            if resp.status_code != 200:
+                raise RuntimeError(f"Spectator stream unavailable (HTTP {resp.status_code})")
+            async for chunk in resp.aiter_bytes(16384):
+                if chunk:
+                    yield chunk
+
     async def manual_move(self, action: str, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Execute an authenticated operator manual move or vision command (never waits on AI)."""
         allowed = {"take_off", "move", "turn", "look", "goto", "set_vocabulary", "point"}

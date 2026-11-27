@@ -349,7 +349,6 @@ class MuJoCoQuadWorld:
             self.data.xfrc_applied[self._quad_body_id, 3:6] = torque_enu
 
             mujoco.mj_step(self.model, self.data)
-            self._apply_camera_poses()
             state = self._snapshot_state(dt=dt)
             self.last_state = state
             return state
@@ -464,7 +463,7 @@ class MuJoCoQuadWorld:
         renderer: mujoco.Renderer,
         camera: str = "drone_cam",
     ) -> np.ndarray:
-        """Render ``camera`` into an HxWx3 uint8 RGB array under the simulation lock."""
+        """Render ``camera`` into an HxWx3 uint8 RGB array, holding the physics lock only for scene snapshot."""
         with self.lock:
             self._apply_camera_poses()
             opt = mujoco.MjvOption()
@@ -473,7 +472,7 @@ class MuJoCoQuadWorld:
                 camera == "spectator_cam" and self._show_tof
             )
             renderer.update_scene(self.data, camera=camera, scene_option=opt)
-            return renderer.render().copy()
+        return renderer.render().copy()
 
     def handle_servo_packet(
         self,

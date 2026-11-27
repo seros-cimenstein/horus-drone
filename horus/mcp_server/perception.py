@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from typing import Any, Mapping
 
 from horus.mcp_server.context import ToolContext, candidate_result, observation_age, plain, to_json
 
 _LOG = logging.getLogger(__name__)
+_SOM_CACHE_LOCK = threading.Lock()
+_SOM_CACHE: dict[int, tuple[tuple[Any, ...], Any]] = {}
 
 
 def _frame_tool_content(ctx: ToolContext, frame: Any, *, publish: bool = True) -> list[Any]:
@@ -21,7 +24,23 @@ def _frame_tool_content(ctx: ToolContext, frame: Any, *, publish: bool = True) -
     if not isinstance(frame, Frame):
         raise RuntimeError("perception returned a frame in an unsupported format")
     render_limit = min(640, int(ctx.config.perception.render_width_px))
-    payload = render_set_of_marks(frame, max_dimension=render_limit)
+    cache_key = (
+        frame.frame_id,
+        render_limit,
+        tuple((c.id, round(c.confidence, 3), c.class_name) for c in frame.candidates),
+    )
+    ctx_key = id(ctx)
+    payload = None
+    with _SOM_CACHE_LOCK:
+        cached = _SOM_CACHE.get(ctx_key)
+        if cached is not None and cached[0] == cache_key:
+            payload = cached[1]
+    if payload is None:
+        payload = render_set_of_marks(frame, max_dimension=render_limit)
+        with _SOM_CACHE_LOCK:
+            _SOM_CACHE[ctx_key] = (cache_key, payload)
+            if len(_SOM_CACHE) > 8:
+                _SOM_CACHE.pop(next(iter(_SOM_CACHE)))
     if publish and ctx.image_publisher is not None:
         try:
             ctx.image_publisher.publish(payload)

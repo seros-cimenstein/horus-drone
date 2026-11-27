@@ -55,7 +55,11 @@ export function WorldsView({
   }, [token]);
 
   const running = studioStatus?.lifecycle === "running";
-  const busy = studioStatus?.lifecycle === "starting" || studioStatus?.lifecycle === "bootstrapping" || launchingKey !== null;
+  const busy =
+    !studioStatus ||
+    studioStatus.lifecycle === "starting" ||
+    studioStatus.lifecycle === "bootstrapping" ||
+    launchingKey !== null;
 
   const launch = async (key: string, payload: Record<string, unknown>) => {
     setLaunchingKey(key);

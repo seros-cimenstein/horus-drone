@@ -6,7 +6,9 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import logging
 import math
+import os
 import socket
+import sys
 import threading
 import time
 from typing import Any
@@ -111,8 +113,17 @@ class WorldCameraServer:
             return None
         try:
             self._renderer = mujoco.Renderer(self.world.model, height=self.height, width=self.width)
+            logger.info("MuJoCo offscreen renderer ready (MUJOCO_GL=%s)", os.environ.get("MUJOCO_GL", "default"))
             return self._renderer
         except Exception as exc:
+            if sys.platform.startswith("linux") and os.environ.get("MUJOCO_GL") == "egl":
+                try:
+                    os.environ["MUJOCO_GL"] = "osmesa"
+                    self._renderer = mujoco.Renderer(self.world.model, height=self.height, width=self.width)
+                    logger.warning("EGL offscreen failed (%s); using OSMesa fallback", exc)
+                    return self._renderer
+                except Exception as fallback_exc:
+                    exc = fallback_exc
             self._render_error = str(exc)
             logger.warning("MuJoCo offscreen renderer unavailable, using synthetic frame fallback: %s", exc)
             return None
@@ -170,13 +181,44 @@ class WorldCameraServer:
             class _SpectatorHandler(BaseHTTPRequestHandler):
                 def do_GET(self) -> None:  # noqa: N802
                     parsed = urlsplit(self.path)
+                    qs = parse_qs(parsed.query)
+                    preset = (qs.get("preset") or ["follow"])[0]
+                    show_tof = (qs.get("tof") or ["1"])[0] not in {"0", "false", "no"}
+                    if parsed.path == "/stream.mjpg":
+                        try:
+                            fps = max(1, min(30, int((qs.get("fps") or ["25"])[0])))
+                        except ValueError:
+                            fps = 25
+                        period = 1.0 / fps
+                        self.send_response(200)
+                        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=horusframe")
+                        self.send_header("Cache-Control", "no-store")
+                        self.end_headers()
+                        while not cam_server._stop.is_set():
+                            started = time.monotonic()
+                            try:
+                                jpeg = cam_server.render_spectator_jpeg(preset=preset, show_tof=show_tof)
+                                part = (
+                                    b"--horusframe\r\n"
+                                    b"Content-Type: image/jpeg\r\n"
+                                    + f"Content-Length: {len(jpeg)}\r\n\r\n".encode("ascii")
+                                    + jpeg
+                                    + b"\r\n"
+                                )
+                                self.wfile.write(part)
+                                self.wfile.flush()
+                            except (BrokenPipeError, ConnectionResetError, OSError):
+                                break
+                            except Exception:
+                                break
+                            remaining = period - (time.monotonic() - started)
+                            if remaining > 0 and cam_server._stop.wait(remaining):
+                                break
+                        return
                     if parsed.path != "/frame.jpg":
                         self.send_response(404)
                         self.end_headers()
                         return
-                    qs = parse_qs(parsed.query)
-                    preset = (qs.get("preset") or ["follow"])[0]
-                    show_tof = (qs.get("tof") or ["1"])[0] not in {"0", "false", "no"}
                     try:
                         jpeg = cam_server.render_spectator_jpeg(preset=preset, show_tof=show_tof)
                     except Exception as exc:
@@ -217,6 +259,10 @@ class WorldCameraServer:
 
     def _serve_client(self, client: socket.socket) -> None:
         client.settimeout(1.0)
+        try:
+            client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
         with client:
             while not self._stop.is_set():
                 try:

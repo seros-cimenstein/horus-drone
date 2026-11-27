@@ -72,7 +72,7 @@ class StudioSettings:
     command_ttl_s: float = 30.0
     link_loss_rth_delay_s: float = 30.0
     default_gimbal_pitch_deg: float = -15.0
-    camera_max_fps: float = 5.0
+    camera_max_fps: float = 15.0
     open_vocab_hz: float = 0.5
     perception_render_width_px: int = 640
     perception_point_compensation: bool = True
@@ -128,7 +128,7 @@ class StudioSettings:
             command_ttl_s=_num("command_ttl_s", 30.0, 5.0, 120.0),
             link_loss_rth_delay_s=_num("link_loss_rth_delay_s", 30.0, 3.0, 300.0),
             default_gimbal_pitch_deg=_num("default_gimbal_pitch_deg", -15.0, -90.0, 45.0),
-            camera_max_fps=_num("camera_max_fps", 5.0, 1.0, 30.0),
+            camera_max_fps=_num("camera_max_fps", 15.0, 1.0, 30.0),
             open_vocab_hz=_num("open_vocab_hz", 0.5, 0.1, 5.0),
             perception_render_width_px=_int("perception_render_width_px", 640, 160, 640),
             perception_point_compensation=bool(data.get("perception_point_compensation", True)),

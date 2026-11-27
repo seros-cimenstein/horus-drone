@@ -1229,3 +1229,69 @@ def test_events_stream_exits_cleanly_on_begin_shutdown():
     sent = asyncio.run(exercise())
     assert sent[0]["status"] == 200
     assert sent[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
+
+
+def test_mjpeg_frame_and_spectator_streams_require_auth_and_stream_jpegs():
+    from horus.commander.display import DisplayReader
+
+    class _FakeStudio:
+        def status(self):
+            return {"spectator_url": "http://127.0.0.1:5615/frame.jpg"}
+
+        async def stream_spectator_mjpeg(self, *, preset="follow", show_tof=True, fps=25):
+            yield b"--horusframe\r\nContent-Type: image/jpeg\r\nContent-Length: 4\r\n\r\n\xff\xd8\xff\xd9\r\n"
+            await asyncio.sleep(0.05)
+
+    commander = HorusCommander("http://127.0.0.1:8000/mcp", _TOKEN, CommanderSettings())
+    display = DisplayReader("http://127.0.0.1:8000/mcp", "mcp-token", opener=_display_opener(_DisplaySession()))
+    app = create_app(commander, _TOKEN, display=display, studio=_FakeStudio())
+
+    async def exercise():
+        reader = asyncio.create_task(display.run())
+        while display._session is None:
+            await asyncio.sleep(0)
+
+        # Unauthenticated rejected with 401
+        unauth = await _get(app, "/api/frame/stream", {})
+        assert unauth.status_code == 401
+        unauth_spec = await _get(app, "/api/studio/spectator-stream", {})
+        assert unauth_spec.status_code == 401
+
+        async def collect_stream(path: str):
+            sent: list[dict] = []
+            got_frame = asyncio.Event()
+
+            async def receive():
+                await asyncio.Event().wait()
+                return {"type": "http.disconnect"}
+
+            async def send(message: dict):
+                sent.append(message)
+                if message["type"] == "http.response.body" and b"--horusframe" in message.get("body", b""):
+                    got_frame.set()
+
+            scope = {
+                "type": "http",
+                "method": "GET",
+                "path": path,
+                "query_string": b"",
+                "headers": [(b"authorization", f"Bearer {_TOKEN}".encode("ascii"))],
+            }
+            task = asyncio.create_task(app(scope, receive, send))
+            await asyncio.wait_for(got_frame.wait(), timeout=2.0)
+            app.begin_shutdown()
+            await asyncio.wait_for(task, timeout=2.0)
+            return sent
+
+        frame_msgs = await collect_stream("/api/frame/stream")
+        app.event_hub._closed = False
+        spec_msgs = await collect_stream("/api/studio/spectator-stream")
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+        return frame_msgs, spec_msgs
+
+    frame_msgs, spec_msgs = asyncio.run(exercise())
+    assert frame_msgs[0]["status"] == 200
+    assert any(b"X-Horus-Meta:" in m.get("body", b"") for m in frame_msgs[1:])
+    assert spec_msgs[0]["status"] == 200
+    assert any(b"--horusframe" in m.get("body", b"") for m in spec_msgs[1:])

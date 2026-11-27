@@ -1,8 +1,15 @@
-"""ONNX Runtime CPU session loading shared by the YOLO detector and the ReID embedder."""
+"""ONNX Runtime session loading with hardware-accelerator preference and CPU fallback."""
 
 from __future__ import annotations
 
 from typing import Any
+
+_PREFERRED_PROVIDERS = (
+    "CUDAExecutionProvider",
+    "DmlExecutionProvider",
+    "CoreMLExecutionProvider",
+    "CPUExecutionProvider",
+)
 
 
 def load_onnx_session(
@@ -12,7 +19,7 @@ def load_onnx_session(
     intra_op_num_threads: int,
     inter_op_num_threads: int,
 ) -> tuple[Any, str]:
-    """Open ``model_path`` on the CPU provider; return the session and its first input's name."""
+    """Open ``model_path`` using the fastest available provider; return the session and input name."""
     try:
         import onnxruntime
     except ImportError as exc:
@@ -22,10 +29,12 @@ def load_onnx_session(
     options = onnxruntime.SessionOptions()
     options.intra_op_num_threads = intra_op_num_threads
     options.inter_op_num_threads = inter_op_num_threads
+    available = set(onnxruntime.get_available_providers())
+    providers = [p for p in _PREFERRED_PROVIDERS if p in available] or ["CPUExecutionProvider"]
     session = onnxruntime.InferenceSession(
         model_path,
         sess_options=options,
-        providers=["CPUExecutionProvider"],
+        providers=providers,
     )
     inputs = session.get_inputs()
     if not inputs:

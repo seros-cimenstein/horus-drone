@@ -210,27 +210,37 @@ export function App() {
       return;
     }
     void loadPreflight(false);
+    let cancelled = false;
+    let timerId = 0;
     const pollFast = async () => {
       try {
         const [st, lm] = await Promise.all([horusApi.getState(token), horusApi.getLiveMap(token)]);
-        setDroneState(st);
-        setLiveMap(lm);
+        if (!cancelled) {
+          setDroneState(st);
+          setLiveMap(lm);
+        }
       } catch {
         // transient disconnect while running
       }
-      if ((stageTab === "camera" || isPhone) && Date.now() >= frameBackoffUntilRef.current) {
+      if (isPhone && Date.now() >= frameBackoffUntilRef.current) {
         try {
-          setFrame(await horusApi.getFrame(token));
+          const nextFrame = await horusApi.getFrame(token);
+          if (!cancelled) setFrame(nextFrame);
         } catch {
           // Back off briefly if perception camera is still warming up or disabled.
           frameBackoffUntilRef.current = Date.now() + 4000;
         }
       }
+      if (!cancelled) {
+        timerId = window.setTimeout(() => void pollFast(), 250);
+      }
     };
     void pollFast();
-    const timer = window.setInterval(() => void pollFast(), 450);
-    return () => window.clearInterval(timer);
-  }, [token, sseState, studioStatus?.lifecycle, stageTab, isPhone, loadPreflight]);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timerId);
+    };
+  }, [token, sseState, studioStatus?.lifecycle, isPhone, loadPreflight]);
 
   if (!token || sseState === "unauthorized") {
     return (

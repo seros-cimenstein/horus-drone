@@ -1,7 +1,8 @@
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Eye, LocateFixed } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { horusApi } from "../api";
-import type { CameraFrame, StudioStatus, TimelineEvent } from "../types";
+import { type MjpegMeta, streamMjpeg } from "../mjpeg";
+import type { CameraFrame, Candidate, StudioStatus, TimelineEvent } from "../types";
 import { Button } from "./common/Button";
 import { Select, StatusBadge } from "./common/Surface";
 
@@ -26,11 +27,15 @@ export function VisualStage({
 }: Props) {
   const [preset, setPreset] = useState<"follow" | "overhead" | "orbit">("follow");
   const [showTof, setShowTof] = useState(true);
-  const [spectatorUrl, setSpectatorUrl] = useState("");
   const [aiThumbUrls, setAiThumbUrls] = useState<Record<string, string>>({});
+  const [streamCandidates, setStreamCandidates] = useState<Candidate[] | null>(null);
+  const [hasCanvasFrame, setHasCanvasFrame] = useState(false);
+  const [streamFps, setStreamFps] = useState<number | null>(null);
   const [pitch, setPitch] = useState(-15);
   const [yaw, setYaw] = useState(0);
 
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const isRunning = studioStatus?.lifecycle === "running";
   const has3d = Boolean(studioStatus?.spectator_url);
   const aiViews = events
     .filter((e) => e.kind === "ai_view" && typeof e.view_id === "string")
@@ -38,31 +43,73 @@ export function VisualStage({
     .reverse();
 
   useEffect(() => {
-    if (mode !== "3d" || !has3d || !token) return;
-    let active = true;
-    let currentUrl = "";
-    const poll = async () => {
-      try {
-        const nextUrl = await horusApi.getSpectatorBlobUrl(token, preset, showTof);
-        if (!active) {
-          URL.revokeObjectURL(nextUrl);
-          return;
-        }
-        if (currentUrl) URL.revokeObjectURL(currentUrl);
-        currentUrl = nextUrl;
-        setSpectatorUrl(nextUrl);
-      } catch {
-        // transient frame error
+    setHasCanvasFrame(false);
+    setStreamFps(null);
+    if (mode !== "camera") {
+      setStreamCandidates(null);
+    }
+    if (!token || !isRunning) return;
+
+    let streamUrl = "";
+    if (mode === "3d" && has3d) {
+      streamUrl = `/api/studio/spectator-stream?preset=${encodeURIComponent(preset)}&tof=${showTof ? 1 : 0}&fps=25`;
+    } else if (mode === "camera") {
+      streamUrl = "/api/frame/stream?fps=15";
+    } else {
+      return;
+    }
+
+    let frameCounter = 0;
+    let windowStart = performance.now();
+    let lastMetaUpdate = 0;
+
+    const drawBitmap = (bitmap: ImageBitmap, meta: MjpegMeta | null) => {
+      const canvas = canvasRef.current;
+      if (!canvas) {
+        bitmap.close();
+        return;
+      }
+      if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+      }
+      const ctx = canvas.getContext("2d", { alpha: false });
+      if (ctx) {
+        ctx.drawImage(bitmap, 0, 0);
+      }
+      bitmap.close();
+      setHasCanvasFrame(true);
+
+      const now = performance.now();
+      frameCounter += 1;
+      const elapsed = now - windowStart;
+      if (elapsed >= 1000) {
+        setStreamFps(Math.round((frameCounter * 1000) / elapsed));
+        frameCounter = 0;
+        windowStart = now;
+      }
+
+      if (meta?.candidates && now - lastMetaUpdate >= 180) {
+        lastMetaUpdate = now;
+        setStreamCandidates(
+          meta.candidates.map((c) => ({
+            id: c.id,
+            label: c.label || c.class_name || "object",
+            confidence: c.confidence,
+            distance_m: c.distance_m,
+            bearing_deg: c.bearing_deg,
+          })),
+        );
       }
     };
-    void poll();
-    const timer = window.setInterval(() => void poll(), 400);
+
+    const stopStream = streamMjpeg(streamUrl, token, {
+      onFrame: drawBitmap,
+    });
     return () => {
-      active = false;
-      window.clearInterval(timer);
-      if (currentUrl) URL.revokeObjectURL(currentUrl);
+      stopStream();
     };
-  }, [mode, has3d, token, preset, showTof]);
+  }, [mode, isRunning, has3d, token, preset, showTof]);
 
   useEffect(() => {
     if (mode !== "aiviews" || !token) return;
@@ -91,10 +138,21 @@ export function VisualStage({
     onManualMove("look", { pitch_deg: np, yaw_deg: ny });
   };
 
+  const activeCandidates = streamCandidates ?? frame?.candidates ?? [];
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="relative flex min-h-[320px] flex-1 items-center justify-center overflow-hidden bg-canvas p-2 lg:min-h-0">
+        {(mode === "camera" || (mode === "3d" && has3d)) && (
+          <canvas
+            ref={canvasRef}
+            aria-label={mode === "3d" ? "3D World Spectator Camera" : "Drone camera"}
+            className={`h-full w-full rounded-[6px] object-contain ${hasCanvasFrame ? "block" : "hidden"}`}
+          />
+        )}
+
         {mode === "camera" &&
+          !hasCanvasFrame &&
           (frame?.image_base64 ? (
             <img
               src={`data:${frame.mime_type || "image/jpeg"};base64,${frame.image_base64}`}
@@ -108,18 +166,11 @@ export function VisualStage({
             </div>
           ))}
 
-        {mode === "3d" &&
-          (spectatorUrl ? (
-            <img
-              src={spectatorUrl}
-              alt="3D World Spectator Camera"
-              className="h-full w-full rounded-[6px] object-contain"
-            />
-          ) : (
-            <span className="text-[14px] text-muted">
-              {has3d ? "Loading 3D spectator view…" : "3D spectator view is only available in Built-in 3D mode."}
-            </span>
-          ))}
+        {mode === "3d" && !hasCanvasFrame && (
+          <span className="text-[14px] text-muted">
+            {has3d ? "Connecting 3D spectator stream…" : "3D spectator view is only available in Built-in 3D mode."}
+          </span>
+        )}
 
         {mode === "aiviews" &&
           (aiViews.length > 0 && aiThumbUrls[String(aiViews[0].view_id)] ? (
@@ -131,6 +182,12 @@ export function VisualStage({
           ) : (
             <span className="text-[14px] text-muted">No camera frame has been sent to the AI model yet.</span>
           ))}
+
+        {(mode === "camera" || mode === "3d") && streamFps !== null && hasCanvasFrame && (
+          <div className="pointer-events-none absolute top-4 left-4 rounded-[6px] border border-border bg-surface/90 px-2 py-0.5 font-mono text-[11px] font-medium text-secondary tabular-nums">
+            {streamFps} fps
+          </div>
+        )}
 
         {mode === "3d" && has3d && (
           <div className="absolute top-4 right-4 flex items-center gap-1.5 rounded-[8px] border border-border bg-surface p-1">
@@ -151,10 +208,10 @@ export function VisualStage({
         )}
       </div>
 
-      {mode === "camera" && (frame?.candidates?.length ?? 0) > 0 && (
+      {mode === "camera" && activeCandidates.length > 0 && (
         <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border bg-surface px-4 py-2.5">
           <span className="text-[12.5px] font-medium text-muted">Detected:</span>
-          {frame!.candidates!.map((c) => (
+          {activeCandidates.map((c) => (
             <StatusBadge key={c.id} tone="ok" className="tabular-nums">
               #{c.id} {c.label}
               {typeof c.distance_m === "number" ? ` · ${c.distance_m.toFixed(1)}m` : ""}

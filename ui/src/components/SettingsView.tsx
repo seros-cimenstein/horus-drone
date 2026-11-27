@@ -144,7 +144,7 @@ export function SettingsView({
         setCommandTtl(s.command_ttl_s ?? 30);
         setRthDelay(s.link_loss_rth_delay_s ?? 30);
         setGimbalPitch(s.default_gimbal_pitch_deg ?? -15);
-        setMaxFps(s.camera_max_fps ?? 5);
+        setMaxFps(s.camera_max_fps ?? 15);
         setOpenVocabHz(s.open_vocab_hz ?? 0.5);
         setRenderWidthPx(s.perception_render_width_px ?? 640);
         setPointComp(s.perception_point_compensation ?? true);

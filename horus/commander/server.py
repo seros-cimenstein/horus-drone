@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import gzip
 import hashlib
 import hmac
 import json
 import os
 import signal
+import time
 from collections import deque
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -156,6 +158,7 @@ class CommanderASGI:
             "/events": ("GET", self._stream_events),
             "/api/state": ("GET", self._display_state),
             "/api/frame": ("GET", self._display_frame),
+            "/api/frame/stream": ("GET", self._display_frame_stream),
             "/api/map/index": ("GET", self._display_map_index),
             "/api/map/tile": ("GET", self._display_map_tile),
             "/api/map/live": ("GET", self._display_live_map),
@@ -187,6 +190,7 @@ class CommanderASGI:
                 "/api/studio/session/stop": ("POST", self._studio_session_stop),
                 "/api/studio/session/restart": ("POST", self._studio_session_restart),
                 "/api/studio/spectator-frame": ("GET", self._studio_spectator_frame),
+                "/api/studio/spectator-stream": ("GET", self._studio_spectator_stream),
                 "/api/studio/settings": ("GET|PUT", self._studio_settings),
                 "/api/studio/ai/test": ("POST", self._studio_ai_test),
                 "/api/studio/link-shaper": ("POST", self._studio_link_shaper),
@@ -493,6 +497,85 @@ class CommanderASGI:
     async def _display_frame(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
         await self._display_reply(send, lambda display: display.frame())
 
+    async def _display_frame_stream(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        if self.display is None:
+            await _send_json(send, 503, {"error": "display reads are not configured"})
+            return
+        query = parse_qs(scope.get("query_string", b"").decode("ascii", errors="replace"))
+        try:
+            fps = max(1, min(30, int((query.get("fps") or ["15"])[0])))
+        except ValueError:
+            fps = 15
+        period = 1.0 / fps
+        try:
+            first_payload = await self.display.frame()
+        except DisplayUnavailable as exc:
+            await _send_json(send, 503, {"error": redact_secret(str(exc), self._token)})
+            return
+
+        disconnect = asyncio.create_task(_wait_for_disconnect(receive))
+        try:
+            await send({
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    (b"content-type", b"multipart/x-mixed-replace; boundary=horusframe"),
+                    (b"cache-control", b"no-store"),
+                    (b"x-accel-buffering", b"no"),
+                ],
+            })
+            last_frame_id: Any = None
+            last_sent_at = 0.0
+            payload: dict[str, Any] | None = first_payload
+            while not disconnect.done() and not self.event_hub.closed:
+                started = time.monotonic()
+                if payload is None:
+                    try:
+                        payload = await self.display.frame()
+                    except DisplayUnavailable:
+                        break
+                frame_id = payload.get("frame_id")
+                now = time.monotonic()
+                if frame_id is None or frame_id != last_frame_id or (now - last_sent_at) >= 1.0:
+                    img_b64 = payload.get("image_base64")
+                    if isinstance(img_b64, str) and img_b64:
+                        jpeg = base64.b64decode(img_b64)
+                        meta = json.dumps(
+                            {
+                                "frame_id": frame_id,
+                                "candidates": payload.get("candidates") or payload.get("candidate_table") or [],
+                                "width": payload.get("width"),
+                                "height": payload.get("height"),
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        part = (
+                            b"--horusframe\r\n"
+                            b"Content-Type: image/jpeg\r\n"
+                            + f"Content-Length: {len(jpeg)}\r\nX-Horus-Meta: {meta}\r\n\r\n".encode("utf-8")
+                            + jpeg
+                            + b"\r\n"
+                        )
+                        await send({"type": "http.response.body", "body": part, "more_body": True})
+                        last_frame_id = frame_id
+                        last_sent_at = now
+                payload = None
+                remaining = period - (time.monotonic() - started)
+                if remaining > 0:
+                    try:
+                        await asyncio.wait_for(asyncio.shield(disconnect), timeout=remaining)
+                    except asyncio.TimeoutError:
+                        pass
+            if not disconnect.done():
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+        except asyncio.CancelledError:
+            return
+        finally:
+            if not disconnect.done():
+                disconnect.cancel()
+            await asyncio.gather(disconnect, return_exceptions=True)
+
     async def _display_live_map(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
         await self._display_reply(send, lambda display: display.live_map(), gzip_ok=_accepts_gzip(scope))
 
@@ -642,6 +725,50 @@ class CommanderASGI:
             ],
         })
         await send({"type": "http.response.body", "body": jpeg})
+
+    async def _studio_spectator_stream(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
+        query = parse_qs(scope.get("query_string", b"").decode("ascii", errors="replace"))
+        preset = (query.get("preset") or ["follow"])[0]
+        show_tof = (query.get("tof") or ["1"])[0] not in {"0", "false", "no"}
+        try:
+            fps = max(1, min(30, int((query.get("fps") or ["25"])[0])))
+        except ValueError:
+            fps = 25
+        if not self.studio.status().get("spectator_url"):
+            await _send_json(send, 503, {"error": "No 3D spectator stream is active"})
+            return
+
+        disconnect = asyncio.create_task(_wait_for_disconnect(receive))
+        stream_gen = self.studio.stream_spectator_mjpeg(preset=preset, show_tof=show_tof, fps=fps)
+        try:
+            await send({
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    (b"content-type", b"multipart/x-mixed-replace; boundary=horusframe"),
+                    (b"cache-control", b"no-store"),
+                    (b"x-accel-buffering", b"no"),
+                ],
+            })
+            async for chunk in stream_gen:
+                if disconnect.done() or self.event_hub.closed:
+                    break
+                await send({"type": "http.response.body", "body": chunk, "more_body": True})
+            if not disconnect.done():
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            if not disconnect.done():
+                try:
+                    await send({"type": "http.response.body", "body": b"", "more_body": False})
+                except Exception:
+                    pass
+        finally:
+            await stream_gen.aclose()
+            if not disconnect.done():
+                disconnect.cancel()
+            await asyncio.gather(disconnect, return_exceptions=True)
 
     async def _studio_settings(self, scope: Mapping[str, Any], receive: Any, send: Any) -> None:
         if scope.get("method", "GET").upper() == "GET":

@@ -12,6 +12,53 @@ const SCENE_TAG: Record<string, { variant: SceneVisualVariant; tag: string }> = 
   procedural: { variant: "procedural", tag: "Seeded" },
 };
 
+export const DEFAULT_BUILTIN_SCENES: SceneInfo[] = [
+  {
+    name: "indoor_sar",
+    title: "Indoor SAR Room",
+    subtitle: "Operations facility with terrazzo floor, sunlit windows, corridor, furniture, AprilTag pad, and SAR subjects",
+    indoor: true,
+    prompts: [
+      "Take off and find the person in the red shirt, then hover 2 m away.",
+      "Fly down the north corridor and report everyone you see.",
+      "Test wall avoidance: try flying 8 m north toward the wall.",
+      "Return home and land on the AprilTag pad.",
+    ],
+  },
+  {
+    name: "forest_sar",
+    title: "Outdoor Forest",
+    subtitle: "Alpine woodland clearing with conifers, deciduous trees, boulders, campsite, trail, and hikers",
+    indoor: false,
+    prompts: [
+      "Take off to 4 m and search along the trail for hikers.",
+      "Find the hiker near the clearing and report their position.",
+      "Return home and land on the AprilTag pad.",
+    ],
+  },
+  {
+    name: "urban_plaza",
+    title: "Urban Plaza",
+    subtitle: "City square with glass & brick high-rises, water fountain, vehicles, streetlights, and pedestrians",
+    indoor: false,
+    prompts: [
+      "Find Central Plaza on the map and fly there at 6 m altitude.",
+      "Search the plaza for pedestrians and mark any person you spot.",
+      "Return home and land on the AprilTag pad.",
+    ],
+  },
+  {
+    name: "procedural",
+    title: "Procedural World",
+    subtitle: "Seeded countryside valley with ranger shelter, campsite, rock outcrops, mixed forest, and hikers",
+    indoor: false,
+    prompts: [
+      "Take off to 5 m, inspect nearby landmarks, and look for hikers.",
+      "Return home and land on the AprilTag pad.",
+    ],
+  },
+];
+
 interface SceneCardProps {
   scene: SceneInfo;
   isCurrent: boolean;
@@ -100,9 +147,10 @@ export function BuiltinScenesGrid({
   const [seed, setSeed] = useState(42);
   const [expanded, setExpanded] = useState(false);
 
-  const hasMore = typeof initialLimit === "number" && scenes.length > initialLimit;
-  const visibleScenes = hasMore && !expanded ? scenes.slice(0, initialLimit) : scenes;
-  const hiddenCount = hasMore ? scenes.length - initialLimit : 0;
+  const effectiveScenes = scenes.length > 0 ? scenes : DEFAULT_BUILTIN_SCENES;
+  const hasMore = typeof initialLimit === "number" && effectiveScenes.length > initialLimit;
+  const visibleScenes = hasMore && !expanded ? effectiveScenes.slice(0, initialLimit) : effectiveScenes;
+  const hiddenCount = hasMore ? effectiveScenes.length - initialLimit : 0;
 
   return (
     <div className="flex flex-col gap-4">
