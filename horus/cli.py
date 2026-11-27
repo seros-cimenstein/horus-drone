@@ -19,7 +19,7 @@ import time
 from typing import Sequence
 import webbrowser
 
-from horus.bootstrap import check_assets, doctor_report, ensure_assets
+from horus.bootstrap import assets_ready, check_assets, doctor_report, ensure_assets
 from horus.commander.server import DEFAULT_HOST, DEFAULT_PORT, _GRACEFUL_SHUTDOWN_S, control_app_url, create_app
 from horus.logging import (
     _RICH_AVAILABLE,
@@ -252,7 +252,7 @@ def _run_setup(args: argparse.Namespace) -> int:
     )
     if args.check:
         statuses = check_assets()
-        ok = all(st.available for st in statuses.values())
+        ok = assets_ready(statuses)
         if _RICH_AVAILABLE and _is_interactive_tty(sys.stdout):
             from rich.table import Table
 
@@ -263,13 +263,18 @@ def _run_setup(args: argparse.Namespace) -> int:
                 table.add_column("Status")
                 table.add_column("Detail")
                 for name, st in statuses.items():
-                    badge = "[horus.ok][OK][/]" if st.available else "[horus.err][MISSING][/]"
+                    if st.available:
+                        badge = "[horus.ok][OK][/]"
+                    elif st.optional:
+                        badge = "[horus.muted][OPTIONAL][/]"
+                    else:
+                        badge = "[horus.err][MISSING][/]"
                     table.add_row(name, badge, st.detail)
                 console.print(table)
                 return 0 if ok else 1
 
         for name, st in statuses.items():
-            mark = "OK" if st.available else "MISSING"
+            mark = "OK" if st.available else ("OPTIONAL" if st.optional else "MISSING")
             print(f"[{mark}] {name}: {st.detail}")
         return 0 if ok else 1
 
@@ -289,58 +294,66 @@ def _run_setup(args: argparse.Namespace) -> int:
         if console is not None:
             console.print("[horus.brand]Checking/downloading HORUS standalone assets...[/]")
             tasks_by_name: dict[str, TaskID] = {}
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[bold]{task.fields[asset]}[/]"),
-                BarColumn(),
-                DownloadColumn(),
-                TransferSpeedColumn(),
-                TimeRemainingColumn(),
-                TextColumn("{task.fields[state]}"),
-                console=console,
-            ) as progress_bar:
+            try:
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[bold]{task.fields[asset]}[/]"),
+                    BarColumn(),
+                    DownloadColumn(),
+                    TransferSpeedColumn(),
+                    TimeRemainingColumn(),
+                    TextColumn("{task.fields[state]}"),
+                    console=console,
+                ) as progress_bar:
 
-                def rich_progress(name: str, done: int, total: int | None, state: str) -> None:
-                    task_id = tasks_by_name.get(name)
-                    if task_id is None:
-                        task_id = progress_bar.add_task(
-                            name,
-                            total=total or 1,
-                            completed=done,
-                            asset=name,
-                            state=state,
-                        )
-                        tasks_by_name[name] = task_id
-                    else:
-                        progress_bar.update(
-                            task_id,
-                            total=total if total is not None else max(done, 1),
-                            completed=done,
-                            state=state,
-                        )
+                    def rich_progress(name: str, done: int, total: int | None, state: str) -> None:
+                        task_id = tasks_by_name.get(name)
+                        if task_id is None:
+                            task_id = progress_bar.add_task(
+                                name,
+                                total=total or 1,
+                                completed=done,
+                                asset=name,
+                                state=state,
+                            )
+                            tasks_by_name[name] = task_id
+                        else:
+                            progress_bar.update(
+                                task_id,
+                                total=total if total is not None else max(done, 1),
+                                completed=done,
+                                state=state,
+                            )
 
-                statuses = ensure_assets(progress_cb=rich_progress)
+                    statuses = ensure_assets(progress_cb=rich_progress)
+            except Exception as exc:
+                render_error("HORUS asset download failed", exc)
+                return 1
             for name, st in statuses.items():
-                style = "horus.ok" if st.available else "horus.err"
+                style = "horus.ok" if st.available else ("horus.muted" if st.optional else "horus.err")
                 console.print(f"  [{style}]{name}[/]: {st.detail}")
             if args.with_grounder:
                 console.print(
                     "[horus.muted]Optional local Grounder setup is available via "
                     "`scripts/setup_grounder_venv.sh`.[/]"
                 )
-            return 0 if all(st.available for st in statuses.values()) else 1
+            return 0 if assets_ready(statuses) else 1
 
     def progress(name: str, done: int, total: int | None, state: str) -> None:
-        if state in {"verifying", "ready", "error"}:
+        if state in {"verifying", "ready", "optional", "error"}:
             print(f"  {name}: {state} ({done} bytes)", flush=True)
 
     print("Checking/downloading HORUS standalone assets...", flush=True)
-    statuses = ensure_assets(progress_cb=progress)
+    try:
+        statuses = ensure_assets(progress_cb=progress)
+    except Exception as exc:
+        print(f"Asset download failed: {exc}", file=sys.stderr)
+        return 1
     for name, st in statuses.items():
         print(f"  {name}: {st.detail}")
     if args.with_grounder:
         print("Optional local Grounder setup is available via `scripts/setup_grounder_venv.sh`.")
-    return 0 if all(st.available for st in statuses.values()) else 1
+    return 0 if assets_ready(statuses) else 1
 
 
 def _run_doctor(args: argparse.Namespace) -> int:

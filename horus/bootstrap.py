@@ -12,7 +12,7 @@ import shutil
 import stat
 import sys
 import tarfile
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 import zipfile
 
 import httpx
@@ -36,6 +36,7 @@ class AssetSpec:
     kind: str  # "sitl_archive" | "model"
     binary_relpath: str | None = None
     default_parm_relpath: str | None = None
+    optional: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +49,7 @@ class AssetStatus:
     source: str  # "env" | "repo" | "cache" | "missing"
     sha256_verified: bool
     detail: str
+    optional: bool = False
 
 
 def platform_key() -> str:
@@ -132,6 +134,7 @@ def asset_manifest(key: str | None = None) -> tuple[AssetSpec, ...]:
             url=f"{base}/osnet_x0_25_msmt17.onnx",
             sha256=None,
             kind="model",
+            optional=True,
         ),
     )
 
@@ -222,23 +225,73 @@ def _resolve_model(cache_dir: Path, spec: AssetSpec, env_var: str) -> AssetStatu
         candidate = Path(env_path).expanduser()
         if candidate.is_file():
             ok = verify_sha256(candidate, spec.sha256)
-            return AssetStatus(spec.name, ok, candidate if ok else None, "env", ok, f"{env_var}={candidate}")
-        return AssetStatus(spec.name, False, None, "env", False, f"{env_var} missing: {candidate}")
+            return AssetStatus(
+                spec.name,
+                ok,
+                candidate if ok else None,
+                "env",
+                ok,
+                f"{env_var}={candidate}",
+                optional=spec.optional,
+            )
+        return AssetStatus(
+            spec.name,
+            False,
+            None,
+            "env",
+            False,
+            f"{env_var} missing: {candidate}",
+            optional=spec.optional,
+        )
 
     repo_candidate = _repo_models_dir() / spec.filename
     if repo_candidate.is_file():
         ok = verify_sha256(repo_candidate, spec.sha256)
         if ok:
-            return AssetStatus(spec.name, True, repo_candidate, "repo", True, f"repo {repo_candidate}")
+            return AssetStatus(
+                spec.name,
+                True,
+                repo_candidate,
+                "repo",
+                True,
+                f"repo {repo_candidate}",
+                optional=spec.optional,
+            )
 
     cache_candidate = cache_dir / "models" / spec.filename
     if cache_candidate.is_file():
         ok = verify_sha256(cache_candidate, spec.sha256)
         if ok:
-            return AssetStatus(spec.name, True, cache_candidate, "cache", True, f"cached {cache_candidate}")
-        return AssetStatus(spec.name, False, None, "cache", False, f"digest mismatch at {cache_candidate}")
+            return AssetStatus(
+                spec.name,
+                True,
+                cache_candidate,
+                "cache",
+                True,
+                f"cached {cache_candidate}",
+                optional=spec.optional,
+            )
+        return AssetStatus(
+            spec.name,
+            False,
+            None,
+            "cache",
+            False,
+            f"digest mismatch at {cache_candidate}",
+            optional=spec.optional,
+        )
 
-    return AssetStatus(spec.name, False, None, "missing", False, f"missing {spec.filename}")
+    detail = (
+        f"optional — {spec.filename} not installed (using color_histogram fallback)"
+        if spec.optional
+        else f"missing {spec.filename}"
+    )
+    return AssetStatus(spec.name, False, None, "missing", False, detail, optional=spec.optional)
+
+
+def assets_ready(statuses: Mapping[str, AssetStatus]) -> bool:
+    """Return True when all required assets are available (optional assets may be absent)."""
+    return all(st.available or st.optional for st in statuses.values())
 
 
 def check_assets(cache_dir: Path | None = None) -> dict[str, AssetStatus]:
@@ -343,6 +396,10 @@ def ensure_assets(
         base_url = os.environ.get("HORUS_ASSETS_BASE_URL", ASSETS_BASE_URL)
         remote_sums = _fetch_sha256_sums(http, base_url)
         for spec in needed:
+            if spec.optional and remote_sums and spec.filename not in remote_sums:
+                if progress_cb is not None:
+                    progress_cb(spec.name, 0, 0, "optional")
+                continue
             expected_sha = spec.sha256 or remote_sums.get(spec.filename)
             if spec.kind == "sitl_archive":
                 archive_path = root / "downloads" / spec.filename
@@ -363,14 +420,21 @@ def ensure_assets(
                     bin_path.chmod(bin_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
             else:
                 model_path = root / "models" / spec.filename
-                download_file_atomic(
-                    http,
-                    spec.url,
-                    model_path,
-                    asset_name=spec.name,
-                    expected_sha256=expected_sha,
-                    progress_cb=progress_cb,
-                )
+                try:
+                    download_file_atomic(
+                        http,
+                        spec.url,
+                        model_path,
+                        asset_name=spec.name,
+                        expected_sha256=expected_sha,
+                        progress_cb=progress_cb,
+                    )
+                except httpx.HTTPStatusError as exc:
+                    if spec.optional and exc.response.status_code == 404:
+                        if progress_cb is not None:
+                            progress_cb(spec.name, 0, 0, "optional")
+                        continue
+                    raise
     finally:
         if owns_client:
             http.close()
@@ -459,6 +523,7 @@ def doctor_report(cache_dir: Path | None = None) -> dict[str, Any]:
         "assets": {
             name: {
                 "available": st.available,
+                "optional": st.optional,
                 "path": str(st.path) if st.path else None,
                 "source": st.source,
                 "detail": st.detail,

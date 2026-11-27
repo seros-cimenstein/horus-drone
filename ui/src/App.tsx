@@ -4,6 +4,7 @@ import {
   Box,
   Compass,
   FlaskConical,
+  Loader2,
   Monitor,
   Moon,
   PanelLeft,
@@ -28,6 +29,7 @@ import { Button, StopSessionButton } from "./components/common/Button";
 import { StatusBanner } from "./components/common/StatusBanner";
 import { StatusDot } from "./components/common/StatusDot";
 import { Input, Textarea } from "./components/common/Surface";
+import { useToast } from "./components/common/Toast";
 import { BottomTabBar } from "./components/layout/BottomTabBar";
 import type {
   CameraFrame,
@@ -95,9 +97,16 @@ export function App() {
     return "dark";
   });
   const [bootstrapping, setBootstrapping] = useState(false);
+  const [pendingEmergency, setPendingEmergency] = useState<"hold" | "land" | "rth" | null>(null);
+  const [stoppingSession, setStoppingSession] = useState(false);
+  const [launchingScene, setLaunchingScene] = useState<string | null>(null);
+  const [sendingMission, setSendingMission] = useState(false);
+  const [resettingMission, setResettingMission] = useState(false);
+  const [releasingLock, setReleasingLock] = useState(false);
   const [notice, setNotice] = useState("");
   const [dismissedError, setDismissedError] = useState(false);
   const frameBackoffUntilRef = useRef(0);
+  const toast = useToast();
 
   const isPhone = new URLSearchParams(window.location.search).get("view") === "phone";
 
@@ -122,9 +131,11 @@ export function App() {
     horusApi.getCapabilities(token, false).then((r) => setCaps(r.capabilities)).catch(() => {});
   };
 
-  const refreshCaps = (force: boolean) => {
-    if (!token) return;
-    horusApi.getCapabilities(token, force).then((r) => setCaps(r.capabilities)).catch(() => {});
+  const refreshCaps = async (force: boolean): Promise<CapabilityItem[]> => {
+    if (!token) return [];
+    const r = await horusApi.getCapabilities(token, force);
+    setCaps(r.capabilities);
+    return r.capabilities;
   };
 
   useEffect(() => {
@@ -215,11 +226,18 @@ export function App() {
   }
 
   const sendEmergency = async (action: "hold" | "land" | "rth") => {
+    const label = action === "rth" ? "HOME" : action.toUpperCase();
+    setPendingEmergency(action);
     try {
       await horusApi.sendEmergency(token, action);
-      setNotice(`Emergency ${action.toUpperCase()} sent`);
+      setNotice(`Emergency ${label} sent`);
+      toast.warning(`Emergency ${label} sent`, "AI flight tools are locked until your next mission or manual release.");
     } catch (e: unknown) {
-      setNotice(`Emergency failed: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      setNotice(`Emergency failed: ${msg}`);
+      toast.error(`Emergency ${label} failed`, msg);
+    } finally {
+      setPendingEmergency(null);
     }
   };
 
@@ -227,54 +245,110 @@ export function App() {
     if (!studioStatus?.ai_status.configured) {
       setNav("ai");
       setNotice("Choose an AI provider first, or fly manually under Manual & Safety.");
+      toast.warning("AI provider not configured", "Choose an AI provider or fly manually under Manual & Safety.");
       return;
     }
+    setSendingMission(true);
     try {
       await horusApi.sendTask(token, text);
       setMissionText("");
+      toast.success("Mission sent", text.length > 72 ? `${text.slice(0, 72)}…` : text);
     } catch (e: unknown) {
-      setNotice(`Mission error: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      setNotice(`Mission error: ${msg}`);
+      toast.error("Mission failed", msg);
+    } finally {
+      setSendingMission(false);
     }
   };
 
-  const manualMove = async (action: string, params: Record<string, unknown>) => {
+  const handleResetMission = async () => {
+    setResettingMission(true);
+    try {
+      await horusApi.resetMission(token);
+      toast.info("Mission reset", "Started a fresh mission thread.");
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setNotice(`Reset failed: ${msg}`);
+      toast.error("Mission reset failed", msg);
+    } finally {
+      setResettingMission(false);
+    }
+  };
+
+  const manualMove = async (action: string, params: Record<string, unknown>): Promise<boolean> => {
     if (studioStatus?.lifecycle !== "running") {
       setNotice("Start a session before sending flight or gimbal commands.");
-      return;
+      toast.warning("No active session", "Start a session before sending flight or gimbal commands.");
+      return false;
     }
     try {
       await horusApi.manualMove(token, action, params);
+      toast.info(`Command sent: ${action}`);
+      return true;
     } catch (e: unknown) {
-      setNotice(`Manual command failed: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      setNotice(`Manual command failed: ${msg}`);
+      toast.error(`Command "${action}" failed`, msg);
+      return false;
     }
   };
 
   const handleBootstrap = async () => {
     setBootstrapping(true);
+    setNotice("Downloading SITL binary & ONNX models…");
+    toast.info("Downloading assets", "Fetching ArduCopter SITL and perception models…");
     try {
-      await horusApi.bootstrapAssets(token);
+      const res = await horusApi.bootstrapAssets(token);
       refreshStudio();
+      setNotice("");
+      if (res.ready) {
+        toast.success("SITL & models ready", "Required standalone assets are verified.");
+      } else {
+        toast.warning("Download finished with warnings", "Check System & Logs for missing assets.");
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setNotice(`Asset download failed: ${msg}`);
+      toast.error("Asset download failed", msg);
     } finally {
       setBootstrapping(false);
     }
   };
 
   const handleStartSession = async (payload: Record<string, unknown>) => {
+    const label = String(payload.scene || payload.mode || "session");
     setDismissedError(false);
-    setNotice(`Starting ${String(payload.scene || payload.mode || "session")}…`);
+    setLaunchingScene(label);
+    setNotice(`Starting ${label}…`);
     try {
       const next = await horusApi.startSession(token, payload);
       setStudioStatus(next);
       setNotice("");
       setNav("flight");
+      toast.success("Session started", next.target_label || label);
     } catch (e: unknown) {
-      setNotice(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      setNotice(msg);
+      toast.error(`Failed to start ${label}`, msg);
       refreshStudio();
+    } finally {
+      setLaunchingScene(null);
     }
   };
 
   const handleStopSession = async () => {
-    setStudioStatus(await horusApi.stopSession(token));
+    setStoppingSession(true);
+    try {
+      setStudioStatus(await horusApi.stopSession(token));
+      toast.info("Session stopped");
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setNotice(`Failed to stop session: ${msg}`);
+      toast.error("Failed to stop session", msg);
+    } finally {
+      setStoppingSession(false);
+    }
   };
 
   if (isPhone) {
@@ -503,13 +577,34 @@ export function App() {
           </div>
 
           <div className="flex shrink-0 items-center gap-1.5 md:gap-2" role="group" aria-label="Emergency controls">
-            <Button size="sm" variant="danger" disabled={!running} onClick={() => void sendEmergency("hold")}>
+            <Button
+              size="sm"
+              variant="danger"
+              disabled={!running}
+              loading={pendingEmergency === "hold"}
+              title={running ? "Immediately hover in place and lock AI flight tools" : "Start a session to enable emergency controls"}
+              onClick={() => void sendEmergency("hold")}
+            >
               HOLD
             </Button>
-            <Button size="sm" variant="danger" disabled={!running} onClick={() => void sendEmergency("land")}>
+            <Button
+              size="sm"
+              variant="danger"
+              disabled={!running}
+              loading={pendingEmergency === "land"}
+              title={running ? "Immediately descend and land in place" : "Start a session to enable emergency controls"}
+              onClick={() => void sendEmergency("land")}
+            >
               LAND
             </Button>
-            <Button size="sm" variant="danger" disabled={!running} onClick={() => void sendEmergency("rth")}>
+            <Button
+              size="sm"
+              variant="danger"
+              disabled={!running}
+              loading={pendingEmergency === "rth"}
+              title={running ? "Immediately return home and land" : "Start a session to enable emergency controls"}
+              onClick={() => void sendEmergency("rth")}
+            >
               HOME
             </Button>
           </div>
@@ -558,8 +653,11 @@ export function App() {
                 title="Operator lock active"
                 detail="AI flight tools are paused until the next mission or manual release."
                 action={{
-                  label: "Release Lock",
-                  onClick: () => void manualMove("take_off", { altitude_m: 2.0 }),
+                  label: releasingLock ? "Releasing…" : "Release Lock",
+                  onClick: () => {
+                    setReleasingLock(true);
+                    void manualMove("take_off", { altitude_m: 2.0 }).finally(() => setReleasingLock(false));
+                  },
                 }}
               />
             )}
@@ -595,22 +693,34 @@ export function App() {
                 </div>
 
                 <div className="divide-y divide-border overflow-hidden rounded-[10px] border border-border bg-surface">
-                  {(studioStatus?.scenes || []).map((sc) => (
-                    <button
-                      key={sc.name}
-                      type="button"
-                      onClick={() => void handleStartSession({ mode: "builtin_sim", scene: sc.name, seed: 42 })}
-                      className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left transition-colors hover:bg-hover cursor-pointer"
-                    >
-                      <div className="min-w-0">
-                        <div className="text-[15px] font-medium text-primary">{sc.title}</div>
-                        <div className="mt-0.5 text-[13.5px] text-secondary">{sc.subtitle}</div>
-                      </div>
-                      <span className="inline-flex items-center gap-1.5 text-[13.5px] font-medium text-primary">
-                        Launch <ArrowRight size={15} />
-                      </span>
-                    </button>
-                  ))}
+                  {(studioStatus?.scenes || []).map((sc) => {
+                    const isLaunching = launchingScene === sc.name;
+                    return (
+                      <button
+                        key={sc.name}
+                        type="button"
+                        disabled={Boolean(launchingScene)}
+                        onClick={() => void handleStartSession({ mode: "builtin_sim", scene: sc.name, seed: 42 })}
+                        className="flex w-full select-none items-center justify-between gap-4 px-5 py-4 text-left transition-colors duration-75 hover:bg-hover active:bg-border/40 disabled:pointer-events-none disabled:opacity-60 cursor-pointer"
+                      >
+                        <div className="min-w-0">
+                          <div className="text-[15px] font-medium text-primary">{sc.title}</div>
+                          <div className="mt-0.5 text-[13.5px] text-secondary">{sc.subtitle}</div>
+                        </div>
+                        <span className="inline-flex items-center gap-1.5 text-[13.5px] font-medium text-primary">
+                          {isLaunching ? (
+                            <>
+                              <Loader2 size={15} className="animate-spin" /> Starting…
+                            </>
+                          ) : (
+                            <>
+                              Launch <ArrowRight size={15} />
+                            </>
+                          )}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2.5">
@@ -653,7 +763,13 @@ export function App() {
                         </button>
                       ))}
                     </div>
-                    {running && <StopSessionButton className="shrink-0" onClick={() => void handleStopSession()} />}
+                    {running && (
+                      <StopSessionButton
+                        className="shrink-0"
+                        loading={stoppingSession}
+                        onClick={() => void handleStopSession()}
+                      />
+                    )}
                   </div>
 
                   {stageTab === "map" ? (
@@ -689,8 +805,13 @@ export function App() {
                     <span className="text-[14px] font-semibold text-primary">Mission</span>
                     <div className="flex items-center gap-2.5">
                       <span className="font-mono text-[12px] text-muted">{events.length} events</span>
-                      <Button size="sm" variant="ghost" onClick={() => void horusApi.resetMission(token)}>
-                        <RotateCcw size={13} /> Reset
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        loading={resettingMission}
+                        onClick={() => void handleResetMission()}
+                      >
+                        {!resettingMission && <RotateCcw size={13} />} {resettingMission ? "Resetting…" : "Reset"}
                       </Button>
                     </div>
                   </div>
@@ -744,7 +865,7 @@ export function App() {
                           key={prompt}
                           type="button"
                           onClick={() => void sendMission(prompt)}
-                          className="rounded-[6px] border border-border bg-surface px-2.5 py-1.5 text-left text-[12.5px] text-secondary hover:border-border-strong hover:text-primary cursor-pointer"
+                          className="select-none rounded-[6px] border border-border bg-surface px-2.5 py-1.5 text-left text-[12.5px] text-secondary transition-colors duration-75 hover:border-border-strong hover:text-primary active:bg-hover cursor-pointer"
                         >
                           {prompt}
                         </button>
@@ -774,9 +895,10 @@ export function App() {
                       <Button
                         variant="primary"
                         disabled={!missionText.trim() || !running}
+                        loading={sendingMission}
                         onClick={() => void sendMission(missionText.trim())}
                       >
-                        <Send size={14} /> Send Mission
+                        {!sendingMission && <Send size={14} />} {sendingMission ? "Sending…" : "Send Mission"}
                       </Button>
                     </div>
                   </div>
@@ -799,6 +921,7 @@ export function App() {
               token={token}
               studioStatus={studioStatus}
               bootstrapping={bootstrapping}
+              stoppingSession={stoppingSession}
               onBootstrap={handleBootstrap}
               onStartSession={handleStartSession}
               onStopSession={handleStopSession}
@@ -813,6 +936,8 @@ export function App() {
               token={token}
               studioStatus={studioStatus}
               caps={caps}
+              bootstrapping={bootstrapping}
+              onBootstrap={handleBootstrap}
               onRefreshCaps={refreshCaps}
               onSaved={refreshStudio}
             />
@@ -824,6 +949,7 @@ export function App() {
         nav={nav}
         onSelectNav={setNav}
         running={running}
+        stoppingSession={stoppingSession}
         targetLabel={studioStatus?.target_label || (sseState === "live" ? "Connected" : sseState)}
         statusDotKind={statusDotKind}
         aiConfigured={Boolean(studioStatus?.ai_status.configured)}

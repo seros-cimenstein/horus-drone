@@ -34,6 +34,7 @@ interface Props {
   theme: BottomThemeMode;
   onCycleTheme: () => void;
   onStopSession: () => void;
+  stoppingSession?: boolean;
 }
 
 const PRIMARY_TABS: Array<{ id: BottomNavId; label: string; icon: (active: boolean) => ReactNode }> = [
@@ -63,6 +64,7 @@ export function BottomTabBar({
   theme,
   onCycleTheme,
   onStopSession,
+  stoppingSession = false,
 }: Props) {
   const [moreOpen, setMoreOpen] = useState(false);
   const isMoreActive = moreOpen || MORE_IDS.has(nav);
@@ -170,12 +172,13 @@ export function BottomTabBar({
                 <Button
                   size="sm"
                   variant="secondary"
+                  loading={stoppingSession}
                   onClick={() => {
                     setMoreOpen(false);
                     onStopSession();
                   }}
                 >
-                  <Square size={12} /> Stop
+                  {!stoppingSession && <Square size={12} />} {stoppingSession ? "Stopping…" : "Stop"}
                 </Button>
               )}
               <Button size="sm" variant="secondary" onClick={onCycleTheme}>

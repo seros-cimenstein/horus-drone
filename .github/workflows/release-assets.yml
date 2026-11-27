@@ -7,6 +7,15 @@ on:
         description: Immutable GitHub Release tag for pinned assets
         required: false
         default: assets-copter-4.7.1
+      scope:
+        description: What to build and upload (reid-only/models-only preserve existing SITL binaries)
+        required: false
+        type: choice
+        default: reid-only
+        options:
+          - reid-only
+          - models-only
+          - all
   push:
     tags:
       - "assets-copter-*"
@@ -16,6 +25,7 @@ permissions:
 
 jobs:
   build-linux-x86_64:
+    if: ${{ github.event_name == 'push' || inputs.scope == 'all' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +45,7 @@ jobs:
           path: out/arducopter-4.7.1-linux-x86_64.tar.gz
 
   build-linux-aarch64:
+    if: ${{ github.event_name == 'push' || inputs.scope == 'all' }}
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +74,7 @@ jobs:
           path: out/arducopter-4.7.1-linux-aarch64.tar.gz
 
   build-windows-x86_64:
+    if: ${{ github.event_name == 'push' || inputs.scope == 'all' }}
     runs-on: windows-latest
     steps:
       - name: Install Cygwin toolchain for ArduPilot SITL
@@ -100,10 +112,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Export yolov8n.onnx and dynamic-batch osnet_x0_25_msmt17.onnx
+        env:
+          SCOPE: ${{ github.event_name == 'push' && 'all' || inputs.scope || 'reid-only' }}
         run: |
           mkdir -p out
-          python3 -m pip install --break-system-packages ultralytics onnx onnxruntime torch torchvision gdown
-          python3 - <<'PY'
+          if [ "$SCOPE" = "reid-only" ]; then
+            python3 -m pip install --break-system-packages 'onnx>=1.16,<2'
+          else
+            python3 -m pip install --break-system-packages ultralytics onnx onnxruntime torch torchvision gdown
+            python3 - <<'PY'
           import onnx
           from ultralytics import YOLO
           model = YOLO("yolov8n.pt")
@@ -111,12 +128,19 @@ jobs:
           import shutil
           shutil.copy2(exported, "out/yolov8n.onnx")
           PY
-          if [ -x scripts/setup_models.sh ]; then
-            bash scripts/setup_models.sh || true
+            test -s out/yolov8n.onnx
           fi
           if [ -f models/osnet_x0_25_msmt17.onnx ]; then
             cp models/osnet_x0_25_msmt17.onnx out/osnet_x0_25_msmt17.onnx
+          else
+            mkdir -p /tmp/reid-src
+            curl -4 -fsSL \
+              https://huggingface.co/anriha/osnet_x0_25_msmt17/resolve/1e22b925c70caa5591e9fab3f5540af8484bcad8/osnet_x0_25_msmt17.onnx \
+              -o /tmp/reid-src/osnet_x0_25_msmt17.onnx
+            printf 'e78604f4ccda49b8f41cd0f8f7303800ce75d2361895ebb0729513c1bf53d277  /tmp/reid-src/osnet_x0_25_msmt17.onnx\n' | sha256sum --check -
+            python3 scripts/prepare_reid_onnx.py /tmp/reid-src/osnet_x0_25_msmt17.onnx out/osnet_x0_25_msmt17.onnx
           fi
+          test -s out/osnet_x0_25_msmt17.onnx
       - uses: actions/upload-artifact@v4
         with:
           name: asset-onnx-models
@@ -128,24 +152,53 @@ jobs:
       - build-linux-aarch64
       - build-windows-x86_64
       - bundle-onnx-models
+    if: ${{ always() && needs.build-linux-x86_64.result != 'failure' && needs.build-linux-x86_64.result != 'cancelled' && needs.build-linux-aarch64.result != 'failure' && needs.build-linux-aarch64.result != 'cancelled' && needs.build-windows-x86_64.result != 'failure' && needs.build-windows-x86_64.result != 'cancelled' && needs.bundle-onnx-models.result == 'success' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
-      - name: Generate SHA256SUMS.txt
-        working-directory: artifacts
-        run: |
-          sha256sum * > SHA256SUMS.txt
-          cat SHA256SUMS.txt
-      - name: Publish GitHub Release
+      - name: Merge SHA256SUMS.txt & Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ inputs.release_tag || github.ref_name }}
+          SCOPE: ${{ github.event_name == 'push' && 'all' || inputs.scope || 'reid-only' }}
         run: |
+          set -euo pipefail
+          rm -f /tmp/existing-sums.txt
+          release_exists=false
           if gh release view "$TAG" -R "$GH_REPO" >/dev/null 2>&1; then
+            release_exists=true
+            if [ "$SCOPE" != "all" ]; then
+              gh release download "$TAG" -R "$GH_REPO" -p SHA256SUMS.txt -O /tmp/existing-sums.txt || true
+            fi
+          fi
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          artifacts = Path("artifacts")
+          entries: dict[str, str] = {}
+          existing = Path("/tmp/existing-sums.txt")
+          if existing.is_file():
+              for line in existing.read_text(encoding="utf-8").splitlines():
+                  parts = line.strip().split()
+                  if len(parts) >= 2 and len(parts[0]) == 64:
+                      name = Path(parts[1].lstrip("*")).name
+                      if name != "SHA256SUMS.txt":
+                          entries[name] = parts[0].lower()
+
+          for path in sorted(artifacts.iterdir()):
+              if path.is_file() and path.name != "SHA256SUMS.txt":
+                  entries[path.name] = hashlib.sha256(path.read_bytes()).hexdigest().lower()
+
+          out_lines = [f"{entries[name]}  {name}" for name in sorted(entries)]
+          (artifacts / "SHA256SUMS.txt").write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+          PY
+          cat artifacts/SHA256SUMS.txt
+          if [ "$release_exists" = "true" ]; then
             gh release upload "$TAG" artifacts/* -R "$GH_REPO" --clobber
           else
             gh release create "$TAG" artifacts/* -R "$GH_REPO" \

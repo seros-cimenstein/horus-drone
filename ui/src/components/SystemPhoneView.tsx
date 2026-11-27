@@ -1,21 +1,33 @@
-import { Check, Copy, QrCode, RefreshCw, Save, Smartphone } from "lucide-react";
+import { Check, Copy, Download, QrCode, RefreshCw, Save, Smartphone } from "lucide-react";
 import { useEffect, useState } from "react";
 import { horusApi } from "../api";
 import { buildQrMatrix } from "../qr";
 import type { CapabilityItem, PhoneStatus, RunLogEntry, StudioStatus } from "../types";
 import { Button } from "./common/Button";
 import { Field, Input, PageHeader, Section, SliderField, StatusBadge } from "./common/Surface";
+import { useToast } from "./common/Toast";
 
 interface Props {
   section: "tuning" | "phone" | "system";
   token: string;
   studioStatus: StudioStatus | null;
   caps: CapabilityItem[];
-  onRefreshCaps: (force: boolean) => void;
+  bootstrapping?: boolean;
+  onBootstrap?: () => Promise<void>;
+  onRefreshCaps: (force: boolean) => Promise<CapabilityItem[]>;
   onSaved: () => void;
 }
 
-export function SystemPhoneView({ section, token, studioStatus, caps, onRefreshCaps, onSaved }: Props) {
+export function SystemPhoneView({
+  section,
+  token,
+  studioStatus,
+  caps,
+  bootstrapping = false,
+  onBootstrap,
+  onRefreshCaps,
+  onSaved,
+}: Props) {
   const [flightSpeed, setFlightSpeed] = useState(1.2);
   const [rthDelay, setRthDelay] = useState(30.0);
   const [gimbalPitch, setGimbalPitch] = useState(-15.0);
@@ -23,9 +35,13 @@ export function SystemPhoneView({ section, token, studioStatus, caps, onRefreshC
   const [openVocabHz, setOpenVocabHz] = useState(0.5);
   const [grounderUrl, setGrounderUrl] = useState("http://127.0.0.1:8100");
   const [saveNotice, setSaveNotice] = useState("");
+  const [savingTuning, setSavingTuning] = useState(false);
+  const [checkingCaps, setCheckingCaps] = useState(false);
+  const [phoneBusy, setPhoneBusy] = useState<"start" | "stop" | null>(null);
   const [phone, setPhone] = useState<PhoneStatus | null>(null);
   const [runs, setRuns] = useState<RunLogEntry[]>([]);
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const toast = useToast();
 
   useEffect(() => {
     horusApi
@@ -48,16 +64,58 @@ export function SystemPhoneView({ section, token, studioStatus, caps, onRefreshC
   }, [section, token]);
 
   const saveTuning = async () => {
-    await horusApi.putStudioSettings(token, {
-      flight_speed_m_s: flightSpeed,
-      link_loss_rth_delay_s: rthDelay,
-      default_gimbal_pitch_deg: gimbalPitch,
-      camera_max_fps: maxFps,
-      open_vocab_hz: openVocabHz,
-      grounder_url: grounderUrl,
-    });
-    onSaved();
-    setSaveNotice("Saved. Restart an active session to apply.");
+    setSavingTuning(true);
+    try {
+      await horusApi.putStudioSettings(token, {
+        flight_speed_m_s: flightSpeed,
+        link_loss_rth_delay_s: rthDelay,
+        default_gimbal_pitch_deg: gimbalPitch,
+        camera_max_fps: maxFps,
+        open_vocab_hz: openVocabHz,
+        grounder_url: grounderUrl,
+      });
+      onSaved();
+      setSaveNotice("Saved. Restart an active session to apply.");
+      toast.success("Flight settings saved", "Restart an active session to apply changes.");
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setSaveNotice(`Save failed: ${msg}`);
+      toast.error("Failed to save flight settings", msg);
+    } finally {
+      setSavingTuning(false);
+    }
+  };
+
+  const handleRecheckCaps = async () => {
+    setCheckingCaps(true);
+    try {
+      const latest = await onRefreshCaps(true);
+      const readyCount = latest.filter((c) => c.ready).length;
+      toast.success("System checks updated", `${readyCount}/${latest.length} capabilities ready`);
+    } catch (e: unknown) {
+      toast.error("System check failed", e instanceof Error ? e.message : String(e));
+    } finally {
+      setCheckingCaps(false);
+    }
+  };
+
+  const handlePhoneServe = async (action: "start" | "stop") => {
+    setPhoneBusy(action);
+    try {
+      const next = await horusApi.phoneServe(token, action);
+      setPhone(next);
+      setSaveNotice("");
+      toast.success(
+        action === "start" ? "Tailscale Serve started" : "Tailscale Serve stopped",
+        next.tailnet_url || undefined,
+      );
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setSaveNotice(msg);
+      toast.error(`Tailscale ${action} failed`, msg);
+    } finally {
+      setPhoneBusy(null);
+    }
   };
 
   const phoneUrl = phone?.tailnet_url || phone?.local_url || "";
@@ -132,8 +190,8 @@ export function SystemPhoneView({ section, token, studioStatus, caps, onRefreshC
 
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
             <span className="text-[13.5px] text-secondary">{saveNotice}</span>
-            <Button variant="primary" onClick={() => void saveTuning()}>
-              <Save size={14} /> Save Settings
+            <Button variant="primary" loading={savingTuning} onClick={() => void saveTuning()}>
+              {!savingTuning && <Save size={14} />} {savingTuning ? "Saving…" : "Save Settings"}
             </Button>
           </div>
         </div>
@@ -184,20 +242,26 @@ export function SystemPhoneView({ section, token, studioStatus, caps, onRefreshC
             <div className="flex flex-wrap gap-2">
               <Button
                 variant="primary"
-                onClick={() => void horusApi.phoneServe(token, "start").then(setPhone).catch((e) => setSaveNotice(String(e)))}
+                loading={phoneBusy === "start"}
+                disabled={phoneBusy !== null}
+                onClick={() => void handlePhoneServe("start")}
               >
-                <Smartphone size={14} /> Start Tailscale Serve
+                {phoneBusy !== "start" && <Smartphone size={14} />}
+                {phoneBusy === "start" ? "Starting…" : "Start Tailscale Serve"}
               </Button>
               <Button
-                onClick={() => void horusApi.phoneServe(token, "stop").then(setPhone).catch((e) => setSaveNotice(String(e)))}
+                loading={phoneBusy === "stop"}
+                disabled={phoneBusy !== null}
+                onClick={() => void handlePhoneServe("stop")}
               >
-                Stop Serve
+                {phoneBusy === "stop" ? "Stopping…" : "Stop Serve"}
               </Button>
               <Button
                 disabled={!phoneUrl}
                 onClick={() => {
                   navigator.clipboard?.writeText(phoneUrl).then(() => {
                     setCopiedUrl(true);
+                    toast.info("Phone URL copied");
                     window.setTimeout(() => setCopiedUrl(false), 1500);
                   });
                 }}
@@ -218,9 +282,17 @@ export function SystemPhoneView({ section, token, studioStatus, caps, onRefreshC
         title="System & Logs"
         description="Inspect dependency checks across all HORUS features, downloaded assets, and recent flight logs."
         action={
-          <Button size="sm" onClick={() => onRefreshCaps(true)}>
-            <RefreshCw size={13} /> Re-check All
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            {studioStatus && !studioStatus.assets_ready && onBootstrap && (
+              <Button size="sm" variant="primary" loading={bootstrapping} onClick={() => void onBootstrap()}>
+                {!bootstrapping && <Download size={13} />}
+                {bootstrapping ? "Downloading…" : "Download SITL & Models"}
+              </Button>
+            )}
+            <Button size="sm" loading={checkingCaps} onClick={() => void handleRecheckCaps()}>
+              {!checkingCaps && <RefreshCw size={13} />} {checkingCaps ? "Checking…" : "Re-check All"}
+            </Button>
+          </div>
         }
       />
 

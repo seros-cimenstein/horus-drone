@@ -5,6 +5,7 @@ import type { McpConfigsResponse, StudioSettingsView, StudioStatus } from "../ty
 import { Button } from "./common/Button";
 import { StatusBanner, type BannerTone } from "./common/StatusBanner";
 import { Field, Input, PageHeader, Section, Select } from "./common/Surface";
+import { useToast } from "./common/Toast";
 
 interface Props {
   token: string;
@@ -25,9 +26,12 @@ export function AiMcpView({ token, studioStatus, onUpdated }: Props) {
   const [claudeEffort, setClaudeEffort] = useState("");
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [testResult, setTestResult] = useState("");
+  const [testingAi, setTestingAi] = useState(false);
+  const [savingAi, setSavingAi] = useState(false);
   const [mcpConfigs, setMcpConfigs] = useState<McpConfigsResponse | null>(null);
   const [includeMcpToken, setIncludeMcpToken] = useState(false);
   const [copiedId, setCopiedId] = useState("");
+  const toast = useToast();
 
   useEffect(() => {
     horusApi
@@ -61,25 +65,52 @@ export function AiMcpView({ token, studioStatus, onUpdated }: Props) {
   };
 
   const saveSettings = async () => {
-    const secrets: Record<string, string> = {};
-    const sk = secretKeyForProvider(provider);
-    if (sk && apiKeyInput.trim()) secrets[sk] = apiKeyInput.trim();
-    const updated = await horusApi.putStudioSettings(token, {
-      ai_provider: provider,
-      model,
-      base_url: baseUrl,
-      reasoning_effort: effort,
-      claude_command: claudeCommand,
-      claude_effort: claudeEffort,
-      omp_command: ompCommand,
-      omp_model: ompModel,
-      omp_thinking: ompThinking,
-      ...(Object.keys(secrets).length ? { secrets } : {}),
-    });
-    setView(updated);
-    setApiKeyInput("");
-    onUpdated();
-    setTestResult("Saved.");
+    setSavingAi(true);
+    try {
+      const secrets: Record<string, string> = {};
+      const sk = secretKeyForProvider(provider);
+      if (sk && apiKeyInput.trim()) secrets[sk] = apiKeyInput.trim();
+      const updated = await horusApi.putStudioSettings(token, {
+        ai_provider: provider,
+        model,
+        base_url: baseUrl,
+        reasoning_effort: effort,
+        claude_command: claudeCommand,
+        claude_effort: claudeEffort,
+        omp_command: ompCommand,
+        omp_model: ompModel,
+        omp_thinking: ompThinking,
+        ...(Object.keys(secrets).length ? { secrets } : {}),
+      });
+      setView(updated);
+      setApiKeyInput("");
+      onUpdated();
+      setTestResult("Saved.");
+      toast.success("AI provider saved", updated.ai_status.detail);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setTestResult(`Failed: ${msg}`);
+      toast.error("Failed to save AI provider", msg);
+    } finally {
+      setSavingAi(false);
+    }
+  };
+
+  const handleTestAi = async () => {
+    setTestingAi(true);
+    try {
+      const r = await horusApi.testAi(token);
+      const summary = `${r.ok ? "OK" : "Failed"} (${r.provider}): ${r.detail}`;
+      setTestResult(summary);
+      if (r.ok) toast.success("AI connection verified", `${r.provider}: ${r.detail}`);
+      else toast.warning("AI connection test failed", `${r.provider}: ${r.detail}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setTestResult(`Failed: ${msg}`);
+      toast.error("AI connection test failed", msg);
+    } finally {
+      setTestingAi(false);
+    }
   };
 
   const copyText = (id: string, value: string) => {
@@ -87,6 +118,7 @@ export function AiMcpView({ token, studioStatus, onUpdated }: Props) {
       ?.writeText(value)
       .then(() => {
         setCopiedId(id);
+        toast.info("Copied to clipboard");
         window.setTimeout(() => setCopiedId(""), 1500);
       })
       .catch(() => {});
@@ -232,17 +264,11 @@ export function AiMcpView({ token, studioStatus, onUpdated }: Props) {
           )}
 
           <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
-            <Button
-              onClick={() =>
-                void horusApi
-                  .testAi(token)
-                  .then((r) => setTestResult(`${r.ok ? "OK" : "Failed"} (${r.provider}): ${r.detail}`))
-              }
-            >
-              <PlugZap size={14} /> Test Connection
+            <Button loading={testingAi} onClick={() => void handleTestAi()}>
+              {!testingAi && <PlugZap size={14} />} {testingAi ? "Testing…" : "Test Connection"}
             </Button>
-            <Button variant="primary" onClick={() => void saveSettings()}>
-              <Save size={14} /> Save Provider
+            <Button variant="primary" loading={savingAi} onClick={() => void saveSettings()}>
+              {!savingAi && <Save size={14} />} {savingAi ? "Saving…" : "Save Provider"}
             </Button>
           </div>
         </div>

@@ -5,11 +5,13 @@ import type { GrounderStatus, SerialPortInfo, StudioStatus } from "../types";
 import { SceneVisual, type SceneVisualVariant } from "./SceneVisual";
 import { Button, StopSessionButton } from "./common/Button";
 import { Field, Input, PageHeader, Section, Select, StatusBadge } from "./common/Surface";
+import { useToast } from "./common/Toast";
 
 interface Props {
   token: string;
   studioStatus: StudioStatus | null;
   bootstrapping: boolean;
+  stoppingSession?: boolean;
   onBootstrap: () => Promise<void>;
   onStartSession: (payload: Record<string, unknown>) => Promise<void>;
   onStopSession: () => Promise<void>;
@@ -26,6 +28,7 @@ export function WorldsView({
   token,
   studioStatus,
   bootstrapping,
+  stoppingSession = false,
   onBootstrap,
   onStartSession,
   onStopSession,
@@ -44,6 +47,9 @@ export function WorldsView({
   const [remoteToken, setRemoteToken] = useState("");
   const [ports, setPorts] = useState<SerialPortInfo[]>([]);
   const [grounder, setGrounder] = useState<GrounderStatus | null>(null);
+  const [launchingKey, setLaunchingKey] = useState<string | null>(null);
+  const [grounderBusy, setGrounderBusy] = useState<"start" | "stop" | null>(null);
+  const toast = useToast();
 
   useEffect(() => {
     horusApi
@@ -57,7 +63,33 @@ export function WorldsView({
   }, [token]);
 
   const running = studioStatus?.lifecycle === "running";
-  const busy = studioStatus?.lifecycle === "starting" || studioStatus?.lifecycle === "bootstrapping";
+  const busy = studioStatus?.lifecycle === "starting" || studioStatus?.lifecycle === "bootstrapping" || launchingKey !== null;
+
+  const launch = async (key: string, payload: Record<string, unknown>) => {
+    setLaunchingKey(key);
+    try {
+      await onStartSession(payload);
+    } finally {
+      setLaunchingKey(null);
+    }
+  };
+
+  const handleGrounder = async (action: "start" | "stop") => {
+    setGrounderBusy(action);
+    try {
+      const next =
+        action === "start" ? await horusApi.startGrounder(token) : await horusApi.stopGrounder(token);
+      setGrounder(next);
+      toast.success(action === "start" ? "Grounder service started" : "Grounder service stopped");
+    } catch (e: unknown) {
+      toast.error(
+        `Grounder ${action} failed`,
+        e instanceof Error ? e.message : String(e),
+      );
+    } finally {
+      setGrounderBusy(null);
+    }
+  };
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-9 px-5 py-7 sm:px-6 sm:py-8">
@@ -67,11 +99,12 @@ export function WorldsView({
         action={
           <div className="flex flex-wrap items-center gap-2">
             {studioStatus && !studioStatus.assets_ready && (
-              <Button variant="primary" disabled={bootstrapping} onClick={() => void onBootstrap()}>
-                <Download size={15} /> {bootstrapping ? "Downloading…" : "Download SITL & Models"}
+              <Button variant="primary" loading={bootstrapping} onClick={() => void onBootstrap()}>
+                {!bootstrapping && <Download size={15} />}
+                {bootstrapping ? "Downloading…" : "Download SITL & Models"}
               </Button>
             )}
-            {running && <StopSessionButton size="md" onClick={() => void onStopSession()} />}
+            {running && <StopSessionButton size="md" loading={stoppingSession} onClick={() => void onStopSession()} />}
           </div>
         }
       />
@@ -120,9 +153,11 @@ export function WorldsView({
                       size="sm"
                       variant={isCurrent ? "secondary" : "primary"}
                       disabled={busy}
-                      onClick={() => void onStartSession({ mode: "builtin_sim", scene: sc.name, seed })}
+                      loading={launchingKey === `scene:${sc.name}`}
+                      onClick={() => void launch(`scene:${sc.name}`, { mode: "builtin_sim", scene: sc.name, seed })}
                     >
-                      <Play size={13} /> {isCurrent ? "Restart" : "Launch"}
+                      {launchingKey !== `scene:${sc.name}` && <Play size={13} />}
+                      {launchingKey === `scene:${sc.name}` ? "Launching…" : isCurrent ? "Restart" : "Launch"}
                     </Button>
                   </div>
                 </div>
@@ -187,8 +222,9 @@ export function WorldsView({
                   size="sm"
                   variant="primary"
                   disabled={busy}
+                  loading={launchingKey === "gz:launch"}
                   onClick={() =>
-                    void onStartSession({
+                    void launch("gz:launch", {
                       mode: "gazebo",
                       action: "launch",
                       world: gzWorld,
@@ -199,16 +235,18 @@ export function WorldsView({
                     })
                   }
                 >
-                  <Play size={13} /> Launch Gazebo
+                  {launchingKey !== "gz:launch" && <Play size={13} />}
+                  {launchingKey === "gz:launch" ? "Launching…" : "Launch Gazebo"}
                 </Button>
                 <Button
                   size="sm"
                   disabled={busy}
+                  loading={launchingKey === "gz:attach"}
                   onClick={() =>
-                    void onStartSession({ mode: "gazebo", action: "attach", mcp_url: remoteUrl, mcp_token: remoteToken })
+                    void launch("gz:attach", { mode: "gazebo", action: "attach", mcp_url: remoteUrl, mcp_token: remoteToken })
                   }
                 >
-                  Attach Existing
+                  {launchingKey === "gz:attach" ? "Attaching…" : "Attach Existing"}
                 </Button>
               </div>
             </div>
@@ -235,18 +273,21 @@ export function WorldsView({
                   size="sm"
                   variant="primary"
                   disabled={busy}
-                  onClick={() => void onStartSession({ mode: "gta", action: "launch", gta_host: gtaHost })}
+                  loading={launchingKey === "gta:launch"}
+                  onClick={() => void launch("gta:launch", { mode: "gta", action: "launch", gta_host: gtaHost })}
                 >
-                  <Play size={13} /> Launch GTA V
+                  {launchingKey !== "gta:launch" && <Play size={13} />}
+                  {launchingKey === "gta:launch" ? "Launching…" : "Launch GTA V"}
                 </Button>
                 <Button
                   size="sm"
                   disabled={busy}
+                  loading={launchingKey === "gta:attach"}
                   onClick={() =>
-                    void onStartSession({ mode: "gta", action: "attach", mcp_url: remoteUrl, mcp_token: remoteToken })
+                    void launch("gta:attach", { mode: "gta", action: "attach", mcp_url: remoteUrl, mcp_token: remoteToken })
                   }
                 >
-                  Attach Existing
+                  {launchingKey === "gta:attach" ? "Attaching…" : "Attach Existing"}
                 </Button>
               </div>
             </div>
@@ -294,8 +335,9 @@ export function WorldsView({
                   size="sm"
                   variant="primary"
                   disabled={busy}
+                  loading={launchingKey === "real:direct"}
                   onClick={() =>
-                    void onStartSession({
+                    void launch("real:direct", {
                       mode: "real_drone",
                       submode: "direct",
                       mavlink_connection: serialDev,
@@ -304,7 +346,8 @@ export function WorldsView({
                     })
                   }
                 >
-                  <Play size={13} /> Connect Controller
+                  {launchingKey !== "real:direct" && <Play size={13} />}
+                  {launchingKey === "real:direct" ? "Connecting…" : "Connect Controller"}
                 </Button>
               </div>
             </div>
@@ -333,8 +376,9 @@ export function WorldsView({
                   size="sm"
                   variant="primary"
                   disabled={busy}
+                  loading={launchingKey === "real:remote"}
                   onClick={() =>
-                    void onStartSession({
+                    void launch("real:remote", {
                       mode: "real_drone",
                       submode: "remote",
                       mcp_url: remoteUrl,
@@ -342,7 +386,8 @@ export function WorldsView({
                     })
                   }
                 >
-                  <Play size={13} /> Connect Companion
+                  {launchingKey !== "real:remote" && <Play size={13} />}
+                  {launchingKey === "real:remote" ? "Connecting…" : "Connect Companion"}
                 </Button>
               </div>
             </div>
@@ -364,11 +409,22 @@ export function WorldsView({
                 </p>
               </div>
               <div className="flex shrink-0 gap-2">
-                <Button size="sm" variant="primary" onClick={() => void horusApi.startGrounder(token).then(setGrounder)}>
-                  Start Service
+                <Button
+                  size="sm"
+                  variant="primary"
+                  loading={grounderBusy === "start"}
+                  disabled={grounderBusy !== null}
+                  onClick={() => void handleGrounder("start")}
+                >
+                  {grounderBusy === "start" ? "Starting…" : "Start Service"}
                 </Button>
-                <Button size="sm" onClick={() => void horusApi.stopGrounder(token).then(setGrounder)}>
-                  Stop
+                <Button
+                  size="sm"
+                  loading={grounderBusy === "stop"}
+                  disabled={grounderBusy !== null}
+                  onClick={() => void handleGrounder("stop")}
+                >
+                  {grounderBusy === "stop" ? "Stopping…" : "Stop"}
                 </Button>
               </div>
             </div>

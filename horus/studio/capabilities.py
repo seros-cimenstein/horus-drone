@@ -69,7 +69,7 @@ def check_capabilities(
         {"name": "MuJoCo offscreen GL", "ok": bool(gl["ok"]), "detail": gl["detail"], "fix_hint": "Install `mujoco` and OpenGL/EGL/OSMesa drivers."},
         {"name": "ArduCopter SITL binary", "ok": assets["sitl"].available, "detail": assets["sitl"].detail, "fix_hint": "Click Download SITL & Models or run `horus setup`."},
         {"name": "YOLOv8n ONNX model", "ok": assets["yolov8n"].available, "detail": assets["yolov8n"].detail, "fix_hint": "Run `horus setup` or set HORUS_YOLO_MODEL."},
-        {"name": "OSNet ReID ONNX model", "ok": assets["reid"].available, "detail": assets["reid"].detail, "fix_hint": "Run `horus setup` or set HORUS_REID_MODEL."},
+        {"name": "OSNet ReID ONNX model", "ok": assets["reid"].available, "detail": assets["reid"].detail, "fix_hint": "Optional for enhanced person ReID (falls back to color_histogram). Run `horus setup` or set HORUS_REID_MODEL."},
     ]
     builtin_cap = {
         "id": "builtin_3d",

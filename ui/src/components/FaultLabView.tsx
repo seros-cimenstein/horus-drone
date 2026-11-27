@@ -4,12 +4,13 @@ import { horusApi } from "../api";
 import type { PreflightItem, StudioStatus } from "../types";
 import { Button } from "./common/Button";
 import { Input, PageHeader, Section, StatusBadge } from "./common/Surface";
+import { useToast } from "./common/Toast";
 
 interface Props {
   token: string;
   studioStatus: StudioStatus | null;
   executorState: string;
-  onManualMove: (action: string, params: Record<string, unknown>) => void;
+  onManualMove: (action: string, params: Record<string, unknown>) => Promise<boolean> | void;
   onRefreshStatus: () => void;
 }
 
@@ -19,27 +20,57 @@ export function FaultLabView({ token, studioStatus, executorState, onManualMove,
   const [vocab, setVocab] = useState("red backpack, injured person");
   const [preflight, setPreflight] = useState<PreflightItem[]>([]);
   const [statusMsg, setStatusMsg] = useState("");
+  const [pendingMove, setPendingMove] = useState<string | null>(null);
+  const [applyingShaper, setApplyingShaper] = useState<string | null>(null);
+  const [loadingPreflight, setLoadingPreflight] = useState(false);
+  const toast = useToast();
 
-  const loadPreflight = () => {
-    horusApi
-      .getPreflight(token)
-      .then((r) => setPreflight(r.items))
-      .catch(() => {});
+  const loadPreflight = async (notify = false) => {
+    setLoadingPreflight(true);
+    try {
+      const r = await horusApi.getPreflight(token);
+      setPreflight(r.items);
+      if (notify) toast.success("Pre-flight checks refreshed");
+    } catch (e: unknown) {
+      if (notify) toast.error("Pre-flight check failed", e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingPreflight(false);
+    }
   };
 
   useEffect(() => {
-    loadPreflight();
+    void loadPreflight(false);
   }, [token]);
 
-  const applyShaper = async (nextDelay: number, nextCut: boolean) => {
+  const runMove = async (key: string, action: string, params: Record<string, unknown>) => {
+    setPendingMove(key);
+    try {
+      await onManualMove(action, params);
+    } finally {
+      setPendingMove(null);
+    }
+  };
+
+  const applyShaper = async (key: string, nextDelay: number, nextCut: boolean) => {
+    setApplyingShaper(key);
     setDelayMs(nextDelay);
     setLinkCut(nextCut);
     try {
       await horusApi.setLinkShaper(token, { delay_ms: nextDelay, jitter_ms: 0, link_cut: nextCut });
       onRefreshStatus();
-      setStatusMsg(nextCut ? "AI link cut active — watch HOLDING -> auto_rth" : `AI delay ${nextDelay} ms active`);
+      const msg = nextCut ? "AI link cut active — watch HOLDING -> auto_rth" : `AI delay ${nextDelay} ms active`;
+      setStatusMsg(msg);
+      if (nextCut) {
+        toast.warning("AI link cut active", "Watch HOLDING -> auto_rth while telemetry stays live.");
+      } else {
+        toast.info(nextDelay === 0 ? "AI link latency restored (0 ms)" : `AI link latency set to ${nextDelay} ms`);
+      }
     } catch (e: unknown) {
-      setStatusMsg(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      setStatusMsg(msg);
+      toast.error("Link shaper failed", msg);
+    } finally {
+      setApplyingShaper(null);
     }
   };
 
@@ -66,22 +97,22 @@ export function FaultLabView({ token, studioStatus, executorState, onManualMove,
               <span className="mb-1 text-[13px] font-medium text-secondary">Horizontal Move (1.5 m)</span>
               <div className="grid grid-cols-3 gap-2">
                 <div />
-                <Button size="md" onClick={() => onManualMove("move", { forward_m: 1.5 })}>
-                  <ArrowUp size={15} /> Fwd
+                <Button size="md" loading={pendingMove === "fwd"} onClick={() => void runMove("fwd", "move", { forward_m: 1.5 })}>
+                  {pendingMove !== "fwd" && <ArrowUp size={15} />} Fwd
                 </Button>
                 <div />
-                <Button size="md" onClick={() => onManualMove("move", { right_m: -1.5 })}>
-                  <ArrowLeft size={15} /> Left
+                <Button size="md" loading={pendingMove === "left"} onClick={() => void runMove("left", "move", { right_m: -1.5 })}>
+                  {pendingMove !== "left" && <ArrowLeft size={15} />} Left
                 </Button>
-                <Button size="md" variant="primary" onClick={() => onManualMove("hold", {})}>
+                <Button size="md" variant="primary" loading={pendingMove === "hold"} onClick={() => void runMove("hold", "hold", {})}>
                   Hold
                 </Button>
-                <Button size="md" onClick={() => onManualMove("move", { right_m: 1.5 })}>
-                  Right <ArrowRight size={15} />
+                <Button size="md" loading={pendingMove === "right"} onClick={() => void runMove("right", "move", { right_m: 1.5 })}>
+                  Right {pendingMove !== "right" && <ArrowRight size={15} />}
                 </Button>
                 <div />
-                <Button size="md" onClick={() => onManualMove("move", { forward_m: -1.5 })}>
-                  <ArrowDown size={15} /> Back
+                <Button size="md" loading={pendingMove === "back"} onClick={() => void runMove("back", "move", { forward_m: -1.5 })}>
+                  {pendingMove !== "back" && <ArrowDown size={15} />} Back
                 </Button>
                 <div />
               </div>
@@ -92,22 +123,26 @@ export function FaultLabView({ token, studioStatus, executorState, onManualMove,
               <div className="flex flex-col gap-2">
                 <span className="text-[13px] font-medium text-secondary">Takeoff &amp; Altitude</span>
                 <div className="flex flex-wrap gap-2">
-                  <Button variant="primary" onClick={() => onManualMove("take_off", { altitude_m: 2.0 })}>
+                  <Button variant="primary" loading={pendingMove === "takeoff"} onClick={() => void runMove("takeoff", "take_off", { altitude_m: 2.0 })}>
                     Take Off (2m)
                   </Button>
-                  <Button onClick={() => onManualMove("move", { up_m: 1.0 })}>Climb +1m</Button>
-                  <Button onClick={() => onManualMove("move", { up_m: -0.8 })}>Descend -0.8m</Button>
+                  <Button loading={pendingMove === "up"} onClick={() => void runMove("up", "move", { up_m: 1.0 })}>
+                    Climb +1m
+                  </Button>
+                  <Button loading={pendingMove === "down"} onClick={() => void runMove("down", "move", { up_m: -0.8 })}>
+                    Descend -0.8m
+                  </Button>
                 </div>
               </div>
 
               <div className="flex flex-col gap-2">
                 <span className="text-[13px] font-medium text-secondary">Heading</span>
                 <div className="flex flex-wrap gap-2">
-                  <Button onClick={() => onManualMove("turn", { yaw_deg: -45 })}>
-                    <RotateCcw size={14} /> Turn Left 45°
+                  <Button loading={pendingMove === "turn_l"} onClick={() => void runMove("turn_l", "turn", { yaw_deg: -45 })}>
+                    {pendingMove !== "turn_l" && <RotateCcw size={14} />} Turn Left 45°
                   </Button>
-                  <Button onClick={() => onManualMove("turn", { yaw_deg: 45 })}>
-                    <RotateCw size={14} /> Turn Right 45°
+                  <Button loading={pendingMove === "turn_r"} onClick={() => void runMove("turn_r", "turn", { yaw_deg: 45 })}>
+                    {pendingMove !== "turn_r" && <RotateCw size={14} />} Turn Right 45°
                   </Button>
                 </div>
               </div>
@@ -123,8 +158,9 @@ export function FaultLabView({ token, studioStatus, executorState, onManualMove,
             />
             <Button
               variant="primary"
+              loading={pendingMove === "vocab"}
               onClick={() =>
-                onManualMove("set_vocabulary", {
+                void runMove("vocab", "set_vocabulary", {
                   terms: vocab
                     .split(",")
                     .map((s) => s.trim())
@@ -148,13 +184,18 @@ export function FaultLabView({ token, studioStatus, executorState, onManualMove,
               <Button
                 key={ms}
                 variant={delayMs === ms && !linkCut ? "primary" : "secondary"}
-                onClick={() => void applyShaper(ms, false)}
+                loading={applyingShaper === `delay:${ms}`}
+                onClick={() => void applyShaper(`delay:${ms}`, ms, false)}
               >
                 {ms === 0 ? "0 ms (Normal)" : `${ms} ms Latency`}
               </Button>
             ))}
-            <Button variant={linkCut ? "danger" : "secondary"} onClick={() => void applyShaper(delayMs, !linkCut)}>
-              <Unplug size={14} /> {linkCut ? "Restore AI Link" : "Cut AI Link"}
+            <Button
+              variant={linkCut ? "danger" : "secondary"}
+              loading={applyingShaper === "cut"}
+              onClick={() => void applyShaper("cut", delayMs, !linkCut)}
+            >
+              {applyingShaper !== "cut" && <Unplug size={14} />} {linkCut ? "Restore AI Link" : "Cut AI Link"}
             </Button>
           </div>
           {statusMsg && <p className="font-mono text-[13px] text-secondary">{statusMsg}</p>}
@@ -165,8 +206,8 @@ export function FaultLabView({ token, studioStatus, executorState, onManualMove,
         title="Pre-Flight Checklist"
         description="Checks live autopilot heartbeat, proximity sensors, battery level, and camera stream freshness."
         action={
-          <Button size="sm" onClick={loadPreflight}>
-            <RefreshCw size={13} /> Refresh
+          <Button size="sm" loading={loadingPreflight} onClick={() => void loadPreflight(true)}>
+            {!loadingPreflight && <RefreshCw size={13} />} {loadingPreflight ? "Checking…" : "Refresh"}
           </Button>
         }
       >

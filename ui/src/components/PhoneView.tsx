@@ -12,8 +12,8 @@ interface Props {
   liveMap: LiveMap | null;
   frame: CameraFrame | null;
   events: TimelineEvent[];
-  onEmergency: (action: "hold" | "land" | "rth") => void;
-  onSendMission: (text: string) => void;
+  onEmergency: (action: "hold" | "land" | "rth") => Promise<void> | void;
+  onSendMission: (text: string) => Promise<void> | void;
   onFlyTo: (n: number, e: number) => void;
 }
 
@@ -32,6 +32,8 @@ export function PhoneView({
   const [text, setText] = useState("");
   const [aiUrl, setAiUrl] = useState("");
   const [aiBytes, setAiBytes] = useState<number | null>(null);
+  const [pendingEmergency, setPendingEmergency] = useState<"hold" | "land" | "rth" | null>(null);
+  const [sendingMission, setSendingMission] = useState(false);
 
   const aiViews = events.filter((e) => e.kind === "ai_view" && typeof e.view_id === "string");
   const latestAi = aiViews[aiViews.length - 1];
@@ -67,13 +69,34 @@ export function PhoneView({
       </header>
 
       <div className="grid grid-cols-3 gap-2 border-b border-border bg-canvas px-3 py-2.5">
-        <Button variant="danger" onClick={() => onEmergency("hold")}>
+        <Button
+          variant="danger"
+          loading={pendingEmergency === "hold"}
+          onClick={() => {
+            setPendingEmergency("hold");
+            void Promise.resolve(onEmergency("hold")).finally(() => setPendingEmergency(null));
+          }}
+        >
           HOLD
         </Button>
-        <Button variant="danger" onClick={() => onEmergency("land")}>
+        <Button
+          variant="danger"
+          loading={pendingEmergency === "land"}
+          onClick={() => {
+            setPendingEmergency("land");
+            void Promise.resolve(onEmergency("land")).finally(() => setPendingEmergency(null));
+          }}
+        >
           LAND
         </Button>
-        <Button variant="danger" onClick={() => onEmergency("rth")}>
+        <Button
+          variant="danger"
+          loading={pendingEmergency === "rth"}
+          onClick={() => {
+            setPendingEmergency("rth");
+            void Promise.resolve(onEmergency("rth")).finally(() => setPendingEmergency(null));
+          }}
+        >
           HOME
         </Button>
       </div>
@@ -97,14 +120,17 @@ export function PhoneView({
               <Button
                 variant="primary"
                 disabled={!text.trim()}
+                loading={sendingMission}
                 onClick={() => {
-                  if (text.trim()) {
-                    onSendMission(text.trim());
+                  const trimmed = text.trim();
+                  if (trimmed) {
+                    setSendingMission(true);
+                    void Promise.resolve(onSendMission(trimmed)).finally(() => setSendingMission(false));
                     setText("");
                   }
                 }}
               >
-                <Send size={14} /> Send Mission
+                {!sendingMission && <Send size={14} />} {sendingMission ? "Sending…" : "Send Mission"}
               </Button>
             </div>
             <div className="divide-y divide-border">

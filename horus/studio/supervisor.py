@@ -19,7 +19,7 @@ from uuid import uuid4
 import httpx
 import yaml
 
-from horus.bootstrap import check_assets, ensure_assets
+from horus.bootstrap import assets_ready, check_assets, ensure_assets
 from horus.logging import unwrap_exception
 from horus.mcp_client import open_session
 from horus.studio.capabilities import check_capabilities
@@ -158,20 +158,22 @@ class StudioSupervisor:
                 pass
 
     def status(self) -> dict[str, Any]:
+        raw_assets = check_assets()
         assets = {
             name: {
                 "available": st.available,
+                "optional": st.optional,
                 "path": str(st.path) if st.path else None,
                 "source": st.source,
                 "detail": st.detail,
             }
-            for name, st in check_assets().items()
+            for name, st in raw_assets.items()
         }
         ai_public = self.settings_store.public_view()["ai_status"]
         return {
             **asdict(self._state),
             "assets": assets,
-            "assets_ready": all(a["available"] for a in assets.values()),
+            "assets_ready": assets_ready(raw_assets),
             "ai_status": ai_public,
             "link_shaper": self.link_shaper.to_dict(),
             "scenes": [
@@ -214,9 +216,14 @@ class StudioSupervisor:
                 include_sitl=include_sitl,
             )
             return {
-                "ready": all(st.available for st in statuses.values()),
+                "ready": assets_ready(statuses),
                 "assets": {
-                    name: {"available": st.available, "detail": st.detail, "source": st.source}
+                    name: {
+                        "available": st.available,
+                        "optional": st.optional,
+                        "detail": st.detail,
+                        "source": st.source,
+                    }
                     for name, st in statuses.items()
                 },
             }
