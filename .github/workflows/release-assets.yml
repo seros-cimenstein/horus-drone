@@ -73,10 +73,10 @@ jobs:
       - name: Build ArduCopter.exe (Copter-4.7.1) via Cygwin
         shell: C:\cygwin\bin\bash.exe --login -eo pipefail '{0}'
         run: |
+          set -o igncr 2>/dev/null || true
           python3 -m pip install empy==3.3.4 pexpect future
           python3 -m pip install --no-deps pymavlink
-          git clone --depth 1 --branch Copter-4.7.1 --recurse-submodules --shallow-submodules \
-            https://github.com/ArduPilot/ardupilot.git /tmp/ardupilot
+          git clone --depth 1 --branch Copter-4.7.1 --recurse-submodules --shallow-submodules https://github.com/ArduPilot/ardupilot.git /tmp/ardupilot
           cd /tmp/ardupilot
           ./waf configure --board sitl
           ./waf copter -j4
