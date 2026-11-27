@@ -143,12 +143,13 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" artifacts/* --clobber
+          if gh release view "$TAG" -R "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* -R "$GH_REPO" --clobber
           else
-            gh release create "$TAG" artifacts/* \
+            gh release create "$TAG" artifacts/* -R "$GH_REPO" \
               --title "HORUS Pinned Assets ($TAG)" \
               --notes "Pinned ArduCopter 4.7.1 SITL binaries and ONNX perception models for HORUS Studio."
           fi
