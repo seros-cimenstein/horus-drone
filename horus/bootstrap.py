@@ -16,7 +16,14 @@ from typing import Any, Callable, Mapping
 import zipfile
 
 import httpx
-from platformdirs import user_cache_dir
+
+from horus.paths import (
+    default_assets_dir,
+    default_config_dir,
+    default_runs_dir,
+    detect_project_root,
+    storage_mode,
+)
 
 ASSETS_REPO = "seros-cimenstein/horus-drone"
 ASSETS_RELEASE_TAG = "assets-copter-4.7.1"
@@ -70,15 +77,27 @@ def platform_key() -> str:
 
 
 def default_cache_dir() -> Path:
-    """User-writable cache directory for HORUS SITL binaries and ONNX models."""
-    override = os.environ.get("HORUS_ASSETS_DIR")
-    if override and override.strip():
-        return Path(override).expanduser()
-    return Path(user_cache_dir("horus", "horus-drone")) / "assets"
+    """User-writable cache or project-local directory for HORUS SITL binaries and ONNX models."""
+    return default_assets_dir()
 
 
 def _repo_models_dir() -> Path:
-    return Path.cwd() / "models"
+    return (detect_project_root(include_package_root=False) or Path.cwd()) / "models"
+
+
+def _models_dir_for_root(root: Path) -> Path:
+    """Return the ONNX models directory inside ``root`` without double-nesting ``models/models``."""
+    return root if root.name == "models" else root / "models"
+
+
+def _is_project_models_root(root: Path) -> bool:
+    project_root = detect_project_root()
+    if project_root is None or root.name != "models":
+        return False
+    try:
+        return root.resolve() == (project_root / "models").resolve()
+    except OSError:
+        return False
 
 
 def _sitl_asset_for_platform(key: str | None = None) -> AssetSpec:
@@ -194,7 +213,7 @@ def _sitl_binary_name() -> str:
     return "ArduCopter.exe" if platform.system().lower() == "windows" else "arducopter"
 
 
-def _resolve_sitl(cache_dir: Path, spec: AssetSpec) -> AssetStatus:
+def _resolve_sitl(cache_dir: Path, spec: AssetSpec, *, check_repo: bool = True) -> AssetStatus:
     env_bin = os.environ.get("HORUS_SITL_BIN")
     if env_bin:
         candidate = Path(env_bin).expanduser()
@@ -202,15 +221,18 @@ def _resolve_sitl(cache_dir: Path, spec: AssetSpec) -> AssetStatus:
             return AssetStatus("sitl", True, candidate, "env", True, f"HORUS_SITL_BIN={candidate}")
         return AssetStatus("sitl", False, None, "env", False, f"HORUS_SITL_BIN not found: {candidate}")
 
-    # Check repo-local models/arducopter* or system PATH for developer checkouts.
+    # Check repo-local models/sitl or system PATH for developer checkouts.
     bin_name = spec.binary_relpath or _sitl_binary_name()
-    repo_candidate = _repo_models_dir() / "sitl" / bin_name
-    if repo_candidate.is_file():
-        return AssetStatus("sitl", True, repo_candidate, "repo", True, f"repo {repo_candidate}")
+    if check_repo:
+        repo_candidate = _repo_models_dir() / "sitl" / bin_name
+        if repo_candidate.is_file():
+            return AssetStatus("sitl", True, repo_candidate, "repo", True, f"repo {repo_candidate}")
 
     cache_candidate = cache_dir / "sitl" / bin_name
     if cache_candidate.is_file():
-        return AssetStatus("sitl", True, cache_candidate, "cache", True, f"cached {cache_candidate}")
+        src = "repo" if _is_project_models_root(cache_dir) else "cache"
+        label = f"repo {cache_candidate}" if src == "repo" else f"cached {cache_candidate}"
+        return AssetStatus("sitl", True, cache_candidate, src, True, label)
 
     path_bin = shutil.which(bin_name)
     if path_bin:
@@ -219,7 +241,13 @@ def _resolve_sitl(cache_dir: Path, spec: AssetSpec) -> AssetStatus:
     return AssetStatus("sitl", False, None, "missing", False, f"missing {spec.filename}")
 
 
-def _resolve_model(cache_dir: Path, spec: AssetSpec, env_var: str) -> AssetStatus:
+def _resolve_model(
+    cache_dir: Path,
+    spec: AssetSpec,
+    env_var: str,
+    *,
+    check_repo: bool = True,
+) -> AssetStatus:
     env_path = os.environ.get(env_var)
     if env_path:
         candidate = Path(env_path).expanduser()
@@ -244,38 +272,41 @@ def _resolve_model(cache_dir: Path, spec: AssetSpec, env_var: str) -> AssetStatu
             optional=spec.optional,
         )
 
-    repo_candidate = _repo_models_dir() / spec.filename
-    if repo_candidate.is_file():
-        ok = verify_sha256(repo_candidate, spec.sha256)
-        if ok:
-            return AssetStatus(
-                spec.name,
-                True,
-                repo_candidate,
-                "repo",
-                True,
-                f"repo {repo_candidate}",
-                optional=spec.optional,
-            )
+    if check_repo:
+        repo_candidate = _repo_models_dir() / spec.filename
+        if repo_candidate.is_file():
+            ok = verify_sha256(repo_candidate, spec.sha256)
+            if ok:
+                return AssetStatus(
+                    spec.name,
+                    True,
+                    repo_candidate,
+                    "repo",
+                    True,
+                    f"repo {repo_candidate}",
+                    optional=spec.optional,
+                )
 
-    cache_candidate = cache_dir / "models" / spec.filename
+    cache_candidate = _models_dir_for_root(cache_dir) / spec.filename
     if cache_candidate.is_file():
+        src = "repo" if _is_project_models_root(cache_dir) else "cache"
         ok = verify_sha256(cache_candidate, spec.sha256)
         if ok:
+            label = f"repo {cache_candidate}" if src == "repo" else f"cached {cache_candidate}"
             return AssetStatus(
                 spec.name,
                 True,
                 cache_candidate,
-                "cache",
+                src,
                 True,
-                f"cached {cache_candidate}",
+                label,
                 optional=spec.optional,
             )
         return AssetStatus(
             spec.name,
             False,
             None,
-            "cache",
+            src,
             False,
             f"digest mismatch at {cache_candidate}",
             optional=spec.optional,
@@ -296,12 +327,13 @@ def assets_ready(statuses: Mapping[str, AssetStatus]) -> bool:
 
 def check_assets(cache_dir: Path | None = None) -> dict[str, AssetStatus]:
     """Check availability of SITL and ONNX model assets without downloading anything."""
+    explicit = cache_dir is not None or bool((os.environ.get("HORUS_ASSETS_DIR") or "").strip())
     root = cache_dir or default_cache_dir()
     specs = {spec.name: spec for spec in asset_manifest()}
     return {
-        "sitl": _resolve_sitl(root, specs["sitl"]),
-        "yolov8n": _resolve_model(root, specs["yolov8n"], "HORUS_YOLO_MODEL"),
-        "reid": _resolve_model(root, specs["reid"], "HORUS_REID_MODEL"),
+        "sitl": _resolve_sitl(root, specs["sitl"], check_repo=not explicit),
+        "yolov8n": _resolve_model(root, specs["yolov8n"], "HORUS_YOLO_MODEL", check_repo=not explicit),
+        "reid": _resolve_model(root, specs["reid"], "HORUS_REID_MODEL", check_repo=not explicit),
     }
 
 
@@ -419,7 +451,7 @@ def ensure_assets(
                 if os.name == "posix":
                     bin_path.chmod(bin_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
             else:
-                model_path = root / "models" / spec.filename
+                model_path = _models_dir_for_root(root) / spec.filename
                 try:
                     download_file_atomic(
                         http,
@@ -518,7 +550,10 @@ def doctor_report(cache_dir: Path | None = None) -> dict[str, Any]:
     return {
         "python": sys.version.split()[0],
         "platform": platform_key(),
+        "storage_mode": storage_mode(),
         "cache_dir": str(cache_dir or default_cache_dir()),
+        "config_dir": str(default_config_dir()),
+        "runs_dir": str(default_runs_dir()),
         "mujoco": gl,
         "assets": {
             name: {

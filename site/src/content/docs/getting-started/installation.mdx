@@ -24,8 +24,8 @@ No pre-installed Python, `uv`, or `git` is required. Each installer bootstraps `
     ```
     Set `$env:HORUS_SKIP_SETUP = "1"` to skip asset downloads during install, or `$env:HORUS_NO_START = "1"` to install without auto-launching **HORUS Studio**.
   </TabItem>
-  <TabItem label="uv / pip">
-    Install directly from GitHub with `uv` (no `git` required):
+  <TabItem label="uv">
+    Install directly from GitHub with `uv` (no `git` or pre-installed Python required):
     ```sh
     uv tool install --python 3.12 https://github.com/seros-cimenstein/horus-drone/archive/refs/heads/main.tar.gz
     horus
@@ -35,14 +35,40 @@ No pre-installed Python, `uv`, or `git` is required. Each installer bootstraps `
     uv tool install --python 3.12 -e .
     horus
     ```
-    Or with `pip`:
+    On first launch, `horus` automatically runs `horus setup` if required SITL/ONNX assets are missing (pass `--no-auto-setup` or set `HORUS_SKIP_SETUP=1` to skip, or run `horus setup` manually ahead of time).
+  </TabItem>
+  <TabItem label="pip">
+    Requires **Python 3.10–3.13**. Use a virtual environment so `pip` does not conflict with system Python packages (PEP 668):
     ```sh
+    python -m venv .venv
+    # Linux / macOS:
+    source .venv/bin/activate
+    # Windows (PowerShell):
+    # .\.venv\Scripts\Activate.ps1
+
+    pip install --upgrade pip
     pip install https://github.com/seros-cimenstein/horus-drone/archive/refs/heads/main.tar.gz
     horus
     ```
-    On first launch, `horus` automatically runs `horus setup` if required SITL/ONNX assets are missing (pass `--no-auto-setup` or set `HORUS_SKIP_SETUP=1` to skip, or run `horus setup` manually ahead of time).
+    Or install from a local clone in editable mode:
+    ```sh
+    pip install -e .
+    horus
+    ```
+    You can also use `git+https://github.com/seros-cimenstein/horus-drone.git` if `git` is installed. On first launch, `horus` automatically fetches missing SITL and ONNX assets.
   </TabItem>
 </Tabs>
+
+## Where HORUS stores files
+
+HORUS uses a hybrid storage layout based on how you run it:
+
+| Mode | SITL & ONNX models | Session logs & runs | Settings, API secrets (`0600`) & TLS |
+| --- | --- | --- | --- |
+| **Source checkout** (editable `-e .` or running inside repo) | `<repo>/models/` | `<repo>/runs/` | OS user config dir |
+| **Installed package** (`install.sh`, `install.ps1`, `uv tool`, `pip`) | OS user cache dir (`~/.cache/horus/assets`, `~/Library/Caches/horus/assets`, `%LOCALAPPDATA%\horus-drone\horus\Cache\assets`) | OS user data dir (`~/.local/share/horus/runs`, `~/Library/Application Support/horus/runs`, `%LOCALAPPDATA%\horus-drone\horus\runs`) | OS user config dir (`~/.config/horus`, `~/Library/Application Support/horus`, `%LOCALAPPDATA%\horus-drone\horus`) |
+
+Override any location with `HORUS_ASSETS_DIR`, `HORUS_RUNS_DIR`, or `HORUS_CONFIG_DIR` (run `horus doctor` to inspect the resolved paths).
 
 ## Companion board install
 

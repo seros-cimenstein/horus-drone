@@ -17,6 +17,7 @@ from typing import Any
 
 from horus.config import load_config
 from horus.mcp_client import open_session, raise_for_error
+from horus.paths import default_runs_dir
 
 
 def _jpeg_bytes(image_content: Any) -> bytes:
@@ -99,7 +100,7 @@ async def _request(
         _print_content(
             list(getattr(result, "content", None) or []),
             tool=command,
-            image_root=Path("runs/manager"),
+            image_root=default_runs_dir() / "manager",
             bearer_token=token,
         )
         raise_for_error(result, command)

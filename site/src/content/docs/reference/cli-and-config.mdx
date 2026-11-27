@@ -85,7 +85,7 @@ YAML configs are parsed **strictly**: unknown keys are rejected at startup so ty
 | `HORUS_EVENT_LOG`, `HORUS_RUN_DIR` | Override JSONL event log file and run output directory |
 | `HORUS_LOG_LEVEL`, `HORUS_LOG_FORMAT`, `HORUS_LOG_FILE` | Control logging verbosity (`INFO`), output format (`auto`, `rich`, `plain`, `json`), and rotating log file path |
 | `HORUS_TRACEBACK_LOCALS`, `NO_COLOR` | Include locals in Rich tracebacks when `1`; disable terminal colors when set |
-| `HORUS_ASSETS_DIR`, `HORUS_CONFIG_DIR` | Override asset cache and Studio config directories |
+| `HORUS_ASSETS_DIR`, `HORUS_RUNS_DIR`, `HORUS_CONFIG_DIR` | Override asset cache (`<repo>/models` or OS user cache), run/log root (`<repo>/runs` or OS user data), and Studio config/secrets directory |
 | `HORUS_SKIP_SETUP`, `HORUS_NO_START` | Skip automatic `horus setup` on Studio startup/install (`1`), or skip auto-launching `horus` after one-line install (`1`) |
 | `HORUS_SITL_BIN`, `HORUS_YOLO_MODEL`, `HORUS_REID_MODEL` | Explicit binary/model overrides |
 | `HORUS_GROUNDER_HF_CACHE` | Offline Hugging Face cache directory (`HF_HUB_OFFLINE=1`) |

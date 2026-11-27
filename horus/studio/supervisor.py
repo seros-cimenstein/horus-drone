@@ -22,6 +22,7 @@ import yaml
 from horus.bootstrap import assets_ready, check_assets, ensure_assets
 from horus.logging import unwrap_exception
 from horus.mcp_client import open_session
+from horus.paths import default_grounder_hf_dir, default_runs_dir, detect_project_root
 from horus.studio.capabilities import check_capabilities
 from horus.studio.link_shaper import LinkShaper
 from horus.studio.mcp_configs import generate_mcp_configs
@@ -123,7 +124,7 @@ class StudioSupervisor:
     ) -> None:
         self.settings_store = settings_store or StudioSettingsStore()
         self.link_shaper = link_shaper or LinkShaper()
-        self.runs_root = Path(runs_root) if runs_root is not None else Path("runs")
+        self.runs_root = Path(runs_root) if runs_root is not None else default_runs_dir()
         self.publish_event = publish_event
         self.commander = commander
         self.display = display
@@ -713,8 +714,9 @@ class StudioSupervisor:
         from horus.grounder.backends import resolve_cloud_vlm_config
 
         self.stop_grounder()
+        project_root = detect_project_root() or Path.cwd()
         venv_py = (
-            Path.cwd()
+            project_root
             / "models"
             / "grounder-venv"
             / ("Scripts" if os.name == "nt" else "bin")
@@ -750,6 +752,8 @@ class StudioSupervisor:
                 raise RuntimeError(
                     "Local PyTorch grounder requires `horus-drone[grounder]` or `models/grounder-venv` (or choose Cloud VLM)."
                 )
+            if "HF_HOME" not in env and "HORUS_GROUNDER_HF_CACHE" not in env:
+                env["HF_HOME"] = str(default_grounder_hf_dir())
             py = str(venv_py) if venv_py.is_file() else sys.executable
 
         log_path = self.runs_root / "studio" / "grounder.log"

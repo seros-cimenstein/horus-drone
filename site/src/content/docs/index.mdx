@@ -30,7 +30,7 @@ import { Card, CardGrid, Tabs, TabItem } from '@astrojs/starlight/components';
     irm https://seros-cimenstein.github.io/horus-drone/install.ps1 | iex
     ```
   </TabItem>
-  <TabItem label="uv / pip">
+  <TabItem label="uv">
     From GitHub (no `git` required):
     ```sh
     uv tool install --python 3.12 https://github.com/seros-cimenstein/horus-drone/archive/refs/heads/main.tar.gz
@@ -42,9 +42,23 @@ import { Card, CardGrid, Tabs, TabItem } from '@astrojs/starlight/components';
     horus
     ```
   </TabItem>
+  <TabItem label="pip">
+    Create a virtualenv (Python 3.10–3.13) and install directly from GitHub:
+    ```sh
+    python -m venv .venv
+    source .venv/bin/activate   # Windows PowerShell: .\.venv\Scripts\Activate.ps1
+    pip install https://github.com/seros-cimenstein/horus-drone/archive/refs/heads/main.tar.gz
+    horus
+    ```
+    Or from a local clone:
+    ```sh
+    pip install -e .
+    horus
+    ```
+  </TabItem>
 </Tabs>
 
-The one-line installers bootstrap `uv` + Python 3.12, download SITL and vision models, and start **HORUS Studio** automatically (set `HORUS_NO_START=1` to skip auto-launch). When installing manually with `uv`, `horus` automatically fetches missing SITL/models on first launch.
+The one-line installers bootstrap `uv` + Python 3.12, download SITL and vision models, and start **HORUS Studio** automatically (set `HORUS_NO_START=1` to skip auto-launch). When installing manually with `uv` or `pip`, `horus` automatically fetches missing SITL/models on first launch.
 
 ## Why HORUS?
 

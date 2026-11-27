@@ -16,6 +16,7 @@ from horus.events import EventBus
 from horus.executor import HorusExecutor
 from horus.flight import FlightLink
 from horus.logging import add_logging_arguments, configure_logging, install_unhandled_exception_hooks
+from horus.paths import default_runs_dir
 from horus.mcp_server import flight as flight_tools
 from horus.mcp_server import guidance, maps, scene, tasks
 from horus.mcp_server import perception as perception_tools
@@ -56,7 +57,7 @@ class BearerTokenASGI:
 
 
 def _write_current_run_pointer(run_dir: Path) -> None:
-    pointer = Path("runs/horus/current-run")
+    pointer = default_runs_dir() / "horus" / "current-run"
     pointer.parent.mkdir(parents=True, exist_ok=True)
     temporary = pointer.with_name(f".{pointer.name}.{uuid4().hex}.tmp")
     try:
@@ -147,7 +148,7 @@ def main(argv: list[str] | None = None) -> None:
     run_dir = (
         Path(run_dir_override).expanduser()
         if run_dir_override
-        else Path("runs/horus")
+        else default_runs_dir() / "horus"
         / f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S.%fZ}_{uuid4().hex[:8]}"
     )
     run_dir.mkdir(parents=True, exist_ok=True)

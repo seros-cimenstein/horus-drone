@@ -208,6 +208,7 @@ def test_flight_only_cli_and_config_skip_camera(monkeypatch, tmp_path, argv, con
             calls["executor_closed"] = True
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HORUS_RUNS_DIR", str(tmp_path / "runs"))
     run_dir = tmp_path / "custom-run"
     event_path = tmp_path / "custom-events.jsonl"
     monkeypatch.setenv("HORUS_RUN_DIR", str(run_dir))
@@ -485,6 +486,7 @@ def test_event_log_path_uses_explicit_environment_then_current_run_pointer(monke
     from horus.event_log import event_log_path_from_environment
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HORUS_RUNS_DIR", str(tmp_path / "runs"))
     monkeypatch.delenv("HORUS_EVENT_LOG", raising=False)
     monkeypatch.delenv("HORUS_RUN_DIR", raising=False)
     run_dir = tmp_path / "runs" / "horus" / "run-1"

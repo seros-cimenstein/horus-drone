@@ -104,26 +104,23 @@ export function SystemLogsView({
         <Section
           title="Optional & Advanced Integrations"
           description="Extra simulators, local PyTorch grounder, and remote Tailscale access (not required for standalone flights)."
+          action={
+            <StatusBadge tone={optionalActiveCount > 0 ? "ok" : "neutral"} className="font-mono tabular-nums">
+              {optionalActiveCount}/{optionalCaps.length} ready
+            </StatusBadge>
+          }
         >
-          <details open className="group overflow-hidden rounded-[10px] border border-border bg-surface">
-            <summary className="flex cursor-pointer select-none items-center justify-between gap-4 px-5 py-3.5 text-[14px] font-medium text-primary transition-colors hover:bg-hover">
-              <span>Gazebo Harmonic, GTA V, Open-Vocab Grounder &amp; Phone Tailscale</span>
-              <span className="font-mono text-[12.5px] text-secondary tabular-nums">
-                {optionalActiveCount}/{optionalCaps.length} ready
-              </span>
-            </summary>
-            <div className="divide-y divide-border border-t border-border">
-              {optionalCaps.map((cap) => (
-                <CapabilityRequirements
-                  key={cap.id}
-                  cap={cap}
-                  mode="full"
-                  isOptionalTier
-                  onAction={actionForCap(cap.id)}
-                />
-              ))}
-            </div>
-          </details>
+          <div className="divide-y divide-border overflow-hidden rounded-[10px] border border-border bg-surface">
+            {optionalCaps.map((cap) => (
+              <CapabilityRequirements
+                key={cap.id}
+                cap={cap}
+                mode="full"
+                isOptionalTier
+                onAction={actionForCap(cap.id)}
+              />
+            ))}
+          </div>
         </Section>
       )}
 

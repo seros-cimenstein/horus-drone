@@ -61,6 +61,16 @@ uv tool install --python 3.12 https://github.com/seros-cimenstein/horus-drone/ar
 horus
 ```
 
+**Direct with `pip` (Python 3.10–3.13):**
+
+```sh
+python -m venv .venv
+# Linux / macOS: source .venv/bin/activate
+# Windows (PowerShell): .\.venv\Scripts\Activate.ps1
+pip install https://github.com/seros-cimenstein/horus-drone/archive/refs/heads/main.tar.gz
+horus
+```
+
 ### From a local clone (recommended for development)
 
 ```sh
@@ -68,7 +78,16 @@ uv tool install --python 3.12 -e .
 horus
 ```
 
-`horus` automatically runs asset setup on first launch if SITL or ONNX models are missing (pass `--no-auto-setup` or set `HORUS_SKIP_SETUP=1` to skip, or run `horus setup` ahead of time). If you work inside a local virtualenv instead of `uv tool install`, run `.venv/bin/horus`.
+Or with `pip` inside a local virtualenv:
+
+```sh
+python -m venv .venv
+# Activate .venv, then:
+pip install -e .
+horus
+```
+
+`horus` automatically runs asset setup on first launch if SITL or ONNX models are missing (pass `--no-auto-setup` or set `HORUS_SKIP_SETUP=1` to skip, or run `horus setup` ahead of time). When running from a writable source checkout, downloaded assets and logs stay in `<repo>/models` and `<repo>/runs`; when installed as a package, they live in your OS user cache/data directories.
 
 `horus` launches **HORUS Studio** with zero Docker, Gazebo, GStreamer, or hand-edited YAML required. Pick **Indoor SAR Room**, **Outdoor Forest**, **Urban Plaza**, **Procedural World**, or **Real Drone** in one click.
 

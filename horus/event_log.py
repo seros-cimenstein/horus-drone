@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from horus.paths import default_runs_dir
+
 
 _BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
 _SECRET_PARAM_RE = re.compile(
@@ -126,7 +128,7 @@ def event_log_path_from_environment() -> Path:
     """Resolve the shared HORUS event log path using server/REPL precedence.
 
     ``HORUS_EVENT_LOG`` overrides ``HORUS_RUN_DIR/events.jsonl``. Without either
-    override, the active server run directory is read from ``runs/horus/current-run``.
+    override, the active server run directory is read from ``<runs_dir>/horus/current-run``.
     """
     event_path = os.environ.get("HORUS_EVENT_LOG")
     if event_path:
@@ -134,7 +136,11 @@ def event_log_path_from_environment() -> Path:
     run_dir = os.environ.get("HORUS_RUN_DIR")
     if run_dir:
         return Path(run_dir).expanduser() / "events.jsonl"
-    pointer = Path("runs/horus/current-run")
+    pointer = default_runs_dir() / "horus" / "current-run"
+    if not pointer.is_file() and not (os.environ.get("HORUS_RUNS_DIR") or "").strip():
+        legacy = Path("runs/horus/current-run")
+        if legacy.is_file():
+            pointer = legacy
     try:
         selected_run_dir = pointer.read_text(encoding="utf-8").strip()
     except OSError as exc:

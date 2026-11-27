@@ -13,6 +13,7 @@ from typing import Any
 
 from horus.bootstrap import _check_mujoco_gl, check_assets
 from horus.grounder.backends import resolve_cloud_vlm_config
+from horus.paths import detect_project_root
 from horus.studio.preflight import list_serial_ports
 from horus.studio.settings import StudioSettingsStore
 
@@ -78,7 +79,7 @@ def check_capabilities(
     probe_external_tools: bool = True,
 ) -> list[dict[str, Any]]:
     """Evaluate readiness and requirement checks for all HORUS features."""
-    repo_root = Path.cwd()
+    repo_root = detect_project_root() or Path.cwd()
     assets = check_assets(cache_dir)
     settings = settings_store.load_settings()
     ai_view = settings_store.public_view()

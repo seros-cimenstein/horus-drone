@@ -11,9 +11,9 @@ import stat
 from typing import Any, Mapping
 
 import httpx
-from platformdirs import user_config_dir
 
 from horus.config import CommanderSettings
+from horus.paths import default_config_dir
 
 SECRET_KEYS = (
     "OPENAI_API_KEY",
@@ -46,13 +46,6 @@ def mask_secret(value: str | None) -> str | None:
     if len(stripped) <= 8:
         return "****"
     return f"{stripped[:3]}...{stripped[-4:]}"
-
-
-def default_config_dir() -> Path:
-    override = os.environ.get("HORUS_CONFIG_DIR")
-    if override and override.strip():
-        return Path(override).expanduser()
-    return Path(user_config_dir("horus", "horus-drone"))
 
 
 @dataclass(slots=True)

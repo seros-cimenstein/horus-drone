@@ -21,6 +21,7 @@ import webbrowser
 
 from horus.bootstrap import AssetStatus, assets_ready, check_assets, doctor_report, ensure_assets
 from horus.commander.server import DEFAULT_HOST, DEFAULT_PORT, _GRACEFUL_SHUTDOWN_S, control_app_url, create_app
+from horus.paths import default_runs_dir
 from horus.logging import (
     _RICH_AVAILABLE,
     add_logging_arguments,
@@ -98,7 +99,7 @@ def _run_studio(args: argparse.Namespace) -> int:
     phone_token = os.environ.get("HORUS_COMMANDER_PHONE_TOKEN") or (
         secrets.token_urlsafe(24) if (args.phone or lan_mode) else None
     )
-    default_log = Path("runs/studio/studio.log")
+    default_log = default_runs_dir() / "studio" / "studio.log"
     chosen_log = args.log_file if args.log_file is not None else default_log
     try:
         configure_logging(
@@ -444,7 +445,9 @@ def _run_doctor(args: argparse.Namespace) -> int:
             table.add_column("Check", style="horus.key")
             table.add_column("Status")
             table.add_column("Details")
-            table.add_row("Cache dir", "[horus.ok]OK[/]", str(report["cache_dir"]))
+            table.add_row("Assets dir", "[horus.ok]OK[/]", f"{report['cache_dir']} ({report['storage_mode']})")
+            table.add_row("Config dir", "[horus.ok]OK[/]", str(report["config_dir"]))
+            table.add_row("Runs dir", "[horus.ok]OK[/]", str(report["runs_dir"]))
             mujoco_badge = "[horus.ok]OK[/]" if report["mujoco"]["ok"] else "[horus.warn]WARN[/]"
             table.add_row("MuJoCo GL", mujoco_badge, str(report["mujoco"]["detail"]))
             for name, info in report["assets"].items():
@@ -461,7 +464,9 @@ def _run_doctor(args: argparse.Namespace) -> int:
             return 0
 
     print(f"HORUS Doctor ({report['platform']}, Python {report['python']})")
-    print(f"  Cache dir:  {report['cache_dir']}")
+    print(f"  Assets dir: {report['cache_dir']} ({report['storage_mode']})")
+    print(f"  Config dir: {report['config_dir']}")
+    print(f"  Runs dir:   {report['runs_dir']}")
     print(f"  MuJoCo GL:  {'OK' if report['mujoco']['ok'] else 'WARN'} — {report['mujoco']['detail']}")
     for name, info in report["assets"].items():
         print(f"  Asset {name:7s}: {'OK' if info['available'] else 'MISSING'} — {info['detail']}")
@@ -608,7 +613,7 @@ def _run_logs(args: argparse.Namespace) -> int:
         log_file=args.log_file,
         component="logs",
     )
-    runs_dir = Path(args.runs_dir)
+    runs_dir = Path(args.runs_dir).expanduser() if args.runs_dir is not None else default_runs_dir()
     targets = _discover_log_targets(runs_dir, args.run, args.service)
     console = get_console(stderr=False) if _RICH_AVAILABLE else None
 
@@ -741,7 +746,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Filter to records at or above this severity",
     )
     p_logs.add_argument("--list", action="store_true", help="List discovered log files and sizes")
-    p_logs.add_argument("--runs-dir", type=Path, default=Path("runs"), help="Root runs directory (default: runs)")
+    p_logs.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Root runs directory (default: <project>/runs or user data dir; env: HORUS_RUNS_DIR)",
+    )
     add_logging_arguments(p_logs)
     return parser
 

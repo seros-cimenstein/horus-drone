@@ -114,6 +114,7 @@ def test_horus_mcp_call_uses_streamable_http_and_saves_image(
 
     server = serve(create_application(mcp, token="test-client-token"))
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HORUS_RUNS_DIR", str(tmp_path / "runs"))
     monkeypatch.setenv("HORUS_MCP_URL", server.url)
     monkeypatch.setenv("HORUS_MCP_TOKEN", "test-client-token")
     monkeypatch.setenv("HORUS_CONFIG", str(ROOT_CONFIG))
