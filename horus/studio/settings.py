@@ -78,6 +78,7 @@ class StudioSettings:
     camera_max_fps: float = 5.0
     open_vocab_hz: float = 0.5
     grounder_url: str = "http://127.0.0.1:8100"
+    grounder_backend: str = "auto"  # auto | cloud-vlm | grounding-dino-tiny | owlv2-base-patch16-ensemble
     recent_hardware: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
@@ -89,6 +90,13 @@ class StudioSettings:
             except (TypeError, ValueError):
                 return default
             return max(lo, min(hi, val))
+
+        raw_gb = str(data.get("grounder_backend", "auto") or "auto").strip().lower()
+        grounder_backend = (
+            raw_gb
+            if raw_gb in {"auto", "cloud-vlm", "grounding-dino-tiny", "owlv2-base-patch16-ensemble"}
+            else "auto"
+        )
 
         return cls(
             ai_provider=str(data.get("ai_provider", "auto") or "auto"),
@@ -109,6 +117,7 @@ class StudioSettings:
             camera_max_fps=_num("camera_max_fps", 5.0, 1.0, 30.0),
             open_vocab_hz=_num("open_vocab_hz", 0.5, 0.1, 5.0),
             grounder_url=str(data.get("grounder_url", "http://127.0.0.1:8100") or "").strip(),
+            grounder_backend=grounder_backend,
             recent_hardware=list(data.get("recent_hardware") or [])[:8],
         )
 

@@ -5,9 +5,22 @@ description: Install the HORUS Control app on your phone over Tailscale HTTPS wi
 
 The HORUS **Control app** automatically adapts at `/?view=phone` as an installable Progressive Web App (PWA) designed for field operations over low-bandwidth links.
 
-## Publishing over Tailscale
+## Option 1: Local Wi-Fi / Hotspot (No Tailscale)
 
-**One-time prerequisite:** Enable **MagicDNS** and **HTTPS certificates** in your Tailscale admin console, and sign both your laptop and phone into the same tailnet.
+When your laptop and phone are on the same Wi-Fi network or mobile hotspot, you don't need Tailscale or internet access:
+
+1. Start **HORUS Studio** with built-in self-signed LAN HTTPS enabled:
+
+   ```sh
+   horus studio --phone --lan
+   ```
+
+2. HORUS prints a `LAN Phone PWA` URL (`https://<lan-ip>:8765/?view=phone#token=...`) and displays its QR code in the **Phone App** tab.
+3. Scan the QR code on your phone, accept the one-time self-signed certificate prompt in your mobile browser, and tap **Add to Home Screen**.
+
+## Option 2: Remote Access over Tailscale
+
+For encrypted remote access over cellular or outside your local Wi-Fi, **one-time prerequisite:** enable **MagicDNS** and **HTTPS certificates** in your Tailscale admin console, and sign both your laptop and phone into the same tailnet.
 
 1. Start **HORUS Studio** with phone support enabled (or set `HORUS_COMMANDER_PHONE_TOKEN`):
 

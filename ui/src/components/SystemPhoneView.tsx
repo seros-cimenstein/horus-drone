@@ -1,11 +1,14 @@
-import { Check, Copy, Download, QrCode, RefreshCw, Save, Smartphone } from "lucide-react";
+import { ArrowRight, Check, Copy, Download, Globe, QrCode, RefreshCw, Save, Smartphone, Wifi } from "lucide-react";
 import { useEffect, useState } from "react";
 import { horusApi } from "../api";
 import { buildQrMatrix } from "../qr";
 import type { CapabilityItem, PhoneStatus, RunLogEntry, StudioStatus } from "../types";
 import { Button } from "./common/Button";
-import { Field, Input, PageHeader, Section, SliderField, StatusBadge } from "./common/Surface";
+import { CopyCommand } from "./common/CopyCommand";
+import { Field, Input, PageHeader, Section, Select, SliderField, StatusBadge } from "./common/Surface";
 import { useToast } from "./common/Toast";
+
+type NavId = "flight" | "lab" | "worlds" | "ai" | "phone" | "tuning" | "system";
 
 interface Props {
   section: "tuning" | "phone" | "system";
@@ -16,6 +19,7 @@ interface Props {
   onBootstrap?: () => Promise<void>;
   onRefreshCaps: (force: boolean) => Promise<CapabilityItem[]>;
   onSaved: () => void;
+  onNavigate?: (id: NavId) => void;
 }
 
 export function SystemPhoneView({
@@ -27,6 +31,7 @@ export function SystemPhoneView({
   onBootstrap,
   onRefreshCaps,
   onSaved,
+  onNavigate,
 }: Props) {
   const [flightSpeed, setFlightSpeed] = useState(1.2);
   const [rthDelay, setRthDelay] = useState(30.0);
@@ -34,10 +39,12 @@ export function SystemPhoneView({
   const [maxFps, setMaxFps] = useState(5.0);
   const [openVocabHz, setOpenVocabHz] = useState(0.5);
   const [grounderUrl, setGrounderUrl] = useState("http://127.0.0.1:8100");
+  const [grounderBackend, setGrounderBackend] = useState("auto");
   const [saveNotice, setSaveNotice] = useState("");
   const [savingTuning, setSavingTuning] = useState(false);
   const [checkingCaps, setCheckingCaps] = useState(false);
   const [phoneBusy, setPhoneBusy] = useState<"start" | "stop" | null>(null);
+  const [phoneMode, setPhoneMode] = useState<"lan" | "tailscale">("lan");
   const [phone, setPhone] = useState<PhoneStatus | null>(null);
   const [runs, setRuns] = useState<RunLogEntry[]>([]);
   const [copiedUrl, setCopiedUrl] = useState(false);
@@ -53,10 +60,17 @@ export function SystemPhoneView({
         setMaxFps(v.settings.camera_max_fps ?? 5.0);
         setOpenVocabHz(v.settings.open_vocab_hz ?? 0.5);
         setGrounderUrl(v.settings.grounder_url ?? "http://127.0.0.1:8100");
+        setGrounderBackend(v.settings.grounder_backend ?? "auto");
       })
       .catch(() => {});
     if (section === "phone") {
-      horusApi.getPhoneStatus(token).then(setPhone).catch(() => {});
+      horusApi
+        .getPhoneStatus(token)
+        .then((p) => {
+          setPhone(p);
+          if (p.serve_active) setPhoneMode("tailscale");
+        })
+        .catch(() => {});
     }
     if (section === "system") {
       horusApi.getRuns(token).then((r) => setRuns(r.runs)).catch(() => {});
@@ -73,6 +87,7 @@ export function SystemPhoneView({
         camera_max_fps: maxFps,
         open_vocab_hz: openVocabHz,
         grounder_url: grounderUrl,
+        grounder_backend: grounderBackend,
       });
       onSaved();
       setSaveNotice("Saved. Restart an active session to apply.");
@@ -182,10 +197,20 @@ export function SystemPhoneView({
               hint="How frequently custom text labels are checked via horus-grounder."
               onChange={setOpenVocabHz}
             />
-            <div className="flex flex-col justify-center rounded-[8px] border border-border bg-surface p-3.5">
-              <Field label="Grounder Service URL">
-                <Input value={grounderUrl} onChange={(e) => setGrounderUrl(e.target.value)} />
-              </Field>
+            <div className="flex flex-col gap-3 rounded-[8px] border border-border bg-surface p-3.5 sm:col-span-2">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Default Grounder Backend" hint="for open-vocab targets">
+                  <Select value={grounderBackend} onChange={(e) => setGrounderBackend(e.target.value)}>
+                    <option value="auto">Auto (Cloud VLM or Local PyTorch)</option>
+                    <option value="cloud-vlm">Cloud VLM (Zero Install — uses API key)</option>
+                    <option value="grounding-dino-tiny">Grounding DINO (Local PyTorch)</option>
+                    <option value="owlv2-base-patch16-ensemble">OWLv2 (Local PyTorch)</option>
+                  </Select>
+                </Field>
+                <Field label="Grounder Service URL">
+                  <Input value={grounderUrl} onChange={(e) => setGrounderUrl(e.target.value)} />
+                </Field>
+              </div>
             </div>
           </div>
 
@@ -234,38 +259,16 @@ export function SystemPhoneView({
           )}
           <div className="flex min-w-0 flex-1 flex-col gap-3">
             <div className="text-[13.5px] text-secondary">
-              LAN HTTPS:{" "}
-              <strong className="text-primary">
-                {phone?.tls_enabled ? `active (${phone.lan_ip || "0.0.0.0"})` : "off (run `horus studio --phone --lan`)"}
-              </strong>
-              {" · "}Tailscale (optional):{" "}
-              <strong className="text-primary">{phone?.tailscale_installed ? "installed" : "not installed"}</strong>
-              {phone?.tailscale_installed && (
-                <>
-                  {" · "}HTTPS certs: <strong className="text-primary">{phone.tailscale_certs ? "enabled" : "disabled"}</strong>
-                </>
-              )}
+              {phone?.serve_active
+                ? "Active link: encrypted Tailscale HTTPS (works anywhere over cellular/internet)."
+                : phone?.tls_enabled
+                  ? `Active link: Local LAN HTTPS (${phone.lan_ip || "0.0.0.0"}) — no Tailscale required.`
+                  : "Local loopback only right now. Choose Wi-Fi LAN mode or Tailscale below to open on your phone."}
             </div>
             <pre className="overflow-x-auto rounded-[8px] border border-border bg-canvas p-3 font-mono text-[12.5px] text-primary">
-              {phoneUrl || "Start Studio with `horus studio --phone` for a dedicated phone link."}
+              {phoneUrl || "Start Studio with `horus studio --phone --lan` for a dedicated phone link."}
             </pre>
             <div className="flex flex-wrap gap-2">
-              <Button
-                variant="primary"
-                loading={phoneBusy === "start"}
-                disabled={phoneBusy !== null}
-                onClick={() => void handlePhoneServe("start")}
-              >
-                {phoneBusy !== "start" && <Smartphone size={14} />}
-                {phoneBusy === "start" ? "Starting…" : "Start Tailscale Serve"}
-              </Button>
-              <Button
-                loading={phoneBusy === "stop"}
-                disabled={phoneBusy !== null}
-                onClick={() => void handlePhoneServe("stop")}
-              >
-                {phoneBusy === "stop" ? "Stopping…" : "Stop Serve"}
-              </Button>
               <Button
                 disabled={!phoneUrl}
                 onClick={() => {
@@ -276,12 +279,106 @@ export function SystemPhoneView({
                   });
                 }}
               >
-                {copiedUrl ? <Check size={14} /> : <Copy size={14} />} {copiedUrl ? "Copied" : "Copy URL"}
+                {copiedUrl ? <Check size={14} /> : <Copy size={14} />} {copiedUrl ? "Copied" : "Copy Active URL"}
               </Button>
             </div>
-            {saveNotice && <p className="text-[13px] text-warning">{saveNotice}</p>}
           </div>
         </div>
+
+        <Section
+          title="Connection Mode"
+          description="Use Local Wi-Fi / Hotspot with zero external accounts, or Tailscale for remote cellular access."
+        >
+          <div className="flex flex-col gap-4 rounded-[10px] border border-border bg-surface p-5">
+            <div className="flex flex-wrap gap-2" role="tablist" aria-label="Phone connection mode">
+              <Button
+                size="sm"
+                variant={phoneMode === "lan" ? "primary" : "secondary"}
+                onClick={() => setPhoneMode("lan")}
+              >
+                <Wifi size={14} /> Local Wi-Fi / Hotspot (No Tailscale)
+              </Button>
+              <Button
+                size="sm"
+                variant={phoneMode === "tailscale" ? "primary" : "secondary"}
+                onClick={() => setPhoneMode("tailscale")}
+              >
+                <Globe size={14} /> Remote Access (Tailscale HTTPS)
+              </Button>
+            </div>
+
+            {phoneMode === "lan" ? (
+              <div className="flex flex-col gap-3 border-t border-border pt-4 text-[13.5px] text-secondary">
+                <p className="text-primary">
+                  Best for field hotspots or home Wi-Fi — uses a built-in self-signed HTTPS certificate and works completely offline without Tailscale.
+                </p>
+                <ol className="list-decimal space-y-2 pl-5">
+                  <li>
+                    Connect your laptop and phone to the same Wi-Fi network or mobile hotspot.
+                  </li>
+                  <li>
+                    Restart HORUS Studio with LAN HTTPS enabled:
+                    <div className="mt-1.5">
+                      <CopyCommand command="horus studio --phone --lan" label="LAN Phone command" />
+                    </div>
+                  </li>
+                  <li>
+                    Scan the QR code above on your phone, accept the one-time browser security prompt for the local self-signed cert, and tap <strong className="text-primary">Add to Home Screen</strong>.
+                  </li>
+                </ol>
+                <div className="text-[12.5px] text-muted">
+                  Current status:{" "}
+                  <strong className="text-primary">
+                    {phone?.tls_enabled ? `LAN HTTPS active on ${phone.lan_ip || "0.0.0.0"}` : "Not started with --lan"}
+                  </strong>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3 border-t border-border pt-4 text-[13.5px] text-secondary">
+                <p className="text-primary">
+                  Best when your phone is on cellular or a different network — routes strictly over your private Tailscale tailnet with trusted HTTPS certs.
+                </p>
+                <ol className="list-decimal space-y-2 pl-5">
+                  <li>
+                    Install Tailscale on both your laptop and phone and sign into the same tailnet.
+                  </li>
+                  <li>
+                    Enable <strong className="text-primary">MagicDNS</strong> and <strong className="text-primary">HTTPS Certificates</strong> in your Tailscale admin console.
+                  </li>
+                  <li>
+                    Start Studio with <code className="font-mono text-primary">horus studio --phone</code> and click <strong className="text-primary">Start Tailscale Serve</strong> below.
+                  </li>
+                </ol>
+                <div className="text-[12.5px] text-muted">
+                  Tailscale CLI:{" "}
+                  <strong className="text-primary">{phone?.tailscale_installed ? "installed" : "not installed"}</strong>
+                  {" · "}HTTPS certs:{" "}
+                  <strong className="text-primary">{phone?.tailscale_certs ? "enabled" : "disabled"}</strong>
+                  {phone?.tailscale_dns ? ` · DNS: ${phone.tailscale_dns}` : ""}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="primary"
+                    loading={phoneBusy === "start"}
+                    disabled={phoneBusy !== null}
+                    onClick={() => void handlePhoneServe("start")}
+                  >
+                    {phoneBusy !== "start" && <Smartphone size={14} />}
+                    {phoneBusy === "start" ? "Starting…" : "Start Tailscale Serve"}
+                  </Button>
+                  <Button
+                    loading={phoneBusy === "stop"}
+                    disabled={phoneBusy !== null}
+                    onClick={() => void handlePhoneServe("stop")}
+                  >
+                    {phoneBusy === "stop" ? "Stopping…" : "Stop Serve"}
+                  </Button>
+                </div>
+                {saveNotice && <p className="text-[13px] text-warning">{saveNotice}</p>}
+              </div>
+            )}
+          </div>
+        </Section>
       </div>
     );
   }
@@ -290,40 +387,74 @@ export function SystemPhoneView({
   const optionalCaps = caps.filter((c) => c.tier === "optional");
   const optionalActiveCount = optionalCaps.filter((c) => c.ready).length;
 
-  const renderCapabilityCard = (cap: CapabilityItem, isOptionalTier: boolean) => (
-    <div key={cap.id}>
-      <div className="flex items-center justify-between gap-4 px-5 py-3.5">
-        <div className="min-w-0">
-          <div className="text-[14.5px] font-medium text-primary">{cap.title}</div>
-          <div className="mt-0.5 text-[13px] text-secondary">{cap.summary}</div>
+  const targetForCap = (id: string): NavId | null => {
+    if (id === "agents") return "ai";
+    if (id === "phone_pwa") return "phone";
+    if (id === "builtin_3d" || id === "gazebo" || id === "gta" || id === "real_drone" || id === "grounder") {
+      return "worlds";
+    }
+    return null;
+  };
+
+  const renderCapabilityCard = (cap: CapabilityItem, isOptionalTier: boolean) => {
+    const targetNav = targetForCap(cap.id);
+    return (
+      <div key={cap.id}>
+        <div className="flex items-center justify-between gap-4 px-5 py-3.5">
+          <div className="min-w-0">
+            <div className="text-[14.5px] font-medium text-primary">{cap.title}</div>
+            <div className="mt-0.5 text-[13px] text-secondary">{cap.summary}</div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {onNavigate && targetNav && (
+              <Button size="sm" variant="ghost" onClick={() => onNavigate(targetNav)}>
+                Configure <ArrowRight size={12} />
+              </Button>
+            )}
+            <StatusBadge tone={cap.ready ? "ok" : isOptionalTier ? "neutral" : "warn"}>
+              {cap.ready ? "Ready" : isOptionalTier ? "Optional" : "Setup needed"}
+            </StatusBadge>
+          </div>
         </div>
-        <StatusBadge tone={cap.ready ? "ok" : isOptionalTier ? "neutral" : "warn"}>
-          {cap.ready ? "Ready" : isOptionalTier ? "Optional" : "Setup needed"}
-        </StatusBadge>
-      </div>
-      <div className="divide-y divide-border border-t border-border bg-canvas px-5">
-        {cap.checks.map((c) => {
-          const checkOptional = Boolean(c.optional || isOptionalTier);
-          return (
-            <div key={c.name} className="flex items-start justify-between gap-4 py-3 text-[13px]">
-              <div>
-                <div className="font-medium text-primary">{c.name}</div>
-                <div className="text-secondary">{c.detail}</div>
-                {!c.ok && c.fix_hint && (
-                  <div className={`mt-1 ${checkOptional ? "text-muted" : "text-warning"}`}>
-                    {checkOptional ? `Note: ${c.fix_hint}` : `Fix: ${c.fix_hint}`}
-                  </div>
-                )}
+        <div className="divide-y divide-border border-t border-border bg-canvas px-5">
+          {cap.checks.map((c) => {
+            const checkOptional = Boolean(c.optional || isOptionalTier);
+            const cmdMatch = !c.ok && c.fix_hint ? c.fix_hint.match(/`([^`]+)`/) : null;
+            return (
+              <div key={c.name} className="flex items-start justify-between gap-4 py-3 text-[13px]">
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium text-primary">{c.name}</div>
+                  <div className="text-secondary">{c.detail}</div>
+                  {!c.ok && c.fix_hint && (
+                    <div className={`mt-1 flex flex-wrap items-center gap-2 ${checkOptional ? "text-muted" : "text-warning"}`}>
+                      <span>{checkOptional ? `Note: ${c.fix_hint}` : `Fix: ${c.fix_hint}`}</span>
+                      {cmdMatch && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard
+                              ?.writeText(cmdMatch[1])
+                              .then(() => toast.info("Command copied", cmdMatch[1]))
+                              .catch(() => {});
+                          }}
+                          className="inline-flex items-center gap-1 rounded-[5px] border border-border bg-raised px-1.5 py-0.5 font-mono text-[11px] text-secondary hover:bg-hover hover:text-primary cursor-pointer"
+                        >
+                          <Copy size={11} /> {cmdMatch[1]}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <StatusBadge tone={c.ok ? "ok" : checkOptional ? "neutral" : "warn"}>
+                  {c.ok ? "OK" : checkOptional ? "Optional" : "Missing"}
+                </StatusBadge>
               </div>
-              <StatusBadge tone={c.ok ? "ok" : checkOptional ? "neutral" : "warn"}>
-                {c.ok ? "OK" : checkOptional ? "Optional" : "Missing"}
-              </StatusBadge>
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-8 px-6 py-8">

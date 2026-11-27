@@ -722,6 +722,10 @@ class StudioSupervisor:
 
         chosen = (backend or "auto").strip().lower()
         if chosen == "auto":
+            saved_backend = (self.settings_store.load_settings().grounder_backend or "auto").strip().lower()
+            if saved_backend != "auto":
+                chosen = saved_backend
+        if chosen == "auto":
             chosen = "cloud-vlm" if (cloud_cfg is not None and not venv_py.is_file() and not local_torch) else "grounding-dino-tiny"
 
         env = _child_log_env(os.environ)
@@ -902,6 +906,7 @@ class StudioSupervisor:
             "camera_max_fps": payload.get("camera_max_fps", current.camera_max_fps),
             "open_vocab_hz": payload.get("open_vocab_hz", current.open_vocab_hz),
             "grounder_url": payload.get("grounder_url", current.grounder_url),
+            "grounder_backend": payload.get("grounder_backend", current.grounder_backend),
             "recent_hardware": payload.get("recent_hardware", current.recent_hardware),
         }
         self.settings_store.save_settings(StudioSettings.from_dict(merged))

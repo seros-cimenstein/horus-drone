@@ -941,6 +941,7 @@ export function App() {
               onBootstrap={handleBootstrap}
               onRefreshCaps={refreshCaps}
               onSaved={refreshStudio}
+              onNavigate={setNav}
             />
           )}
         </main>

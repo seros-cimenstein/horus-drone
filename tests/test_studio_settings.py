@@ -15,7 +15,16 @@ def test_settings_store_persists_settings_and_0600_masked_secrets(tmp_path: Path
         monkeypatch.delenv(key, raising=False)
 
     store = StudioSettingsStore(tmp_path)
-    store.save_settings(StudioSettings(ai_provider="gemini", model="gemini-2.5-flash", theme="light"))
+    store.save_settings(
+        StudioSettings(
+            ai_provider="gemini",
+            model="gemini-2.5-flash",
+            theme="light",
+            grounder_backend="cloud-vlm",
+        )
+    )
+    assert store.load_settings().grounder_backend == "cloud-vlm"
+    assert StudioSettings.from_dict({"grounder_backend": "invalid-choice"}).grounder_backend == "auto"
     store.update_secrets({"GEMINI_API_KEY": "AIzaSySecretKey9876"})
 
     if os.name == "posix":

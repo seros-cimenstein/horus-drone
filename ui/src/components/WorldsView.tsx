@@ -4,6 +4,7 @@ import { horusApi } from "../api";
 import type { GrounderStatus, SerialPortInfo, StudioStatus } from "../types";
 import { SceneVisual, type SceneVisualVariant } from "./SceneVisual";
 import { Button, StopSessionButton } from "./common/Button";
+import { CopyCommand } from "./common/CopyCommand";
 import { Field, Input, PageHeader, Section, Select, StatusBadge } from "./common/Surface";
 import { useToast } from "./common/Toast";
 
@@ -61,6 +62,12 @@ export function WorldsView({
       })
       .catch(() => {});
     horusApi.getGrounder(token).then(setGrounder).catch(() => {});
+    horusApi
+      .getStudioSettings(token)
+      .then((v) => {
+        if (v.settings.grounder_backend) setGrounderBackend(v.settings.grounder_backend);
+      })
+      .catch(() => {});
   }, [token]);
 
   const running = studioStatus?.lifecycle === "running";
@@ -216,6 +223,17 @@ export function WorldsView({
                     </Field>
                   </div>
                 )}
+
+                <details className="rounded-[8px] border border-border bg-canvas px-3 py-2 text-[12.5px] text-secondary">
+                  <summary className="cursor-pointer select-none font-medium text-primary">
+                    Optional setup guide (Docker)
+                  </summary>
+                  <div className="mt-2 flex flex-col gap-2">
+                    <p>1. Install Docker Engine, then build the Gazebo Harmonic image from the repo checkout:</p>
+                    <CopyCommand command="./sim/run.sh build" label="Gazebo Docker build" />
+                    <p className="text-muted">Or use Attach Existing to connect to a remote Koko Gazebo instance.</p>
+                  </div>
+                </details>
               </div>
 
               <div className="flex flex-wrap gap-2 border-t border-border pt-4">
@@ -267,6 +285,18 @@ export function WorldsView({
                 <Field label="GTA V Host Address" hint="UDP 9002">
                   <Input value={gtaHost} onChange={(e) => setGtaHost(e.target.value)} />
                 </Field>
+
+                <details className="rounded-[8px] border border-border bg-canvas px-3 py-2 text-[12.5px] text-secondary">
+                  <summary className="cursor-pointer select-none font-medium text-primary">
+                    Optional setup guide (Windows + GTA V)
+                  </summary>
+                  <div className="mt-2 flex flex-col gap-2">
+                    <p>1. Install <code className="font-mono text-primary">HorusGta.dll</code> &amp; <code className="font-mono text-primary">horus_capture.asi</code> from <code className="font-mono text-primary">gta/horus_mod</code> into GTA V.</p>
+                    <p>2. Ensure ArduCopter SITL is downloaded (native on Windows, or Docker on Linux):</p>
+                    <CopyCommand command="horus setup" label="horus setup" />
+                    <p className="text-muted">Optional full Los Santos map tiles: <code className="font-mono">python scripts/maps/build_gta_tiles.py</code></p>
+                  </div>
+                </details>
               </div>
 
               <div className="flex flex-wrap gap-2 border-t border-border pt-4">
@@ -396,49 +426,75 @@ export function WorldsView({
 
           <article className="group flex flex-col overflow-hidden rounded-[12px] border border-border bg-surface sm:col-span-2">
             <SceneVisual variant="grounder" tag="Open-Vocab VLM" active={Boolean(grounder?.running)} />
-            <div className="flex flex-wrap items-center justify-between gap-4 p-5">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2.5">
-                  <h3 className="text-[16px] font-semibold tracking-tight text-primary">Visual Grounder (`horus-grounder`)</h3>
-                  <StatusBadge tone={grounder?.running ? "ok" : "neutral"}>
-                    {grounder?.running ? `Running (PID ${grounder.pid}${grounder.backend ? ` · ${grounder.backend}` : ""})` : "Stopped"}
-                  </StatusBadge>
+            <div className="flex flex-col gap-3 p-5">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2.5">
+                    <h3 className="text-[16px] font-semibold tracking-tight text-primary">Visual Grounder (`horus-grounder`)</h3>
+                    <StatusBadge tone={grounder?.running ? "ok" : "neutral"}>
+                      {grounder?.running ? `Running (PID ${grounder.pid}${grounder.backend ? ` · ${grounder.backend}` : ""})` : "Stopped"}
+                    </StatusBadge>
+                  </div>
+                  <p className="mt-1 text-[13.5px] text-secondary">
+                    Runs zero-install Cloud VLM or optional local PyTorch grounding on{" "}
+                    <span className="font-mono text-primary">{grounder?.url || "http://127.0.0.1:8100"}</span> for arbitrary text targets.
+                  </p>
                 </div>
-                <p className="mt-1 text-[13.5px] text-secondary">
-                  Runs zero-install Cloud VLM or optional local PyTorch grounding on{" "}
-                  <span className="font-mono text-primary">{grounder?.url || "http://127.0.0.1:8100"}</span> for arbitrary text targets.
-                </p>
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
+                  <Select
+                    aria-label="Grounder backend"
+                    value={grounderBackend}
+                    onChange={(e) => {
+                      const nextBackend = e.target.value;
+                      setGrounderBackend(nextBackend);
+                      void horusApi
+                        .putStudioSettings(token, { grounder_backend: nextBackend })
+                        .then(() => toast.info("Default grounder backend saved", nextBackend))
+                        .catch(() => {});
+                    }}
+                    className="!h-9 !w-auto !text-[13px]"
+                  >
+                    <option value="auto">Auto (Cloud VLM or Local)</option>
+                    <option value="cloud-vlm">Cloud VLM (Zero Install)</option>
+                    <option value="grounding-dino-tiny">Grounding DINO (Local PyTorch)</option>
+                    <option value="owlv2-base-patch16-ensemble">OWLv2 (Local PyTorch)</option>
+                  </Select>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    loading={grounderBusy === "start"}
+                    disabled={grounderBusy !== null}
+                    onClick={() => void handleGrounder("start")}
+                  >
+                    {grounderBusy === "start" ? "Starting…" : "Start Service"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    loading={grounderBusy === "stop"}
+                    disabled={grounderBusy !== null}
+                    onClick={() => void handleGrounder("stop")}
+                  >
+                    {grounderBusy === "stop" ? "Stopping…" : "Stop"}
+                  </Button>
+                </div>
               </div>
-              <div className="flex shrink-0 flex-wrap items-center gap-2">
-                <Select
-                  aria-label="Grounder backend"
-                  value={grounderBackend}
-                  onChange={(e) => setGrounderBackend(e.target.value)}
-                  className="!h-9 !w-auto !text-[13px]"
-                >
-                  <option value="auto">Auto (Cloud VLM or Local)</option>
-                  <option value="cloud-vlm">Cloud VLM (Zero Install)</option>
-                  <option value="grounding-dino-tiny">Grounding DINO (Local PyTorch)</option>
-                  <option value="owlv2-base-patch16-ensemble">OWLv2 (Local PyTorch)</option>
-                </Select>
-                <Button
-                  size="sm"
-                  variant="primary"
-                  loading={grounderBusy === "start"}
-                  disabled={grounderBusy !== null}
-                  onClick={() => void handleGrounder("start")}
-                >
-                  {grounderBusy === "start" ? "Starting…" : "Start Service"}
-                </Button>
-                <Button
-                  size="sm"
-                  loading={grounderBusy === "stop"}
-                  disabled={grounderBusy !== null}
-                  onClick={() => void handleGrounder("stop")}
-                >
-                  {grounderBusy === "stop" ? "Stopping…" : "Stop"}
-                </Button>
-              </div>
+
+              <details className="rounded-[8px] border border-border bg-canvas px-3 py-2 text-[12.5px] text-secondary">
+                <summary className="cursor-pointer select-none font-medium text-primary">
+                  How to choose &amp; set up Grounder backends
+                </summary>
+                <div className="mt-2 grid gap-3 sm:grid-cols-2">
+                  <div className="flex flex-col gap-1.5">
+                    <span className="font-medium text-primary">Cloud VLM (Zero Install)</span>
+                    <span>Uses your existing Gemini, OpenAI, or OpenRouter key from AI &amp; MCP — 0 MB local PyTorch install.</span>
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <span className="font-medium text-primary">Local PyTorch (Offline)</span>
+                    <span>Install optional Torch/Transformers weights only if you need offline grounding:</span>
+                    <CopyCommand command='pip install -e ".[grounder]"' label="grounder extra" />
+                  </div>
+                </div>
+              </details>
             </div>
           </article>
         </div>

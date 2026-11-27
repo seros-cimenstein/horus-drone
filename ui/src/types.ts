@@ -115,6 +115,7 @@ export interface StudioSettingsData {
   camera_max_fps: number;
   open_vocab_hz: number;
   grounder_url: string;
+  grounder_backend?: string;
   recent_hardware: Array<Record<string, unknown>>;
 }
 
