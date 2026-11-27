@@ -79,10 +79,20 @@ class _EventHub:
         self._history: deque[dict[str, Any]] = deque(maxlen=history_size)
         self._subscribers: set[asyncio.Event] = set()
         self._next_id = 0
+        self._closed = False
         self._secrets = tuple(secret for secret in secrets if secret)
         # Event ids restart at 1 with every service run; the stream sends this so a page that
         # reconnects with an old Last-Event-ID notices the restart and starts over from 0.
         self.run_id = uuid4().hex
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def close(self) -> None:
+        self._closed = True
+        for subscriber in tuple(self._subscribers):
+            subscriber.set()
 
     def publish(self, event: Mapping[str, Any]) -> dict[str, Any]:
         safe_event = _safe_value(dict(event))
@@ -203,6 +213,10 @@ class CommanderASGI:
         if studio is not None and hasattr(studio, "publish_event"):
             if studio.publish_event is None:
                 studio.publish_event = self.event_hub.publish
+
+    def begin_shutdown(self) -> None:
+        """Close active SSE streams promptly so Uvicorn shuts down without timeout errors."""
+        self.event_hub.close()
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] == "lifespan":
@@ -377,6 +391,7 @@ class CommanderASGI:
             return
         signal = self.event_hub.subscribe()
         disconnect = asyncio.create_task(_wait_for_disconnect(receive))
+        wake: asyncio.Task[bool] | None = None
         try:
             await send(
                 {
@@ -391,7 +406,7 @@ class CommanderASGI:
                     ],
                 }
             )
-            while not disconnect.done():
+            while not disconnect.done() and not self.event_hub.closed:
                 signal.clear()
                 available = self.event_hub.events_after(cursor)
                 if available:
@@ -409,6 +424,8 @@ class CommanderASGI:
                         cursor = event["id"]
                     continue
 
+                if self.event_hub.closed:
+                    break
                 wake = asyncio.create_task(signal.wait())
                 done, _ = await asyncio.wait(
                     {wake, disconnect}, timeout=15.0, return_when=asyncio.FIRST_COMPLETED
@@ -416,15 +433,27 @@ class CommanderASGI:
                 if disconnect in done:
                     wake.cancel()
                     await asyncio.gather(wake, return_exceptions=True)
+                    wake = None
                     return
                 if wake in done:
+                    wake = None
+                    if self.event_hub.closed:
+                        break
                     continue
                 wake.cancel()
                 await asyncio.gather(wake, return_exceptions=True)
+                wake = None
                 await send(
                     {"type": "http.response.body", "body": b": keep-alive\n\n", "more_body": True}
                 )
+            if self.event_hub.closed and not disconnect.done():
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+        except asyncio.CancelledError:
+            return
         finally:
+            if wake is not None and not wake.done():
+                wake.cancel()
+                await asyncio.gather(wake, return_exceptions=True)
             self.event_hub.unsubscribe(signal)
             if not disconnect.done():
                 disconnect.cancel()
@@ -972,12 +1001,29 @@ def main(argv: list[str] | None = None) -> None:
                 timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN_S,
             )
         )
+        loop = asyncio.get_running_loop()
+        orig_handle_exit = server.handle_exit
+
+        def _on_exit(sig: int, frame: Any) -> Any:
+            try:
+                loop.call_soon_threadsafe(app.begin_shutdown)
+            except RuntimeError:
+                pass
+            return orig_handle_exit(sig, frame)
+
+        server.handle_exit = _on_exit  # type: ignore[method-assign]
+
+        def _on_sigterm(signum: int, frame: Any) -> None:
+            try:
+                loop.call_soon_threadsafe(app.begin_shutdown)
+            except RuntimeError:
+                pass
+            server.should_exit = True
+
         # uvicorn re-raises a captured SIGTERM after its own shutdown, which would kill the process
         # before the cleanup below ends the Claude Code process; stop gracefully instead, as on
         # Ctrl-C (also while uvicorn's own handlers are not installed yet or no longer).
-        previous_sigterm = signal.signal(
-            signal.SIGTERM, lambda signum, frame: setattr(server, "should_exit", True)
-        )
+        previous_sigterm = signal.signal(signal.SIGTERM, _on_sigterm)
         commander_task = asyncio.create_task(commander.run())
         display_task = asyncio.create_task(display.run())
         server_task = asyncio.create_task(server.serve())
@@ -995,6 +1041,7 @@ def main(argv: list[str] | None = None) -> None:
                 raise RuntimeError("commander MCP session stopped unexpectedly")
             await server_task
         finally:
+            app.begin_shutdown()
             server.should_exit = True
             await commander.stop()
             display_task.cancel()

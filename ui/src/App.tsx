@@ -342,10 +342,17 @@ export function App() {
             <button
               type="button"
               onClick={() => setNav("flight")}
-              className="flex items-baseline gap-2 text-left cursor-pointer"
+              className="flex items-center gap-2.5 text-left cursor-pointer"
             >
-              <span className="text-[15.5px] font-semibold tracking-tight text-primary">HORUS</span>
-              <span className="text-[12.5px] text-muted">Studio</span>
+              <img
+                src="/icon.svg"
+                alt=""
+                className="h-7 w-7 shrink-0 rounded-[7px]"
+              />
+              <span className="flex items-baseline gap-1.5">
+                <span className="text-[15.5px] font-semibold tracking-tight text-primary">HORUS</span>
+                <span className="text-[12.5px] text-muted">Studio</span>
+              </span>
             </button>
           )}
           <button

@@ -73,8 +73,8 @@ def _open_browser(url: str) -> None:
                 pass
     try:
         webbrowser.open(url)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Could not launch browser automatically: %s", exc)
 
 
 def _is_interactive_tty(stream: object) -> bool:
@@ -145,9 +145,26 @@ def _run_studio(args: argparse.Namespace) -> int:
                 timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN_S,
             )
         )
-        previous_sigterm = signal.signal(
-            signal.SIGTERM, lambda *_: setattr(server, "should_exit", True)
-        )
+        loop = asyncio.get_running_loop()
+        orig_handle_exit = server.handle_exit
+
+        def _on_exit(sig: int, frame: object) -> object:
+            try:
+                loop.call_soon_threadsafe(app.begin_shutdown)
+            except RuntimeError:
+                pass
+            return orig_handle_exit(sig, frame)
+
+        server.handle_exit = _on_exit  # type: ignore[method-assign]
+
+        def _on_sigterm(_signum: int, _frame: object) -> None:
+            try:
+                loop.call_soon_threadsafe(app.begin_shutdown)
+            except RuntimeError:
+                pass
+            server.should_exit = True
+
+        previous_sigterm = signal.signal(signal.SIGTERM, _on_sigterm)
         commander_task = asyncio.create_task(commander.run())
         display_task = asyncio.create_task(display.run())
         server_task = asyncio.create_task(server.serve())
@@ -195,12 +212,14 @@ def _run_studio(args: argparse.Namespace) -> int:
                         )
                     )
             if not args.no_browser:
+                logger.info("Launching browser at http://%s:%d ...", DEFAULT_HOST, args.port)
                 _open_browser(url)
 
         announce_task = asyncio.create_task(announce())
         try:
             await server_task
         finally:
+            app.begin_shutdown()
             server.should_exit = True
             await supervisor.close()
             await commander.stop()

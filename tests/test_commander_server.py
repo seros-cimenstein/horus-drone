@@ -1194,3 +1194,38 @@ def test_ai_view_store_keeps_the_newest_views_by_count_and_bytes_and_evicted_ids
         ]
 
     assert asyncio.run(fetch()) == [404, 200]
+
+
+def test_events_stream_exits_cleanly_on_begin_shutdown():
+    commander = HorusCommander("http://127.0.0.1:8000/mcp", _TOKEN, CommanderSettings())
+    app = create_app(commander, _TOKEN)
+
+    async def exercise():
+        sent: list[dict] = []
+        started = asyncio.Event()
+
+        async def receive():
+            await asyncio.Event().wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message: dict):
+            sent.append(message)
+            if message["type"] == "http.response.start":
+                started.set()
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/events",
+            "query_string": b"",
+            "headers": [(b"authorization", f"Bearer {_TOKEN}".encode("ascii"))],
+        }
+        task = asyncio.create_task(app(scope, receive, send))
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+        app.begin_shutdown()
+        await asyncio.wait_for(task, timeout=2.0)
+        return sent
+
+    sent = asyncio.run(exercise())
+    assert sent[0]["status"] == 200
+    assert sent[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
