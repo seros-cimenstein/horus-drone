@@ -1,10 +1,8 @@
 import clsx from "clsx";
 import {
-  Bot,
   Box,
   ChevronRight,
   Compass,
-  FlaskConical,
   Menu,
   Monitor,
   Moon,
@@ -15,16 +13,18 @@ import {
   Sun,
 } from "lucide-react";
 import { type ReactNode, useState } from "react";
+import type { NavId, SettingsTab } from "../../types";
 import { BottomSheet } from "../common/BottomSheet";
 import { Button } from "../common/Button";
 import { StatusDot } from "../common/StatusDot";
 
-export type BottomNavId = "flight" | "lab" | "worlds" | "ai" | "phone" | "tuning" | "system";
+export type BottomNavId = NavId;
 export type BottomThemeMode = "system" | "dark" | "light";
 
 interface Props {
   nav: BottomNavId;
   onSelectNav: (id: BottomNavId) => void;
+  onOpenSettings?: (tab?: SettingsTab) => void;
   running: boolean;
   targetLabel: string;
   statusDotKind: "ok" | "warn" | "danger" | "idle";
@@ -39,22 +39,15 @@ interface Props {
 
 const PRIMARY_TABS: Array<{ id: BottomNavId; label: string; icon: (active: boolean) => ReactNode }> = [
   { id: "flight", label: "Flight", icon: (active) => <Compass size={20} strokeWidth={active ? 2 : 1.7} /> },
-  { id: "lab", label: "Manual", icon: (active) => <FlaskConical size={20} strokeWidth={active ? 2 : 1.7} /> },
-  { id: "worlds", label: "Drones", icon: (active) => <Box size={20} strokeWidth={active ? 2 : 1.7} /> },
-  { id: "ai", label: "AI", icon: (active) => <Bot size={20} strokeWidth={active ? 2 : 1.7} /> },
+  { id: "worlds", label: "Drones", icon: (active: boolean) => <Box size={20} strokeWidth={active ? 2 : 1.7} /> },
+  { id: "settings", label: "Settings", icon: (active) => <Sliders size={20} strokeWidth={active ? 2 : 1.7} /> },
+  { id: "system", label: "System", icon: (active) => <Settings size={20} strokeWidth={active ? 2 : 1.7} /> },
 ];
-
-const MORE_ITEMS: Array<{ id: BottomNavId; label: string; icon: ReactNode }> = [
-  { id: "phone", label: "Phone App", icon: <Smartphone size={18} strokeWidth={1.65} /> },
-  { id: "tuning", label: "Flight Settings", icon: <Sliders size={18} strokeWidth={1.65} /> },
-  { id: "system", label: "System & Logs", icon: <Settings size={18} strokeWidth={1.65} /> },
-];
-
-const MORE_IDS = new Set<BottomNavId>(["phone", "tuning", "system"]);
 
 export function BottomTabBar({
   nav,
   onSelectNav,
+  onOpenSettings,
   running,
   targetLabel,
   statusDotKind,
@@ -67,7 +60,6 @@ export function BottomTabBar({
   stoppingSession = false,
 }: Props) {
   const [moreOpen, setMoreOpen] = useState(false);
-  const isMoreActive = moreOpen || MORE_IDS.has(nav);
   const ThemeIcon = theme === "light" ? Sun : theme === "dark" ? Moon : Monitor;
 
   return (
@@ -79,7 +71,7 @@ export function BottomTabBar({
         <div className="grid grid-cols-5">
           {PRIMARY_TABS.map((item) => {
             const isActive = !moreOpen && nav === item.id;
-            const showAiWarn = item.id === "ai" && !aiConfigured;
+            const showAiWarn = item.id === "settings" && !aiConfigured;
             const showLiveDot = item.id === "worlds" && running;
             return (
               <button
@@ -116,10 +108,10 @@ export function BottomTabBar({
             onClick={() => setMoreOpen(true)}
             className={clsx(
               "flex min-h-14 flex-col items-center justify-center gap-1 px-1 py-1.5 text-[11px] font-medium transition-colors duration-150 active:scale-[0.96] cursor-pointer",
-              isMoreActive ? "text-primary" : "text-secondary hover:text-primary",
+              moreOpen ? "text-primary" : "text-secondary hover:text-primary",
             )}
           >
-            <Menu size={20} strokeWidth={isMoreActive ? 2 : 1.7} />
+            <Menu size={20} strokeWidth={moreOpen ? 2 : 1.7} />
             <span>More</span>
           </button>
         </div>
@@ -127,41 +119,49 @@ export function BottomTabBar({
 
       <BottomSheet open={moreOpen} onClose={() => setMoreOpen(false)} title="More">
         <div className="space-y-3">
-          <ul className="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
-            {MORE_ITEMS.map((item) => {
-              const isCurrent = nav === item.id;
-              return (
-                <li key={item.id}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMoreOpen(false);
-                      onSelectNav(item.id);
-                    }}
-                    className={clsx(
-                      "flex min-h-12 w-full items-center justify-between gap-3 px-4 py-3 text-left text-[14.5px] transition-colors active:bg-hover cursor-pointer",
-                      isCurrent ? "bg-hover font-semibold text-primary" : "font-medium text-primary hover:bg-hover/70",
-                    )}
-                  >
-                    <span className="flex min-w-0 items-center gap-3">
-                      <span className={isCurrent ? "shrink-0 text-primary" : "shrink-0 text-secondary"}>
-                        {item.icon}
+          {onOpenSettings && (
+            <ul className="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface">
+              <li>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMoreOpen(false);
+                    onOpenSettings("phone");
+                  }}
+                  className="flex min-h-12 w-full items-center justify-between gap-3 px-4 py-3 text-left text-[14.5px] font-medium text-primary transition-colors hover:bg-hover/70 active:bg-hover cursor-pointer"
+                >
+                  <span className="flex min-w-0 items-center gap-3">
+                    <Smartphone size={18} strokeWidth={1.65} className="shrink-0 text-secondary" />
+                    <span className="truncate">Phone App &amp; QR</span>
+                  </span>
+                  <ChevronRight size={15} strokeWidth={1.6} className="text-muted" aria-hidden="true" />
+                </button>
+              </li>
+              <li>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMoreOpen(false);
+                    onSelectNav("system");
+                  }}
+                  className="flex min-h-12 w-full items-center justify-between gap-3 px-4 py-3 text-left text-[14.5px] font-medium text-primary transition-colors hover:bg-hover/70 active:bg-hover cursor-pointer"
+                >
+                  <span className="flex min-w-0 items-center gap-3">
+                    <Settings size={18} strokeWidth={1.65} className="shrink-0 text-secondary" />
+                    <span className="truncate">System &amp; Logs</span>
+                  </span>
+                  <span className="flex shrink-0 items-center gap-2">
+                    {totalCapsCount > 0 && (
+                      <span className="font-mono text-[12px] text-muted tabular-nums">
+                        {readyCapsCount}/{totalCapsCount}
                       </span>
-                      <span className="truncate">{item.label}</span>
-                    </span>
-                    <span className="flex shrink-0 items-center gap-2">
-                      {item.id === "system" && totalCapsCount > 0 && (
-                        <span className="font-mono text-[12px] text-muted tabular-nums">
-                          {readyCapsCount}/{totalCapsCount}
-                        </span>
-                      )}
-                      <ChevronRight size={15} strokeWidth={1.6} className="text-muted" aria-hidden="true" />
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+                    )}
+                    <ChevronRight size={15} strokeWidth={1.6} className="text-muted" aria-hidden="true" />
+                  </span>
+                </button>
+              </li>
+            </ul>
+          )}
 
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-border bg-surface px-4 py-3">
             <div className="min-w-0 flex-1">

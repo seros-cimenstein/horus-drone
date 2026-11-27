@@ -103,7 +103,7 @@ export function PhoneView({
 
       {droneState?.operator_lock && (
         <div className="border-b border-danger bg-surface px-4 py-2.5 text-[13px] font-medium text-danger">
-          OPERATOR LOCK active — send next mission to resume AI
+          OPERATOR LOCK active: send next mission to resume AI
         </div>
       )}
 

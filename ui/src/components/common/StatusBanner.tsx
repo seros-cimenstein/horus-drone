@@ -82,9 +82,12 @@ export function StatusBanner({
                 {detail}
               </pre>
             ) : (
-              <span className="mt-0.5 block text-[13px] text-secondary sm:mt-0 sm:ml-2 sm:inline">
-                {detail}
-              </span>
+              <>
+                {" "}
+                <span className="mt-0.5 block text-[13px] text-secondary sm:mt-0 sm:ml-1.5 sm:inline">
+                  {detail}
+                </span>
+              </>
             ))}
         </div>
       </div>

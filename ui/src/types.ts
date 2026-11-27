@@ -1,3 +1,6 @@
+export type NavId = "flight" | "worlds" | "settings" | "system";
+export type SettingsTab = "general" | "ai" | "flight" | "phone";
+
 export interface Pose {
   north_m: number;
   east_m: number;
@@ -110,10 +113,19 @@ export interface StudioSettingsData {
   prefer_3d_view: boolean;
   theme: "dark" | "light";
   flight_speed_m_s: number;
+  vertical_speed_m_s?: number;
+  turn_rate_deg_s?: number;
+  arrival_tolerance_m?: number;
+  command_ttl_s?: number;
   link_loss_rth_delay_s: number;
   default_gimbal_pitch_deg: number;
   camera_max_fps: number;
   open_vocab_hz: number;
+  perception_render_width_px?: number;
+  perception_point_compensation?: boolean;
+  ai_max_tokens?: number;
+  ai_timeout_s?: number;
+  ai_max_turns?: number;
   grounder_url: string;
   grounder_backend?: string;
   recent_hardware: Array<Record<string, unknown>>;

@@ -14,7 +14,8 @@ def generate_mcp_configs(
 ) -> dict[str, Any]:
     """Return copyable MCP configuration snippets for external AI agent clients."""
     url = (mcp_url or "http://127.0.0.1:8000/mcp").strip()
-    token_value = bearer_token if (include_token and bearer_token) else "${HORUS_MCP_TOKEN}"
+    has_live_token = bool(include_token and bearer_token)
+    token_value = bearer_token if has_live_token else "${HORUS_MCP_TOKEN}"
     auth_header = f"Bearer {token_value}"
 
     mcp_json = {
@@ -28,6 +29,17 @@ def generate_mcp_configs(
             }
         }
     }
+
+    codex_cli = (
+        f'HORUS_MCP_TOKEN="{token_value}" codex mcp add horus --bearer-token-env-var HORUS_MCP_TOKEN "{url}"'
+        if has_live_token
+        else f'codex mcp add horus --bearer-token-env-var HORUS_MCP_TOKEN "{url}"'
+    )
+    omp_cli = (
+        f'HORUS_MCP_TOKEN="{token_value}" HORUS_MCP_URL="{url}" omp --mode rpc'
+        if has_live_token
+        else f'HORUS_MCP_URL="{url}" omp --mode rpc'
+    )
 
     return {
         "mcp_url": url,
@@ -45,12 +57,12 @@ def generate_mcp_configs(
                 "name": "Codex CLI",
                 "description": "Register HORUS Drone board with Codex using bearer token env var.",
                 "snippet": f'export HORUS_MCP_TOKEN="{token_value}"\ncodex mcp add horus --bearer-token-env-var HORUS_MCP_TOKEN "{url}"',
-                "cli": f'codex mcp add horus --bearer-token-env-var HORUS_MCP_TOKEN "{url}"',
+                "cli": codex_cli,
             },
             {
                 "id": "omp_pi",
                 "name": "OMP / Pi Agent",
-                "description": "Connect `omp` or `pi` agent directly to the HORUS Drone board HTTP MCP endpoint, or select `omp` / `pi` in Studio Settings -> AI & Agents.",
+                "description": "Connect `omp` or `pi` agent directly to the HORUS Drone board HTTP MCP endpoint, or select `omp` / `pi` in Studio Settings -> AI & Vision.",
                 "snippet": json.dumps(
                     {
                         "mcpServers": {
@@ -63,7 +75,7 @@ def generate_mcp_configs(
                     },
                     indent=2,
                 ),
-                "cli": f'HORUS_MCP_URL="{url}" omp --mode rpc',
+                "cli": omp_cli,
             },
             {
                 "id": "generic",

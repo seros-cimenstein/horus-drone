@@ -59,6 +59,8 @@ export interface StopSessionButtonProps {
   onClick: () => void;
   size?: ButtonProps["size"];
   loading?: boolean;
+  disabled?: boolean;
+  title?: string;
   className?: string;
   label?: string;
 }
@@ -67,11 +69,21 @@ export function StopSessionButton({
   onClick,
   size = "sm",
   loading = false,
+  disabled = false,
+  title,
   className,
   label = "Stop Session",
 }: StopSessionButtonProps) {
   return (
-    <Button size={size} variant="danger" loading={loading} className={className} onClick={onClick}>
+    <Button
+      size={size}
+      variant="danger"
+      loading={loading}
+      disabled={disabled}
+      title={title}
+      className={className}
+      onClick={onClick}
+    >
       {!loading && <Square size={13} />} {loading ? "Stopping…" : label}
     </Button>
   );

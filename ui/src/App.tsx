@@ -1,10 +1,6 @@
 import {
-  ArrowRight,
-  Bot,
   Box,
   Compass,
-  FlaskConical,
-  Loader2,
   Monitor,
   Moon,
   PanelLeft,
@@ -12,20 +8,22 @@ import {
   Send,
   Settings,
   Sliders,
-  Smartphone,
   Square,
   Sun,
 } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { horusApi, initToken, saveToken, subscribeEvents } from "./api";
-import { AiMcpView } from "./components/AiMcpView";
-import { FaultLabView } from "./components/FaultLabView";
+import { ManualFlightPanel } from "./components/ManualFlightPanel";
 import { PhoneView } from "./components/PhoneView";
-import { SystemPhoneView } from "./components/SystemPhoneView";
+import { PreflightPanel } from "./components/PreflightPanel";
+import { BuiltinScenesGrid } from "./components/SceneGrid";
+import { SettingsView } from "./components/SettingsView";
+import { SystemLogsView } from "./components/SystemLogsView";
 import { TacticalMap } from "./components/TacticalMap";
 import { VisualStage } from "./components/VisualStage";
 import { WorldsView } from "./components/WorldsView";
 import { Button, StopSessionButton } from "./components/common/Button";
+import { CapabilityRequirements } from "./components/common/CapabilityRequirements";
 import { StatusBanner } from "./components/common/StatusBanner";
 import { StatusDot } from "./components/common/StatusDot";
 import { Input, Textarea } from "./components/common/Surface";
@@ -37,12 +35,15 @@ import type {
   DroneState,
   LiveMap,
   MapSelection,
+  NavId,
+  PreflightItem,
+  SettingsTab,
   StudioStatus,
   TimelineEvent,
 } from "./types";
 
-type NavId = "flight" | "lab" | "worlds" | "ai" | "phone" | "tuning" | "system";
 type StageTab = "camera" | "3d" | "map" | "aiviews";
+type FlightPanelTab = "mission" | "manual" | "preflight";
 type ThemeMode = "system" | "dark" | "light";
 
 const NAV_GROUPS: Array<{
@@ -53,21 +54,13 @@ const NAV_GROUPS: Array<{
     heading: "Flight",
     items: [
       { id: "flight", label: "Flight Deck", icon: <Compass size={16} strokeWidth={1.7} /> },
-      { id: "lab", label: "Manual & Safety", icon: <FlaskConical size={16} strokeWidth={1.7} /> },
-    ],
-  },
-  {
-    heading: "Connect",
-    items: [
       { id: "worlds", label: "Simulators & Drones", icon: <Box size={16} strokeWidth={1.7} /> },
-      { id: "ai", label: "AI & MCP", icon: <Bot size={16} strokeWidth={1.7} /> },
-      { id: "phone", label: "Phone App", icon: <Smartphone size={16} strokeWidth={1.7} /> },
     ],
   },
   {
-    heading: "System",
+    heading: "Workspace",
     items: [
-      { id: "tuning", label: "Flight Settings", icon: <Sliders size={16} strokeWidth={1.7} /> },
+      { id: "settings", label: "Settings", icon: <Sliders size={16} strokeWidth={1.7} /> },
       { id: "system", label: "System & Logs", icon: <Settings size={16} strokeWidth={1.7} /> },
     ],
   },
@@ -85,8 +78,14 @@ export function App() {
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [missionText, setMissionText] = useState("");
   const [nav, setNav] = useState<NavId>("flight");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const [settingsFocusNonce, setSettingsFocusNonce] = useState(0);
   const [stageTab, setStageTab] = useState<StageTab>("camera");
+  const [flightPanelTab, setFlightPanelTab] = useState<FlightPanelTab>("mission");
+  const [preflight, setPreflight] = useState<PreflightItem[]>([]);
+  const [loadingPreflight, setLoadingPreflight] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [prefer3dView, setPrefer3dView] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(() => {
     try {
       const saved = localStorage.getItem("horus:theme");
@@ -97,14 +96,16 @@ export function App() {
     return "dark";
   });
   const [bootstrapping, setBootstrapping] = useState(false);
+  const [bootstrapProgress, setBootstrapProgress] = useState("");
   const [pendingEmergency, setPendingEmergency] = useState<"hold" | "land" | "rth" | null>(null);
   const [stoppingSession, setStoppingSession] = useState(false);
   const [launchingScene, setLaunchingScene] = useState<string | null>(null);
   const [sendingMission, setSendingMission] = useState(false);
   const [resettingMission, setResettingMission] = useState(false);
   const [releasingLock, setReleasingLock] = useState(false);
-  const [notice, setNotice] = useState("");
+  const [restoringLink, setRestoringLink] = useState(false);
   const [dismissedError, setDismissedError] = useState(false);
+  const [hasConnectedOnce, setHasConnectedOnce] = useState(false);
   const frameBackoffUntilRef = useRef(0);
   const toast = useToast();
 
@@ -125,11 +126,23 @@ export function App() {
     setTheme((prev) => (prev === "dark" ? "light" : prev === "light" ? "system" : "dark"));
   };
 
-  const refreshStudio = () => {
+  const openSettings = (tab?: SettingsTab) => {
+    if (tab) {
+      setSettingsTab(tab);
+      setSettingsFocusNonce((n) => n + 1);
+    }
+    setNav("settings");
+  };
+
+  const refreshStudio = useCallback(() => {
     if (!token) return;
     horusApi.getStudioStatus(token).then(setStudioStatus).catch(() => {});
     horusApi.getCapabilities(token, false).then((r) => setCaps(r.capabilities)).catch(() => {});
-  };
+    horusApi
+      .getStudioSettings(token)
+      .then((v) => setPrefer3dView(Boolean(v.settings.prefer_3d_view)))
+      .catch(() => {});
+  }, [token]);
 
   const refreshCaps = async (force: boolean): Promise<CapabilityItem[]> => {
     if (!token) return [];
@@ -137,6 +150,23 @@ export function App() {
     setCaps(r.capabilities);
     return r.capabilities;
   };
+
+  const loadPreflight = useCallback(
+    async (notify = false) => {
+      if (!token) return;
+      setLoadingPreflight(true);
+      try {
+        const r = await horusApi.getPreflight(token);
+        setPreflight(r.items);
+        if (notify) toast.success("Pre-flight checks refreshed");
+      } catch (e: unknown) {
+        if (notify) toast.error("Pre-flight check failed", e instanceof Error ? e.message : String(e));
+      } finally {
+        setLoadingPreflight(false);
+      }
+    },
+    [token, toast],
+  );
 
   useEffect(() => {
     if (!token) return;
@@ -147,13 +177,24 @@ export function App() {
         setEvents((prev) => [...prev.slice(-240), ev]);
         if (ev.kind === "studio_status") refreshStudio();
         if (ev.kind === "bootstrap_progress") {
-          setNotice(`Downloading ${String(ev.asset)}: ${String(ev.state)} (${String(ev.bytes_done || 0)} B)`);
+          setBootstrapProgress(`Downloading ${String(ev.asset)}: ${String(ev.state)} (${String(ev.bytes_done || 0)} B)`);
         }
       },
-      setSseState,
+      (nextState) => {
+        setSseState(nextState);
+        if (nextState === "live") {
+          setHasConnectedOnce(true);
+          refreshStudio();
+        } else if (nextState === "reconnecting") {
+          setStudioStatus(null);
+          setDroneState(null);
+          setLiveMap(null);
+          setFrame(null);
+        }
+      },
     );
     return unsub;
-  }, [token]);
+  }, [token, refreshStudio]);
 
   useEffect(() => {
     setDismissedError(false);
@@ -161,12 +202,14 @@ export function App() {
 
   useEffect(() => {
     frameBackoffUntilRef.current = 0;
-    if (!token || studioStatus?.lifecycle !== "running") {
+    if (!token || sseState !== "live" || studioStatus?.lifecycle !== "running") {
       setDroneState(null);
       setLiveMap(null);
       setFrame(null);
+      setPreflight([]);
       return;
     }
+    void loadPreflight(false);
     const pollFast = async () => {
       try {
         const [st, lm] = await Promise.all([horusApi.getState(token), horusApi.getLiveMap(token)]);
@@ -187,7 +230,7 @@ export function App() {
     void pollFast();
     const timer = window.setInterval(() => void pollFast(), 450);
     return () => window.clearInterval(timer);
-  }, [token, studioStatus?.lifecycle, stageTab, isPhone]);
+  }, [token, sseState, studioStatus?.lifecycle, stageTab, isPhone, loadPreflight]);
 
   if (!token || sseState === "unauthorized") {
     return (
@@ -230,11 +273,9 @@ export function App() {
     setPendingEmergency(action);
     try {
       await horusApi.sendEmergency(token, action);
-      setNotice(`Emergency ${label} sent`);
       toast.warning(`Emergency ${label} sent`, "AI flight tools are locked until your next mission or manual release.");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      setNotice(`Emergency failed: ${msg}`);
       toast.error(`Emergency ${label} failed`, msg);
     } finally {
       setPendingEmergency(null);
@@ -243,9 +284,11 @@ export function App() {
 
   const sendMission = async (text: string) => {
     if (!studioStatus?.ai_status.configured) {
-      setNav("ai");
-      setNotice("Choose an AI provider first, or fly manually under Manual & Safety.");
-      toast.warning("AI provider not configured", "Choose an AI provider or fly manually under Manual & Safety.");
+      openSettings("ai");
+      toast.warning(
+        "AI provider not configured",
+        "Choose an AI provider in Settings -> AI & Vision, or use the Manual tab in Flight Deck.",
+      );
       return;
     }
     setSendingMission(true);
@@ -255,7 +298,6 @@ export function App() {
       toast.success("Mission sent", text.length > 72 ? `${text.slice(0, 72)}…` : text);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      setNotice(`Mission error: ${msg}`);
       toast.error("Mission failed", msg);
     } finally {
       setSendingMission(false);
@@ -269,7 +311,6 @@ export function App() {
       toast.info("Mission reset", "Started a fresh mission thread.");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      setNotice(`Reset failed: ${msg}`);
       toast.error("Mission reset failed", msg);
     } finally {
       setResettingMission(false);
@@ -278,7 +319,6 @@ export function App() {
 
   const manualMove = async (action: string, params: Record<string, unknown>): Promise<boolean> => {
     if (studioStatus?.lifecycle !== "running") {
-      setNotice("Start a session before sending flight or gimbal commands.");
       toast.warning("No active session", "Start a session before sending flight or gimbal commands.");
       return false;
     }
@@ -288,7 +328,6 @@ export function App() {
       return true;
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      setNotice(`Manual command failed: ${msg}`);
       toast.error(`Command "${action}" failed`, msg);
       return false;
     }
@@ -296,12 +335,11 @@ export function App() {
 
   const handleBootstrap = async () => {
     setBootstrapping(true);
-    setNotice("Downloading SITL binary & ONNX models…");
+    setBootstrapProgress("Downloading SITL binary & ONNX models…");
     toast.info("Downloading assets", "Fetching ArduCopter SITL and perception models…");
     try {
       const res = await horusApi.bootstrapAssets(token);
       refreshStudio();
-      setNotice("");
       if (res.ready) {
         toast.success("SITL & models ready", "Required standalone assets are verified.");
       } else {
@@ -309,10 +347,10 @@ export function App() {
       }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      setNotice(`Asset download failed: ${msg}`);
       toast.error("Asset download failed", msg);
     } finally {
       setBootstrapping(false);
+      setBootstrapProgress("");
     }
   };
 
@@ -320,16 +358,14 @@ export function App() {
     const label = String(payload.scene || payload.mode || "session");
     setDismissedError(false);
     setLaunchingScene(label);
-    setNotice(`Starting ${label}…`);
     try {
       const next = await horusApi.startSession(token, payload);
       setStudioStatus(next);
-      setNotice("");
+      setStageTab(prefer3dView && next.spectator_url ? "3d" : "camera");
       setNav("flight");
       toast.success("Session started", next.target_label || label);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      setNotice(msg);
       toast.error(`Failed to start ${label}`, msg);
       refreshStudio();
     } finally {
@@ -344,10 +380,22 @@ export function App() {
       toast.info("Session stopped");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      setNotice(`Failed to stop session: ${msg}`);
       toast.error("Failed to stop session", msg);
     } finally {
       setStoppingSession(false);
+    }
+  };
+
+  const handleRestoreLink = async () => {
+    setRestoringLink(true);
+    try {
+      await horusApi.setLinkShaper(token, { delay_ms: 0, jitter_ms: 0, link_cut: false });
+      refreshStudio();
+      toast.info("AI link restored (0 ms)");
+    } catch (e: unknown) {
+      toast.error("Failed to restore AI link", e instanceof Error ? e.message : String(e));
+    } finally {
+      setRestoringLink(false);
     }
   };
 
@@ -368,30 +416,49 @@ export function App() {
 
   const veh = droneState?.vehicle;
   const activeScene = studioStatus?.scenes.find((s) => s.name === studioStatus?.scene);
-  const running = studioStatus?.lifecycle === "running";
-  const isIdle = studioStatus !== null && studioStatus.lifecycle === "idle";
-  const lockDesktopViewport = nav === "flight" && !isIdle;
+  const running = sseState === "live" && studioStatus?.lifecycle === "running";
+  const hasActiveSession =
+    sseState === "live" &&
+    (studioStatus?.lifecycle === "running" ||
+      studioStatus?.lifecycle === "starting" ||
+      studioStatus?.lifecycle === "stopping");
+  const lockDesktopViewport = nav === "flight" && hasActiveSession;
   const aiViewsCount = events.filter((e) => e.kind === "ai_view" && typeof e.view_id === "string").length;
   const coreCaps = caps.filter((c) => c.tier !== "optional");
   const readyCoreCapsCount = coreCaps.filter((c) => c.ready).length;
+  const builtinCap = caps.find((c) => c.id === "builtin_3d");
   const ThemeIcon = theme === "light" ? Sun : theme === "dark" ? Moon : Monitor;
 
-  const rawNotice = notice || (!dismissedError ? studioStatus?.error || "" : "");
-  const isWarningNotice =
-    Boolean(!notice && studioStatus?.error && !dismissedError) ||
-    /error|fail|requires|cannot|unable/i.test(rawNotice);
-  const newlineIdx = rawNotice.indexOf("\n");
-  const noticeTitle = newlineIdx === -1 ? rawNotice : rawNotice.slice(0, newlineIdx);
-  const noticeDetail = newlineIdx === -1 ? undefined : rawNotice.slice(newlineIdx + 1).trim();
+  const linkDelayMs = studioStatus?.link_shaper.delay_ms ?? 0;
+  const linkCut = Boolean(studioStatus?.link_shaper.link_cut);
+  const showDisconnectedBanner = sseState === "reconnecting" && hasConnectedOnce;
+  const showOperatorLockBanner = Boolean(running && droneState?.operator_lock);
+  const showLinkShaperBanner = Boolean(running && (linkCut || linkDelayMs > 0));
+  const showBootstrapBanner = Boolean(bootstrapping && bootstrapProgress);
+  const persistentError = !dismissedError ? studioStatus?.error || "" : "";
+  const errorNewlineIdx = persistentError.indexOf("\n");
+  const errorTitle = errorNewlineIdx === -1 ? persistentError : persistentError.slice(0, errorNewlineIdx);
+  const errorDetail = errorNewlineIdx === -1 ? undefined : persistentError.slice(errorNewlineIdx + 1).trim();
+
+  const preflightWorstStatus: "ok" | "warn" | "danger" | "idle" =
+    preflight.some((i) => i.status === "fail")
+      ? "danger"
+      : preflight.some((i) => i.status === "warn")
+        ? "warn"
+        : preflight.length > 0
+          ? "ok"
+          : "idle";
 
   const statusDotKind =
-    studioStatus?.lifecycle === "running"
-      ? "ok"
-      : studioStatus?.lifecycle === "error"
-        ? "danger"
-        : studioStatus?.lifecycle === "starting" || studioStatus?.lifecycle === "bootstrapping"
-          ? "warn"
-          : "idle";
+    sseState !== "live"
+      ? "warn"
+      : studioStatus?.lifecycle === "running"
+        ? "ok"
+        : studioStatus?.lifecycle === "error"
+          ? "danger"
+          : studioStatus?.lifecycle === "starting" || studioStatus?.lifecycle === "bootstrapping"
+            ? "warn"
+            : "idle";
 
   return (
     <div
@@ -401,7 +468,7 @@ export function App() {
           : "flex min-h-screen bg-canvas text-primary"
       }
     >
-      {/* Grouped Left Sidebar (all 7 sections directly visible, zero nested tabs) */}
+      {/* Grouped Left Sidebar */}
       <aside
         aria-label="HORUS Studio navigation"
         className={`sticky top-0 hidden h-screen shrink-0 flex-col border-r border-border bg-surface transition-[width] duration-150 md:flex ${
@@ -419,11 +486,7 @@ export function App() {
               onClick={() => setNav("flight")}
               className="flex items-center gap-2.5 text-left cursor-pointer"
             >
-              <img
-                src="/icon.svg"
-                alt=""
-                className="h-7 w-7 shrink-0 rounded-[7px]"
-              />
+              <img src="/icon.svg" alt="" className="h-7 w-7 shrink-0 rounded-[7px]" />
               <span className="flex items-baseline gap-1.5">
                 <span className="text-[15.5px] font-semibold tracking-tight text-primary">HORUS</span>
                 <span className="text-[12.5px] text-muted">Studio</span>
@@ -453,7 +516,7 @@ export function App() {
                 const badgeNode =
                   !sidebarCollapsed && item.id === "worlds" && running ? (
                     <StatusDot status="ok" />
-                  ) : !sidebarCollapsed && item.id === "ai" ? (
+                  ) : !sidebarCollapsed && item.id === "settings" ? (
                     <StatusDot status={studioStatus?.ai_status.configured ? "ok" : "warn"} />
                   ) : !sidebarCollapsed && item.id === "system" && coreCaps.length > 0 ? (
                     <span className="ml-auto font-mono text-[11.5px] text-muted tabular-nums">
@@ -492,7 +555,11 @@ export function App() {
               >
                 <StatusDot
                   status={statusDotKind}
-                  label={studioStatus?.target_label || (sseState === "live" ? "Connected" : sseState)}
+                  label={
+                    sseState !== "live"
+                      ? "Disconnected"
+                      : studioStatus?.target_label || "Connected"
+                  }
                 />
               </button>
               {running && (
@@ -511,7 +578,7 @@ export function App() {
 
           <div className={`flex items-center ${sidebarCollapsed ? "justify-center" : "justify-between"}`}>
             {!sidebarCollapsed && (
-              <button type="button" onClick={() => setNav("ai")} className="hover:underline cursor-pointer">
+              <button type="button" onClick={() => openSettings("ai")} className="hover:underline cursor-pointer">
                 <StatusDot
                   status={studioStatus?.ai_status.configured ? "ok" : "warn"}
                   label={studioStatus?.ai_status.configured ? `AI: ${studioStatus.ai_status.provider}` : "AI not configured"}
@@ -646,9 +713,20 @@ export function App() {
           </dl>
         )}
 
-        {((nav === "flight" && droneState?.operator_lock) || rawNotice) && (
+        {(showDisconnectedBanner ||
+          showOperatorLockBanner ||
+          showLinkShaperBanner ||
+          showBootstrapBanner ||
+          Boolean(persistentError)) && (
           <div className="sticky top-14 z-20 shrink-0">
-            {nav === "flight" && droneState?.operator_lock && (
+            {showDisconnectedBanner && (
+              <StatusBanner
+                tone="warning"
+                title="HORUS Studio disconnected"
+                detail="The backend server stopped or restarted. Run `horus` in your terminal to reconnect."
+              />
+            )}
+            {showOperatorLockBanner && (
               <StatusBanner
                 tone="danger"
                 title="Operator lock active"
@@ -662,15 +740,26 @@ export function App() {
                 }}
               />
             )}
-            {rawNotice && (
+            {showLinkShaperBanner && (
               <StatusBanner
-                tone={isWarningNotice ? "warning" : "info"}
-                title={noticeTitle}
-                detail={noticeDetail}
-                onDismiss={() => {
-                  setNotice("");
-                  setDismissedError(true);
+                tone="warning"
+                title={linkCut ? "AI link cut active" : `AI link latency active (${linkDelayMs} ms)`}
+                detail="Telemetry and emergency HOLD / LAND / HOME stay live."
+                action={{
+                  label: restoringLink ? "Restoring…" : "Restore AI Link",
+                  onClick: () => void handleRestoreLink(),
                 }}
+              />
+            )}
+            {showBootstrapBanner && (
+              <StatusBanner tone="info" title="Downloading assets" detail={bootstrapProgress} />
+            )}
+            {persistentError && (
+              <StatusBanner
+                tone="warning"
+                title={errorTitle}
+                detail={errorDetail}
+                onDismiss={() => setDismissedError(true)}
               />
             )}
           </div>
@@ -684,50 +773,38 @@ export function App() {
           }
         >
           {nav === "flight" &&
-            (isIdle ? (
-              <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col justify-center gap-7 px-6 py-12">
+            (!hasActiveSession ? (
+              <div className="mx-auto flex w-full max-w-4xl flex-1 flex-col justify-center gap-6 px-5 py-9 sm:px-6 sm:py-10">
                 <div>
                   <h1 className="text-[24px] font-semibold tracking-tight text-primary">Ready to fly</h1>
                   <p className="mt-1.5 text-[14.5px] text-secondary">
-                    Start a built-in 3D environment to open the camera, map, and mission control, or choose any page on the left.
+                    Launch a built-in 3D world to open live camera, map, manual controls, and AI missions, or attach an external simulator or real drone.
                   </p>
                 </div>
 
-                <div className="divide-y divide-border overflow-hidden rounded-[10px] border border-border bg-surface">
-                  {(studioStatus?.scenes || []).map((sc) => {
-                    const isLaunching = launchingScene === sc.name;
-                    return (
-                      <button
-                        key={sc.name}
-                        type="button"
-                        disabled={Boolean(launchingScene)}
-                        onClick={() => void handleStartSession({ mode: "builtin_sim", scene: sc.name, seed: 42 })}
-                        className="flex w-full select-none items-center justify-between gap-4 px-5 py-4 text-left transition-colors duration-75 hover:bg-hover active:bg-border/40 disabled:pointer-events-none disabled:opacity-60 cursor-pointer"
-                      >
-                        <div className="min-w-0">
-                          <div className="text-[15px] font-medium text-primary">{sc.title}</div>
-                          <div className="mt-0.5 text-[13.5px] text-secondary">{sc.subtitle}</div>
-                        </div>
-                        <span className="inline-flex items-center gap-1.5 text-[13.5px] font-medium text-primary">
-                          {isLaunching ? (
-                            <>
-                              <Loader2 size={15} className="animate-spin" /> Starting…
-                            </>
-                          ) : (
-                            <>
-                              Launch <ArrowRight size={15} />
-                            </>
-                          )}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
+                {builtinCap && !builtinCap.ready && (
+                  <CapabilityRequirements
+                    cap={builtinCap}
+                    mode="inline"
+                    onBootstrap={handleBootstrap}
+                    bootstrapping={bootstrapping}
+                  />
+                )}
+
+                <BuiltinScenesGrid
+                  scenes={studioStatus?.scenes || []}
+                  busy={sseState !== "live" || Boolean(launchingScene)}
+                  launchingSceneName={launchingScene}
+                  initialLimit={2}
+                  onLaunchScene={(sc, seed) =>
+                    void handleStartSession({ mode: "builtin_sim", scene: sc.name, seed })
+                  }
+                />
 
                 <div className="flex flex-wrap items-center gap-2.5">
-                  <Button onClick={() => setNav("worlds")}>Simulators &amp; Drones</Button>
-                  <Button variant="ghost" onClick={() => setNav("ai")}>
-                    AI &amp; MCP
+                  <Button onClick={() => setNav("worlds")}>More Simulators &amp; Drones</Button>
+                  <Button variant="ghost" onClick={() => openSettings("ai")}>
+                    AI &amp; Vision Settings
                   </Button>
                   <Button variant="ghost" onClick={() => setNav("system")}>
                     System &amp; Logs ({readyCoreCapsCount}/{coreCaps.length || 3})
@@ -764,13 +841,12 @@ export function App() {
                         </button>
                       ))}
                     </div>
-                    {running && (
-                      <StopSessionButton
-                        className="shrink-0"
-                        loading={stoppingSession}
-                        onClick={() => void handleStopSession()}
-                      />
-                    )}
+                    <StopSessionButton
+                      className="shrink-0"
+                      disabled={sseState !== "live"}
+                      loading={stoppingSession}
+                      onClick={() => void handleStopSession()}
+                    />
                   </div>
 
                   {stageTab === "map" ? (
@@ -785,6 +861,7 @@ export function App() {
                             ? `Fly to (${sel.point[0]}m north, ${sel.point[1]}m east) and inspect.`
                             : `Search area ${sel.label} (${sel.points.map(([n, e]) => `[${n},${e}]`).join(", ")}).`;
                         setMissionText(desc);
+                        setFlightPanelTab("mission");
                       }}
                     />
                   ) : (
@@ -800,127 +877,186 @@ export function App() {
                   )}
                 </div>
 
-                {/* Right Mission Timeline & Composer */}
+                {/* Right Flight Control Panel: Mission | Manual | Pre-Flight */}
                 <div className="flex min-h-[440px] flex-col bg-surface lg:min-h-0 lg:overflow-hidden">
-                  <div className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4">
-                    <span className="text-[14px] font-semibold text-primary">Mission</span>
-                    <div className="flex items-center gap-2.5">
-                      <span className="font-mono text-[12px] text-muted">{events.length} events</span>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        loading={resettingMission}
-                        onClick={() => void handleResetMission()}
+                  <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-4">
+                    <div className="flex gap-5" role="tablist" aria-label="Flight control panel">
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={flightPanelTab === "mission"}
+                        onClick={() => setFlightPanelTab("mission")}
+                        className={`border-b-2 py-3 text-[13.5px] font-medium transition-colors cursor-pointer ${
+                          flightPanelTab === "mission"
+                            ? "border-primary text-primary"
+                            : "border-transparent text-secondary hover:text-primary"
+                        }`}
                       >
-                        {!resettingMission && <RotateCcw size={13} />} {resettingMission ? "Resetting…" : "Reset"}
-                      </Button>
+                        Mission
+                      </button>
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={flightPanelTab === "manual"}
+                        onClick={() => setFlightPanelTab("manual")}
+                        className={`border-b-2 py-3 text-[13.5px] font-medium transition-colors cursor-pointer ${
+                          flightPanelTab === "manual"
+                            ? "border-primary text-primary"
+                            : "border-transparent text-secondary hover:text-primary"
+                        }`}
+                      >
+                        Manual
+                      </button>
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={flightPanelTab === "preflight"}
+                        onClick={() => {
+                          setFlightPanelTab("preflight");
+                          if (preflight.length === 0) void loadPreflight(false);
+                        }}
+                        className={`inline-flex items-center gap-1.5 border-b-2 py-3 text-[13.5px] font-medium transition-colors cursor-pointer ${
+                          flightPanelTab === "preflight"
+                            ? "border-primary text-primary"
+                            : "border-transparent text-secondary hover:text-primary"
+                        }`}
+                      >
+                        <span>Pre-Flight</span>
+                        {preflightWorstStatus !== "idle" && <StatusDot status={preflightWorstStatus} />}
+                      </button>
                     </div>
-                  </div>
 
-                  <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto">
-                    {events
-                      .slice(-60)
-                      .reverse()
-                      .map((ev) => (
-                        <div key={ev.id} className="px-4 py-3 text-[14px]">
-                          <div
-                            className={`mb-1 font-mono text-[11.5px] uppercase tracking-wide ${
-                              ev.kind === "emergency" ? "text-danger" : "text-muted"
-                            }`}
-                          >
-                            #{ev.id} · {ev.kind}
-                            {ev.tool ? ` · ${ev.tool}` : ""}
-                          </div>
-                          {ev.kind === "tool_use" || ev.kind === "tool_result" ? (
-                            <details>
-                              <summary className="cursor-pointer font-medium text-secondary">
-                                {String(ev.summary || ev.tool || ev.kind)}
-                              </summary>
-                              <pre className="mt-2 overflow-x-auto font-mono text-[12px] text-muted">
-                                {JSON.stringify(ev, null, 2)}
-                              </pre>
-                            </details>
-                          ) : (
-                            <span className="leading-relaxed text-primary">
-                              {String(ev.text || ev.summary || ev.error || ev.action || ev.target_label || "")}
-                            </span>
-                          )}
-                        </div>
-                      ))}
-                    {events.length === 0 && (
-                      <div className="px-5 py-10 text-center text-[14px] text-muted">
-                        Send a natural-language mission below or pick a quick instruction.
+                    {flightPanelTab === "mission" && (
+                      <div className="flex items-center gap-2">
+                        <span className="hidden font-mono text-[12px] text-muted sm:inline">{events.length} events</span>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          loading={resettingMission}
+                          onClick={() => void handleResetMission()}
+                        >
+                          {!resettingMission && <RotateCcw size={13} />} {resettingMission ? "Resetting…" : "Reset"}
+                        </Button>
                       </div>
                     )}
                   </div>
 
-                  <div className="flex shrink-0 flex-col gap-3 border-t border-border bg-canvas p-4">
-                    <div className="flex flex-wrap gap-1.5">
-                      {(
-                        activeScene?.prompts || [
-                          "Take off to 2 m, look around, and report what you see.",
-                          "Return home and land on the AprilTag pad.",
-                        ]
-                      ).map((prompt) => (
-                        <button
-                          key={prompt}
-                          type="button"
-                          onClick={() => void sendMission(prompt)}
-                          className="select-none rounded-[6px] border border-border bg-surface px-2.5 py-1.5 text-left text-[12.5px] text-secondary transition-colors duration-75 hover:border-border-strong hover:text-primary active:bg-hover cursor-pointer"
-                        >
-                          {prompt}
-                        </button>
-                      ))}
-                    </div>
-                    <Textarea
-                      rows={2}
-                      value={missionText}
-                      onChange={(e) => setMissionText(e.target.value)}
-                      onKeyDown={(e) => {
-                        if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && missionText.trim()) {
-                          void sendMission(missionText.trim());
-                        }
-                      }}
-                      placeholder="Give the AI pilot a mission (Ctrl/Cmd + Enter to send)…"
+                  {flightPanelTab === "mission" && (
+                    <>
+                      <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto">
+                        {events
+                          .slice(-60)
+                          .reverse()
+                          .map((ev) => (
+                            <div key={ev.id} className="px-4 py-3 text-[14px]">
+                              <div
+                                className={`mb-1 font-mono text-[11.5px] uppercase tracking-wide ${
+                                  ev.kind === "emergency" ? "text-danger" : "text-muted"
+                                }`}
+                              >
+                                #{ev.id} · {ev.kind}
+                                {ev.tool ? ` · ${ev.tool}` : ""}
+                              </div>
+                              {ev.kind === "tool_use" || ev.kind === "tool_result" ? (
+                                <details>
+                                  <summary className="cursor-pointer font-medium text-secondary">
+                                    {String(ev.summary || ev.tool || ev.kind)}
+                                  </summary>
+                                  <pre className="mt-2 overflow-x-auto font-mono text-[12px] text-muted">
+                                    {JSON.stringify(ev, null, 2)}
+                                  </pre>
+                                </details>
+                              ) : (
+                                <span className="leading-relaxed text-primary">
+                                  {String(ev.text || ev.summary || ev.error || ev.action || ev.target_label || "")}
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        {events.length === 0 && (
+                          <div className="px-5 py-10 text-center text-[14px] text-muted">
+                            Send a natural-language mission below, pick a quick instruction, or switch to the Manual tab.
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex shrink-0 flex-col gap-3 border-t border-border bg-canvas p-4">
+                        <div className="flex flex-wrap gap-1.5">
+                          {(
+                            activeScene?.prompts || [
+                              "Take off to 2 m, look around, and report what you see.",
+                              "Return home and land on the AprilTag pad.",
+                            ]
+                          ).map((prompt) => (
+                            <button
+                              key={prompt}
+                              type="button"
+                              onClick={() => void sendMission(prompt)}
+                              className="select-none rounded-[6px] border border-border bg-surface px-2.5 py-1.5 text-left text-[12.5px] text-secondary transition-colors duration-75 hover:border-border-strong hover:text-primary active:bg-hover cursor-pointer"
+                            >
+                              {prompt}
+                            </button>
+                          ))}
+                        </div>
+                        <Textarea
+                          rows={2}
+                          value={missionText}
+                          onChange={(e) => setMissionText(e.target.value)}
+                          onKeyDown={(e) => {
+                            if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && missionText.trim()) {
+                              void sendMission(missionText.trim());
+                            }
+                          }}
+                          placeholder="Give the AI pilot a mission (Ctrl/Cmd + Enter to send)…"
+                        />
+                        <div className="flex items-center justify-between gap-2">
+                          <button
+                            type="button"
+                            onClick={() => openSettings("ai")}
+                            className="text-[12.5px] text-secondary hover:text-primary hover:underline cursor-pointer"
+                          >
+                            {studioStatus?.ai_status.configured
+                              ? `${studioStatus.ai_status.provider} (${studioStatus.ai_status.model})`
+                              : "AI unconfigured: click to configure →"}
+                          </button>
+                          <Button
+                            variant="primary"
+                            disabled={!missionText.trim() || !running}
+                            loading={sendingMission}
+                            onClick={() => void sendMission(missionText.trim())}
+                          >
+                            {!sendingMission && <Send size={14} />} {sendingMission ? "Sending…" : "Send Mission"}
+                          </Button>
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {flightPanelTab === "manual" && (
+                    <ManualFlightPanel
+                      token={token}
+                      running={running}
+                      onManualMove={manualMove}
+                      onOpenSettings={openSettings}
                     />
-                    <div className="flex items-center justify-between gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setNav("ai")}
-                        className="text-[12.5px] text-secondary hover:text-primary hover:underline cursor-pointer"
-                      >
-                        {studioStatus?.ai_status.configured
-                          ? `${studioStatus.ai_status.provider} (${studioStatus.ai_status.model})`
-                          : "AI unconfigured — click to configure →"}
-                      </button>
-                      <Button
-                        variant="primary"
-                        disabled={!missionText.trim() || !running}
-                        loading={sendingMission}
-                        onClick={() => void sendMission(missionText.trim())}
-                      >
-                        {!sendingMission && <Send size={14} />} {sendingMission ? "Sending…" : "Send Mission"}
-                      </Button>
-                    </div>
-                  </div>
+                  )}
+
+                  {flightPanelTab === "preflight" && (
+                    <PreflightPanel
+                      items={preflight}
+                      loading={loadingPreflight}
+                      onRefresh={() => void loadPreflight(true)}
+                    />
+                  )}
                 </div>
               </div>
             ))}
-
-          {nav === "lab" && (
-            <FaultLabView
-              token={token}
-              studioStatus={studioStatus}
-              executorState={droneState?.state || "idle"}
-              onManualMove={manualMove}
-              onRefreshStatus={refreshStudio}
-            />
-          )}
 
           {nav === "worlds" && (
             <WorldsView
               token={token}
               studioStatus={studioStatus}
+              caps={caps}
               bootstrapping={bootstrapping}
               stoppingSession={stoppingSession}
               onBootstrap={handleBootstrap}
@@ -929,19 +1065,29 @@ export function App() {
             />
           )}
 
-          {nav === "ai" && <AiMcpView token={token} studioStatus={studioStatus} onUpdated={refreshStudio} />}
+          {nav === "settings" && (
+            <SettingsView
+              focusSection={settingsTab}
+              focusNonce={settingsFocusNonce}
+              token={token}
+              studioStatus={studioStatus}
+              caps={caps}
+              theme={theme}
+              onChangeTheme={setTheme}
+              onUpdated={refreshStudio}
+            />
+          )}
 
-          {(nav === "phone" || nav === "tuning" || nav === "system") && (
-            <SystemPhoneView
-              section={nav}
+          {nav === "system" && (
+            <SystemLogsView
               token={token}
               studioStatus={studioStatus}
               caps={caps}
               bootstrapping={bootstrapping}
               onBootstrap={handleBootstrap}
               onRefreshCaps={refreshCaps}
-              onSaved={refreshStudio}
               onNavigate={setNav}
+              onOpenSettings={openSettings}
             />
           )}
         </main>
@@ -950,9 +1096,14 @@ export function App() {
       <BottomTabBar
         nav={nav}
         onSelectNav={setNav}
+        onOpenSettings={openSettings}
         running={running}
         stoppingSession={stoppingSession}
-        targetLabel={studioStatus?.target_label || (sseState === "live" ? "Connected" : sseState)}
+        targetLabel={
+          sseState !== "live"
+            ? "Disconnected"
+            : studioStatus?.target_label || "Connected"
+        }
         statusDotKind={statusDotKind}
         aiConfigured={Boolean(studioStatus?.ai_status.configured)}
         readyCapsCount={readyCoreCapsCount}

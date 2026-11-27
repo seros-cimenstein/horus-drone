@@ -73,10 +73,19 @@ class StudioSettings:
     theme: str = "dark"
     # Flight & Vision tuning applied to Studio-launched sessions
     flight_speed_m_s: float = 1.2
+    vertical_speed_m_s: float = 0.5
+    turn_rate_deg_s: float = 30.0
+    arrival_tolerance_m: float = 0.25
+    command_ttl_s: float = 30.0
     link_loss_rth_delay_s: float = 30.0
     default_gimbal_pitch_deg: float = -15.0
     camera_max_fps: float = 5.0
     open_vocab_hz: float = 0.5
+    perception_render_width_px: int = 640
+    perception_point_compensation: bool = True
+    ai_max_tokens: int = 8000
+    ai_timeout_s: float = 180.0
+    ai_max_turns: int = 40
     grounder_url: str = "http://127.0.0.1:8100"
     grounder_backend: str = "auto"  # auto | cloud-vlm | grounding-dino-tiny | owlv2-base-patch16-ensemble
     recent_hardware: list[dict[str, Any]] = field(default_factory=list)
@@ -87,6 +96,14 @@ class StudioSettings:
             raw = data.get(key, default)
             try:
                 val = float(raw)
+            except (TypeError, ValueError):
+                return default
+            return max(lo, min(hi, val))
+
+        def _int(key: str, default: int, lo: int, hi: int) -> int:
+            raw = data.get(key, default)
+            try:
+                val = int(round(float(raw)))
             except (TypeError, ValueError):
                 return default
             return max(lo, min(hi, val))
@@ -112,10 +129,19 @@ class StudioSettings:
             prefer_3d_view=bool(data.get("prefer_3d_view", False)),
             theme="light" if data.get("theme") == "light" else "dark",
             flight_speed_m_s=_num("flight_speed_m_s", 1.2, 0.3, 12.0),
+            vertical_speed_m_s=_num("vertical_speed_m_s", 0.5, 0.2, 3.0),
+            turn_rate_deg_s=_num("turn_rate_deg_s", 30.0, 10.0, 120.0),
+            arrival_tolerance_m=_num("arrival_tolerance_m", 0.25, 0.1, 2.0),
+            command_ttl_s=_num("command_ttl_s", 30.0, 5.0, 120.0),
             link_loss_rth_delay_s=_num("link_loss_rth_delay_s", 30.0, 3.0, 300.0),
             default_gimbal_pitch_deg=_num("default_gimbal_pitch_deg", -15.0, -90.0, 45.0),
             camera_max_fps=_num("camera_max_fps", 5.0, 1.0, 30.0),
             open_vocab_hz=_num("open_vocab_hz", 0.5, 0.1, 5.0),
+            perception_render_width_px=_int("perception_render_width_px", 640, 160, 640),
+            perception_point_compensation=bool(data.get("perception_point_compensation", True)),
+            ai_max_tokens=_int("ai_max_tokens", 8000, 1000, 32000),
+            ai_timeout_s=_num("ai_timeout_s", 180.0, 30.0, 600.0),
+            ai_max_turns=_int("ai_max_turns", 40, 5, 100),
             grounder_url=str(data.get("grounder_url", "http://127.0.0.1:8100") or "").strip(),
             grounder_backend=grounder_backend,
             recent_hardware=list(data.get("recent_hardware") or [])[:8],
@@ -326,6 +352,9 @@ class StudioSettingsStore:
                 claude_command=settings.claude_command or "claude",
                 claude_model=c_model,
                 claude_effort=c_effort if c_effort in {"low", "medium", "high", "xhigh", "max"} else None,
+                max_tokens=settings.ai_max_tokens,
+                timeout_s=settings.ai_timeout_s,
+                max_turns=settings.ai_max_turns,
             )
             return cs, None, resolved
         if eff == "omp":
@@ -336,6 +365,9 @@ class StudioSettingsStore:
                 omp_command=settings.omp_command or "omp",
                 omp_model=o_model,
                 omp_thinking=o_think if o_think in {"off", "minimal", "low", "medium", "high", "xhigh", "max"} else None,
+                max_tokens=settings.ai_max_tokens,
+                timeout_s=settings.ai_timeout_s,
+                max_turns=settings.ai_max_turns,
             )
             return cs, None, resolved
         cs = CommanderSettings(
@@ -343,6 +375,9 @@ class StudioSettingsStore:
             model=model,
             base_url=resolved["base_url"],
             reasoning_effort=effort if eff == "openai" else None,
+            max_tokens=settings.ai_max_tokens,
+            timeout_s=settings.ai_timeout_s,
+            max_turns=settings.ai_max_turns,
         )
         return cs, resolved["api_key"], resolved
 
