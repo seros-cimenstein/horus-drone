@@ -93,7 +93,9 @@ def test_take_off_retries_arming_after_prearm_rejection(monkeypatch):
     executor.close()
 
 
-def test_ttl_expiry_stops_active_motion_and_enters_holding():
+def test_ttl_expiry_stops_active_motion_and_enters_holding(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     flight = FakeFlight()
     flight._telemetry.armed = True
     executor = HorusExecutor(flight, _settings(), autostart=False)
@@ -104,7 +106,7 @@ def test_ttl_expiry_stops_active_motion_and_enters_holding():
     assert executor.state == ExecutorState.EXECUTING
     assert any(command[0] == "velocity" and command[1] > 0 for command in flight.commands)
 
-    time.sleep(0.02)
+    clock[0] += 0.02
     executor.tick()
 
     status = executor.get_task_status(task["task_id"])
@@ -147,7 +149,9 @@ def test_emergency_hold_preempts_queued_skill_without_waiting_for_tick():
     executor.close()
 
 
-def test_hold_transitions_to_rth_after_link_loss_grace():
+def test_hold_transitions_to_rth_after_link_loss_grace(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     flight = FakeFlight()
     executor = HorusExecutor(
         flight, _settings(link_loss_rth_delay_s=0.01), autostart=False
@@ -155,7 +159,7 @@ def test_hold_transitions_to_rth_after_link_loss_grace():
     executor.hold()
     executor.tick()
     assert executor.state == ExecutorState.HOLDING
-    time.sleep(0.02)
+    clock[0] += 0.02
 
     executor.tick()
 
@@ -164,17 +168,19 @@ def test_hold_transitions_to_rth_after_link_loss_grace():
     executor.close()
 
 
-def test_supervisor_contact_keeps_hold_and_its_loss_triggers_rth():
+def test_supervisor_contact_keeps_hold_and_its_loss_triggers_rth(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     flight = FakeFlight()
     executor = HorusExecutor(flight, _settings(link_loss_rth_delay_s=0.05), autostart=False)
     executor.hold()
     for _ in range(4):  # a commander long-polling events keeps the link alive past the delay
-        time.sleep(0.02)
+        clock[0] += 0.02
         executor.note_supervisor_contact()
         executor.tick()
     assert executor.state == ExecutorState.HOLDING
 
-    time.sleep(0.07)
+    clock[0] += 0.07
     executor.tick()
 
     assert executor.state == ExecutorState.RTH
@@ -211,12 +217,14 @@ def test_operator_emergency_refuses_the_ai_until_released_but_not_the_operator()
     executor.close()
 
 
-def test_link_loss_rth_still_fires_during_an_operator_hold():
+def test_link_loss_rth_still_fires_during_an_operator_hold(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     flight = FakeFlight()
     executor = HorusExecutor(flight, _settings(link_loss_rth_delay_s=0.01), autostart=False)
     executor.hold(source="operator")
     executor.tick()
-    time.sleep(0.02)
+    clock[0] += 0.02
 
     executor.tick()
 
@@ -225,17 +233,19 @@ def test_link_loss_rth_still_fires_during_an_operator_hold():
     executor.close()
 
 
-def test_task_that_ends_on_a_disarmed_vehicle_never_arms_link_loss_rth():
+def test_task_that_ends_on_a_disarmed_vehicle_never_arms_link_loss_rth(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     flight = FakeFlight(Pose(0.0, 0.0, 0.2))  # on the ground, never armed
     executor = HorusExecutor(flight, _settings(link_loss_rth_delay_s=0.01), autostart=False)
     task = executor.submit_skill("take_off", {"altitude_m": 2.0}, ttl_s=0.02)
     executor.tick()
-    time.sleep(0.03)
+    clock[0] += 0.03
     executor.tick()
     assert executor.get_task_status(task["task_id"])["status"] == "expired"
     mark = len(flight.commands)
 
-    time.sleep(0.03)
+    clock[0] += 0.03
     for _ in range(3):
         executor.tick()
 
@@ -261,7 +271,9 @@ def _flying_goto(flight, executor, ttl_s=5.0):
 
 
 @pytest.mark.parametrize("taken_mode", ["LOITER", "RTL", "LAND"])
-def test_uncommanded_mode_change_cancels_work_and_horus_never_retakes_the_vehicle(taken_mode):
+def test_uncommanded_mode_change_cancels_work_and_horus_never_retakes_the_vehicle(taken_mode, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     flight = FakeFlight()
     event_bus = EventBus()
     executor = HorusExecutor(
@@ -278,7 +290,7 @@ def test_uncommanded_mode_change_cancels_work_and_horus_never_retakes_the_vehicl
     assert "pilot override" in status["error"]
     assert executor.state == ExecutorState.PILOT
     assert executor.get_state()["pilot_override"] == taken_mode
-    time.sleep(0.06)  # past both the task TTL and the link-loss RTH delay
+    clock[0] += 0.06  # past both the task TTL and the link-loss RTH delay
     for _ in range(3):
         executor.tick()
     for refused in (

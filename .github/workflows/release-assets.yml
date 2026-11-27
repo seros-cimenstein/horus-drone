@@ -73,7 +73,8 @@ jobs:
       - name: Build ArduCopter.exe (Copter-4.7.1) via Cygwin
         shell: C:\cygwin\bin\bash.exe --login -eo pipefail '{0}'
         run: |
-          python3 -m pip install empy==3.3.4 pexpect future pymavlink
+          python3 -m pip install empy==3.3.4 pexpect future
+          python3 -m pip install --no-deps pymavlink
           git clone --depth 1 --branch Copter-4.7.1 --recurse-submodules --shallow-submodules \
             https://github.com/ArduPilot/ardupilot.git /tmp/ardupilot
           cd /tmp/ardupilot
@@ -144,7 +145,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
-          gh release create "$TAG" artifacts/* \
-            --title "HORUS Pinned Assets ($TAG)" \
-            --notes "Pinned ArduCopter 4.7.1 SITL binaries and ONNX perception models for HORUS Studio." \
-            --clobber
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            gh release create "$TAG" artifacts/* \
+              --title "HORUS Pinned Assets ($TAG)" \
+              --notes "Pinned ArduCopter 4.7.1 SITL binaries and ONNX perception models for HORUS Studio."
+          fi
